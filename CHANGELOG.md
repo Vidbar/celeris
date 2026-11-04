@@ -13,9 +13,11 @@ listed here as well.
 
 ### Fixed
 
-- Linux: the engine did not compile with Zig 0.16 (`src/platform/linux.zig` used
-  `std.Thread.sleep` and `std.posix.write`, both removed in 0.16). 0.1.0 was
-  Windows-only in practice; use 0.1.1 on Linux.
+- Linux: 0.1.0 did not build on Linux at all, so it was Windows-only in practice;
+  use 0.1.1 there. `src/platform/linux.zig` and two examples used std APIs removed
+  in Zig 0.16 (`std.Thread.sleep`, `std.posix.write`, `std.os.linux.E.init`), and
+  the Windows UI Automation code was linked into `libceleris.so`. Linux is now
+  built and tested in CI (Ubuntu 24.04).
 
 ## 0.1.0 — 2026-11-03
 

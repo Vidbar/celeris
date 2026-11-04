@@ -658,7 +658,7 @@ pub const EngineState = struct {
         // never got around to releasing it, may be never. Force every in-process
         // client proxy to drop its cached references first so our own release
         // below is what actually brings the count to zero.
-        if (self.uia_provider) |p| {
+        if (uiaProvider(self)) |p| {
             uia.disconnectAllProviders();
             p.releaseRef();
             self.uia_provider = null;
@@ -1098,7 +1098,7 @@ fn createEngineInternal(headless: bool, win: EngineState.WindowParams) i32 {
 
     // The UIA provider is created during init() before the slot id is known;
     // hand it the id + action channel now so Invoke/Toggle can reach this engine.
-    if (g_engines[idx].uia_provider) |prov| {
+    if (uiaProvider(&g_engines[idx])) |prov| {
         prov.engine_id = id;
         prov.actions = &g_uia_action_channel;
     }
@@ -1385,7 +1385,7 @@ fn moveFocus(engine: *EngineState, new_focus: ?reg.NodeId, origin: events_mod.Fo
 
     // Announce the move to assistive tech. Single funnel: Tab, click, focus scopes
     // and UIA SetFocus all land here, so one call covers every origin.
-    if (engine.uia_provider) |prov| {
+    if (uiaProvider(engine)) |prov| {
         if (new_focus) |nf| prov.raiseFocusChanged(nf);
     }
 
@@ -1417,7 +1417,7 @@ fn moveFocus(engine: *EngineState, new_focus: ?reg.NodeId, origin: events_mod.Fo
 /// (which UIA property a `.checked`/`.expanded`/`.text` change means) lives here.
 fn uiaPropertyChanged(ctx: ?*anyopaque, node_id: reg.NodeId, changed: props.ChangedProp) void {
     const engine: *EngineState = @ptrCast(@alignCast(ctx orelse return));
-    const prov = engine.uia_provider orelse return;
+    const prov = uiaProvider(engine) orelse return;
     switch (changed) {
         // The Value element is the nearest self/ancestor with a textbox role; the
         // node that actually holds the text is usually its child, so walk up.
@@ -1662,6 +1662,13 @@ fn clickSynthTarget(store: *props.PropertyStore, registry: *reg.UIRegistry, focu
 // thread, to the real input path on the UI thread. The pattern object only calls
 // `invoke`; the marshaling + actual click live here, so the automation exercises
 // the exact same code a user's click does — no separate programmatic path to drift from real input.
+/// The engine's UIA provider. Comptime-null off Windows, so the UIA (COM) code
+/// behind every `if (uiaProvider(e)) |p|` is never analysed or linked there.
+inline fn uiaProvider(e: *EngineState) ?*uia.CelerisUiaProvider {
+    if (comptime builtin.os.tag != .windows) return null;
+    return e.uia_provider;
+}
+
 const UiaInvokeCtx = struct { engine_id: i32, node_id: reg.NodeId, intent: uia.InvokeIntent };
 
 /// Runs on the UI thread (drained from the task queue). Re-checks the action's

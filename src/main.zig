@@ -56,6 +56,6 @@ test {
     _ = @import("framework/verification_test.zig");
     _ = @import("framework/testkit_test.zig");
     _ = @import("platform/xdg_portal.zig");
-    _ = @import("platform/uia_test.zig");
+    if (@import("builtin").os.tag == .windows) _ = @import("platform/uia_test.zig");
     _ = @import("c_api.zig");
 }

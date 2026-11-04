@@ -27,12 +27,13 @@ const fw = celeris.framework;
 // Win32-only decl; the branch below is comptime-resolved, so it is pruned elsewhere.
 extern "kernel32" fn Sleep(dwMilliseconds: u32) callconv(.winapi) void;
 
-/// Cross-platform millisecond sleep (`std.Thread.sleep` is posix-only in 0.16).
+/// Cross-platform millisecond sleep (`std.Thread.sleep` was removed in Zig 0.16).
 fn sleepMs(ms: u32) void {
     if (builtin.os.tag == .windows) {
         Sleep(ms);
     } else {
-        std.Thread.sleep(@as(u64, ms) * std.time.ns_per_ms);
+        const ts: std.os.linux.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast((ms % 1000) * std.time.ns_per_ms) };
+        _ = std.os.linux.nanosleep(&ts, null);
     }
 }
 

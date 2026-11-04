@@ -1057,7 +1057,7 @@ fn ensureWakeFd() i32 {
     if (@atomicLoad(i32, &g_wake_fd, .acquire) >= 0) return g_wake_fd;
     // EFD_NONBLOCK (0x800) | EFD_CLOEXEC (0x80000).
     const rc = std.os.linux.eventfd(0, 0x80800);
-    if (std.os.linux.E.init(rc) != .SUCCESS) return -1;
+    if (std.os.linux.errno(rc) != .SUCCESS) return -1; // E.init removed in Zig 0.16
     @atomicStore(i32, &g_wake_fd, @intCast(rc), .release);
     return g_wake_fd;
 }
