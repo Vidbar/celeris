@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- celeris.dll is native x64; match it so the loader doesn't reject the arch. -->
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AssemblyName>HelloCeleris</AssemblyName>
+    <RootNamespace>HelloCeleris</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Project reference to the framework library -->
+  <ItemGroup>
+    <ProjectReference Include="..\Celeris.Net\Celeris.Net.csproj" />
+  </ItemGroup>
+
+</Project>

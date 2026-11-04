@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in Celeris doesn't work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest Zig, C or C# snippet that shows the problem. A failing `zig build test` case is ideal.
+      render: zig
+  - type: input
+    id: version
+    attributes:
+      label: Celeris version or commit
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - Linux (Wayland)
+    validations:
+      required: true
+  - type: input
+    id: zig
+    attributes:
+      label: Zig version
+      placeholder: 0.16.0
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run with `CELERIS_LOG=1` and paste the `[Celeris]` lines, plus any error output.
+      render: text

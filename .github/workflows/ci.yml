@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libwayland-bin libxkbcommon-dev libdecor-0-dev \
+            wayland-protocols fonts-dejavu-core
+
+      - name: Tests (unit, C-API fuzz gate, C host smoke test, fmt)
+        run: zig build test --summary all
+
+      - name: Examples compile
+        run: zig build examples
+
+      - name: Shared library + header
+        run: zig build
+
+  csharp:
+    name: C# binding
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Native library
+        run: zig build
+
+      - name: Build Celeris.Net + HelloCeleris
+        run: dotnet build bindings/csharp/HelloCeleris -c Release

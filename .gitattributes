@@ -1,0 +1,9 @@
+# Text files are checked out with LF on every platform, so builds and checks that
+# read sources (e.g. examples/doc_snippet_check.zig) see the same bytes everywhere.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.dll binary
+*.lib binary
+*.so binary
+*.ttf binary
+*.png binary

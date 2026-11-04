@@ -1,0 +1,25 @@
+.{
+    .name = .celeris,
+    .version = "0.1.0",
+
+    // Regenerated when the package was renamed to .celeris (2026-06-12).
+    .fingerprint = 0x577c6c4922f6851, // Changing this has security and trust implications.
+
+    .minimum_zig_version = "0.16.0",
+
+    .dependencies = .{},
+
+    // Files included in the package hash. Everything required to build:
+    // sources, vendored native libs, and the examples.
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "include",
+        "vendor",
+        "README.md",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
+    },
+}

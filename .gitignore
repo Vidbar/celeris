@@ -1,0 +1,32 @@
+# Zig
+.zig-cache/
+zig-cache/
+zig-out/
+
+# Binaries and temp (build outputs anywhere in the tree)
+*.exe
+*.obj
+*.pdb
+*.lib
+*.dll
+
+# Vendored native libraries are the exception: they must stay tracked
+# so the repo builds offline on a fresh machine.
+!vendor/**
+
+# Profiler output (zone profiler → Chrome Trace JSON, see src/core/profiler.zig)
+celeris_trace*.json
+trace_*.json
+
+# Scratch space for run logs and screenshots taken while debugging
+scratch/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Scratch test/build output dumps
+/err*.txt
+/full.txt
+/out.txt
+*.log
