@@ -11,7 +11,7 @@
     
     <!-- NuGet Package Properties -->
     <PackageId>Celeris.Net</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Authors>Celeris</Authors>
     <Description>C# bindings and framework for the Celeris engine.</Description>
   </PropertyGroup>

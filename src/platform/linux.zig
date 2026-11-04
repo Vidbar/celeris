@@ -1066,7 +1066,9 @@ fn ensureWakeFd() i32 {
 /// elapses. Falls back to a plain timeout if the display/fd isn't available.
 pub fn waitEvents(timeout_ms: u32) void {
     const d = conn.display orelse {
-        std.Thread.sleep(@as(u64, timeout_ms) * std.time.ns_per_ms);
+        // std.Thread.sleep was removed in Zig 0.16; use the raw syscall like the rest of this file.
+        const ts: std.os.linux.timespec = .{ .sec = @intCast(timeout_ms / 1000), .nsec = @intCast((timeout_ms % 1000) * std.time.ns_per_ms) };
+        _ = std.os.linux.nanosleep(&ts, null);
         return;
     };
     _ = c.wl_display_flush(d);
@@ -1092,5 +1094,5 @@ pub fn wake() void {
     const fd = @atomicLoad(i32, &g_wake_fd, .acquire);
     if (fd < 0) return;
     const one: u64 = 1;
-    _ = std.posix.write(fd, std.mem.asBytes(&one)) catch {};
+    _ = std.os.linux.write(fd, std.mem.asBytes(&one), @sizeOf(u64)); // std.posix.write removed in Zig 0.16
 }

@@ -9,6 +9,14 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.1.1 — 2026-11-04
+
+### Fixed
+
+- Linux: the engine did not compile with Zig 0.16 (`src/platform/linux.zig` used
+  `std.Thread.sleep` and `std.posix.write`, both removed in 0.16). 0.1.0 was
+  Windows-only in practice; use 0.1.1 on Linux.
+
 ## 0.1.0 — 2026-11-03
 
 First public release. Platforms: Windows 10+ (x64) and Linux (x64, Wayland).
