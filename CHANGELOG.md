@@ -9,6 +9,33 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.1.2 — 2026-11-05
+
+`CELERIS_ABI_VERSION` 5 (additive).
+
+### Added
+
+- **`on_resize`** — a node is told its solved size (`ev.width` / `ev.height`) after
+  every frame whose layout changed it, and once after the first solve; the
+  equivalent of the web's `ResizeObserver`. Use it as a box prop
+  (`.on_resize = ctx.handler(self, f)`) or `ctx.onResize(id, h)` for raw-builder
+  nodes. It never runs inside the layout solve. C hosts get
+  `CELERIS_EVENT_RESIZE` with the size in `x` / `y`.
+- **`VirtualList` / `VirtualGrid` `.fill = true`** — the viewport takes its parent's
+  size and tracks it: a bigger window materializes the rows/columns that now fit
+  without a scroll. `viewport_height` / `viewport_width` become the frame-0
+  estimate.
+- `examples/resize_list.zig`.
+
+### Fixed
+
+- `ScrollView` now reacts to resizes: the offset is re-clamped, the thumb resized,
+  and the scrollbar appears/disappears when the content stops/starts fitting —
+  previously all of that waited for the next wheel event.
+- Layout: flex grow/shrink started from a clean sibling's previous post-flex size
+  instead of its measured size, so a `grow` item kept its old width when a sibling
+  got wider and the line overflowed.
+
 ## 0.1.1 — 2026-11-04
 
 ### Fixed

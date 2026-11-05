@@ -38,7 +38,7 @@ extern "C" {
 
 /* C-ABI version of this header / build. Compare against celeris_abi_version() at
  * load time; a mismatch means the .dll/.so doesn't match this header. */
-#define CELERIS_ABI_VERSION 4u
+#define CELERIS_ABI_VERSION 5u
 uint32_t celeris_abi_version(void);
 
 /* ── Diagnostics: zone profiler ───────────────────────────────────────────────

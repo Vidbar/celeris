@@ -849,9 +849,10 @@ pub export fn celeris_last_error() [*:0]const u8 {
 
 /// The C-ABI version of this build (see include/celeris.h). Additive surface
 /// changes bump it; breaking changes are a new major. v3 adds the folder picker
-/// (celeris_pick_directory) and thread-safe repaint (celeris_request_redraw).
+/// (celeris_pick_directory) and thread-safe repaint (celeris_request_redraw);
+/// v5 adds the CELERIS_EVENT_RESIZE event type.
 pub export fn celeris_abi_version() u32 {
-    return 4;
+    return 5;
 }
 
 // ─── Diagnostics: zone profiler ────────────────────────────────────────────────
