@@ -164,7 +164,7 @@ pub const UIBuilder = struct {
     /// Self-closing — no close() call required.
     pub fn addText(self: *UIBuilder, content: []const u8) !NodeId {
         const id = try self.openNode(.text);
-        // Dupe into the store's string_arena so the slice lives as long as the store.
+        // Dupe via stringAllocator(); setTextContent takes ownership and frees it.
         const owned = try self.store.stringAllocator().dupe(u8, content);
         self.store.setTextContent(id, owned);
         self.close(); // text nodes never have children
@@ -748,7 +748,7 @@ pub const UIBuilder = struct {
     // ── Modifier properties ───────────────────────────────────────────────────
 
     pub fn clickable(self: *UIBuilder, id: NodeId, action_id: []const u8) !void {
-        // action_id must outlive the build pass — dupe into string_arena.
+        // action_id must outlive the build pass — dupe; setModifier takes ownership.
         const owned = try self.store.stringAllocator().dupe(u8, action_id);
         try self.store.setModifier(id, .clickable, .{ .string = owned });
     }

@@ -14,7 +14,7 @@ public enum CelerisEventType
     MouseMove = 0, MouseDown, MouseUp, RightMouseDown, RightMouseUp,
     MouseEnter, MouseLeave, GlobalMouseDown, Click, Focus, Blur,
     KeyDown, KeyUp, CharInput, Scroll, Tick, TextComposition, TextCommit,
-    Drop, DoubleClick, ScrollH,
+    Drop, DoubleClick, ScrollH, Resize,
 }
 
 [StructLayout(LayoutKind.Sequential)]

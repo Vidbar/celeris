@@ -162,6 +162,11 @@ pub const EventType = enum(c_int) {
     /// (positive = right). Emitted from a horizontal wheel/tilt or Shift+wheel.
     /// Appended last to keep the C-ABI enum stable.
     scroll_h,
+    /// A node observed via `on_resize` changed its solved size. `x`/`y` carry the
+    /// new border-box width/height (logical px) — same field-reuse precedent as
+    /// `double_click`'s `key_code`. Emitted after the frame is rendered, never
+    /// inside the layout solve. Appended last to keep the C-ABI enum stable.
+    resize,
 
     pub fn name(self: EventType) [:0]const u8 {
         return switch (self) {
@@ -186,6 +191,7 @@ pub const EventType = enum(c_int) {
             .drop => "drop",
             .double_click => "double_click",
             .scroll_h => "scroll_h",
+            .resize => "resize",
         };
     }
 };

@@ -92,8 +92,14 @@ pub fn VirtualGrid(comptime Datum: type) type {
         payload: ?*anyopaque = null,
 
         row_height: f32 = 24,
+        /// Fixed viewport size (px). With `fill` they are only the frame-0
+        /// estimate, used until the first solve reports the real size.
         viewport_width: f32 = 600,
         viewport_height: f32 = 400,
+        /// Size the viewport to 100%×100% of the parent and track the real size
+        /// via `on_resize`: a bigger window materializes more rows/columns
+        /// without a scroll.
+        fill: bool = false,
         /// Extra rows AND columns kept outside the viewport so a fast scroll
         /// doesn't flash blank before the next range rebuild.
         overdraw: u32 = 4,
@@ -118,6 +124,12 @@ pub fn VirtualGrid(comptime Datum: type) type {
         scope: signals.Scope = undefined,
         row_start_sig: *signals.Computed(usize) = undefined,
         col_start_sig: *signals.Computed(usize) = undefined,
+        /// Solved viewport size from `on_resize` (`fill` only); 0×0 = not solved
+        /// yet, use the `viewport_width/height` estimate.
+        measured: signals.Signal(Size) = undefined,
+        /// How many rows/columns the viewport spans, memoized from `measured`:
+        /// the range effect re-runs only when a resize changes what fits.
+        shape_sig: *signals.Computed(Shape) = undefined,
         /// Prefix sum of column widths: `col_offsets[c]` = x of column c's left
         /// edge, `col_offsets[col_count]` = total width. Rebuilt lazily when the
         /// observed `data_rev` moves.
@@ -138,12 +150,14 @@ pub fn VirtualGrid(comptime Datum: type) type {
         pub fn onMount(self: *Self, allocator: std.mem.Allocator) void {
             self.row_scroll_int = signals.Signal(f32).init(allocator, 0);
             self.col_scroll_int = signals.Signal(f32).init(allocator, 0);
+            self.measured = signals.Signal(Size).init(allocator, .{});
             self.scope = signals.Scope.init(allocator);
             self.col_offsets = std.array_list.Managed(f32).init(allocator);
         }
 
         pub fn deinit(self: *Self) void {
             self.scope.deinit();
+            self.measured.deinit();
             self.row_scroll_int.deinit();
             self.col_scroll_int.deinit();
             self.col_offsets.deinit();
@@ -162,9 +176,38 @@ pub fn VirtualGrid(comptime Datum: type) type {
 
         // ── Range math ─────────────────────────────────────────────────────────
 
+        const Size = struct { w: f32 = 0, h: f32 = 0 };
+        const Shape = struct { rows: usize, cols_px: i64 };
+
+        /// Viewport extent the window is sized for: the solved size once
+        /// `on_resize` reported it (`fill`), else the props.
+        fn vpW(self: *const Self) f32 {
+            const m = self.measured.peek();
+            return if (self.fill and m.w > 0) m.w else self.viewport_width;
+        }
+        fn vpH(self: *const Self) f32 {
+            const m = self.measured.peek();
+            return if (self.fill and m.h > 0) m.h else self.viewport_height;
+        }
+
+        /// `shape_sig`'s compute. Rows are exact; columns have variable widths, so
+        /// the width is bucketed to whole pixels (the column end is recomputed in
+        /// `populate` from the live width anyway).
+        fn computeShape(self: *Self) Shape {
+            _ = self.measured.get();
+            return .{ .rows = self.visibleRows(), .cols_px = @intFromFloat(@ceil(self.vpW())) };
+        }
+
+        fn onResize(self: *Self, ev: events.Event) void {
+            self.measured.set(.{ .w = ev.width, .h = ev.height });
+            // A bigger viewport lowers both max scrolls: re-clamp.
+            self.setRowScroll(self.rowScrollSig().peek());
+            self.setColScroll(self.colScrollSig().peek());
+        }
+
         fn visibleRows(self: *const Self) usize {
             if (self.row_height <= 0) return 0;
-            return @intFromFloat(@ceil(self.viewport_height / self.row_height));
+            return @intFromFloat(@ceil(self.vpH() / self.row_height));
         }
 
         fn windowRows(self: *const Self) usize {
@@ -236,7 +279,7 @@ pub fn VirtualGrid(comptime Datum: type) type {
         fn colEnd(self: *Self, c_start: usize) usize {
             const offs = self.col_offsets.items;
             if (offs.len < 2) return 0;
-            const right = self.colScrollSig().peek() + self.viewport_width;
+            const right = self.colScrollSig().peek() + self.vpW();
             var lo: usize = c_start;
             var hi: usize = offs.len; // exclusive
             while (lo < hi) {
@@ -260,7 +303,7 @@ pub fn VirtualGrid(comptime Datum: type) type {
         fn setRowScroll(self: *Self, value: f32) void {
             var t = value;
             if (t < 0) t = 0;
-            const max_t = @max(0.0, self.totalRowHeight() - self.viewport_height);
+            const max_t = @max(0.0, self.totalRowHeight() - self.vpH());
             if (t > max_t) t = max_t;
             self.rowScrollSig().set(t);
         }
@@ -268,7 +311,7 @@ pub fn VirtualGrid(comptime Datum: type) type {
         fn setColScroll(self: *Self, value: f32) void {
             var t = value;
             if (t < 0) t = 0;
-            const max_t = @max(0.0, self.totalColWidth() - self.viewport_width);
+            const max_t = @max(0.0, self.totalColWidth() - self.vpW());
             if (t > max_t) t = max_t;
             self.colScrollSig().set(t);
         }
@@ -341,8 +384,8 @@ pub fn VirtualGrid(comptime Datum: type) type {
             var rs = self.rowScrollSig().peek();
             if (cell_top < rs) {
                 rs = cell_top;
-            } else if (cell_bot > rs + self.viewport_height) {
-                rs = cell_bot - self.viewport_height;
+            } else if (cell_bot > rs + self.vpH()) {
+                rs = cell_bot - self.vpH();
             }
             self.setRowScroll(rs);
 
@@ -354,8 +397,8 @@ pub fn VirtualGrid(comptime Datum: type) type {
                 var cs = self.colScrollSig().peek();
                 if (cell_left < cs) {
                     cs = cell_left;
-                } else if (cell_right > cs + self.viewport_width) {
-                    cs = cell_right - self.viewport_width;
+                } else if (cell_right > cs + self.vpW()) {
+                    cs = cell_right - self.vpW();
                 }
                 self.setColScroll(cs);
             }
@@ -369,6 +412,7 @@ pub fn VirtualGrid(comptime Datum: type) type {
             const registry = self.registry orelse return;
             _ = self.row_start_sig.get(); // subscribe: vertical window shifts
             _ = self.col_start_sig.get(); // subscribe: horizontal window shifts
+            _ = self.shape_sig.get(); // subscribe: viewport resized (fill)
             if (self.data_rev) |rv| _ = rv.get(); // subscribe: data / widths change
             if (self.body_node == reg.NULL_NODE) return;
 
@@ -486,7 +530,18 @@ pub fn VirtualGrid(comptime Datum: type) type {
             self.measure = b.measure;
             self.theme = b.theme;
 
-            const viewport = try ctx.boxNode(.{
+            const viewport = if (self.fill) try ctx.boxNode(.{
+                .width = component.pct(100),
+                .height = component.pct(100),
+                .direction = .column,
+                .focusable = true,
+                .on_scroll = ctx.handler(self, onScrollY),
+                .on_scroll_h = ctx.handler(self, onScrollX),
+                .on_key = ctx.handler(self, onKey),
+                .on_resize = ctx.handler(self, onResize),
+            }, .{
+                Body{ .vg = self },
+            }) else try ctx.boxNode(.{
                 .width = self.viewport_width,
                 .height = self.viewport_height,
                 .direction = .column,
@@ -503,6 +558,7 @@ pub fn VirtualGrid(comptime Datum: type) type {
             if (!self.bound) {
                 self.row_start_sig = try self.scope.createComputed(usize, self, computeRowStart);
                 self.col_start_sig = try self.scope.createComputed(usize, self, computeColStart);
+                self.shape_sig = try self.scope.createComputed(Shape, self, computeShape);
                 _ = try self.scope.createEffect(self, rebuildRange);
                 _ = try self.scope.createEffect(self, updateTranslation);
                 self.bound = true;
@@ -616,6 +672,7 @@ const Props = struct {
     row_height: f32 = 20,
     viewport_width: f32 = 400,
     viewport_height: f32 = 400,
+    fill: bool = false,
     overdraw: u32 = 4,
     selected: ?*signals.Signal(CellRange) = null,
     data_rev: ?*signals.Signal(u32) = null,
@@ -795,4 +852,41 @@ test "VirtualGrid data_rev bump rebuilds the column prefix sum and re-materializ
     try testing.expectApproxEqAbs(@as(f32, 80 + 120 + 80 + 120 + 80 + 120), vg.totalColWidth(), 0.001);
     const strip1 = firstStrip(&env.registry, vg.body_node);
     try testing.expectEqual(@as(usize, 6), cellCount(&env.registry, strip1));
+}
+
+test "VirtualGrid fill: growing the window materializes more rows and columns, no scroll needed" {
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var src = Src{};
+
+    var b = component.UIBuilder.init(&env.registry, &env.store);
+    b.theme = theme_mod.Theme.dark();
+    var ctx = BuildContext{ .builder = &b, .router = &env.router, .mounts = &env.mounts };
+    const root = try b.openNodeKeyed(.box, null);
+    try b.width(root, 100, .percent);
+    try b.height(root, 100, .percent);
+    var p = baseProps(&src);
+    p.fill = true;
+    p.viewport_width = 100; // deliberately wrong frame-0 estimates
+    p.viewport_height = 100;
+    try ctx.mountOwned(VG, p);
+    b.close();
+    const vg: *VG = @ptrCast(@alignCast(env.mounts.get(env.registry.getNode(root).?.first_child).?.component_ptr));
+
+    try testing.expectEqual(@as(usize, 5 + 8), vg.windowRows());
+    const cells_est = cellCount(&env.registry, firstStrip(&env.registry, vg.body_node));
+
+    _ = try env.frame(root, 400, 400);
+    _ = try env.frame(root, 400, 400);
+    try testing.expectEqual(@as(usize, 20 + 8), vg.windowRows());
+    try testing.expectEqual(@as(usize, 30), childCount(&env.registry, vg.body_node));
+    const cells_400 = cellCount(&env.registry, firstStrip(&env.registry, vg.body_node));
+    try testing.expect(cells_400 > cells_est);
+
+    _ = try env.frame(root, 1200, 1000);
+    _ = try env.frame(root, 1200, 1000);
+    try testing.expectEqual(@as(usize, 50 + 8), vg.windowRows());
+    const cells_1200 = cellCount(&env.registry, firstStrip(&env.registry, vg.body_node));
+    try testing.expect(cells_1200 > cells_400);
 }

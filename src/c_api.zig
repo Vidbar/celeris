@@ -1603,6 +1603,30 @@ fn nextClickCount(prev_count: u32, dt_ms: i64, dist_sq: f32) u32 {
     return 1;
 }
 
+/// Reports every `on_resize`-observed node whose solved size changed in the last
+/// solve. Called after `bakeAndRender`, never inside the solve: a handler may
+/// rebuild or remove nodes, and that must land in the *next* frame's solve rather
+/// than leave this frame's bake with unsolved geometry. Each node reports at most
+/// once per solve, so a size↔content feedback loop advances one frame at a time
+/// instead of spinning. Changes are collected first because delivery can mutate
+/// the observer list.
+fn emitResizes(engine: *EngineState) void {
+    if (engine.registry.resize_observers.items.len == 0) return;
+    const gpa = engine.registry.allocator;
+    var changed: std.ArrayListUnmanaged(reg.UIRegistry.Resized) = .empty;
+    defer changed.deinit(gpa);
+    engine.registry.collectResized(&changed, gpa) catch |e| {
+        log.warn("on_resize: collecting size changes failed: {}\n", .{e});
+    };
+    for (changed.items) |r| {
+        // An earlier handler in this batch may have removed the node.
+        // (`observe_resize` also guards a slot recycled within the batch.)
+        const node = engine.registry.getNode(r.id) orelse continue;
+        if (!node.observe_resize) continue;
+        emitEvent(engine, .resize, r.id, "", r.w, r.h, 0, 0, "", 0);
+    }
+}
+
 fn emitEvent(
     engine: *EngineState,
     event_type: events_mod.EventType,
@@ -2277,6 +2301,9 @@ fn liveResizeCallback(handle: platform_mod.NativeWindowHandle, width: u32, heigh
     }
 
     bakeAndRender(engine, true) catch return;
+    // During a modal live-resize the main loop is blocked, so this is the only
+    // place observers learn the new size while the user is still dragging.
+    emitResizes(engine);
 }
 
 pub export fn celeris_start_loop() i32 {
@@ -2463,6 +2490,10 @@ pub export fn celeris_start_loop() i32 {
             };
             bz.end();
             rendered_any = true;
+            // After the frame is on screen: report size changes from this frame's
+            // solve. A handler's writes dirty layout, and `rendered_any` keeps the
+            // loop from blocking, so the reaction lands next frame.
+            emitResizes(engine);
             if (profile) {
                 const dt = nowNs() - rt0;
                 prof_renders += 1;

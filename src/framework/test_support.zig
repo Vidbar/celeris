@@ -73,6 +73,31 @@ pub const Harness = struct {
         engine.solve(root, 0, 0, w, h);
     }
 
+    /// Deliver `on_resize` events for the last `solve`, exactly as the engine does
+    /// after a rendered frame (`c_api.emitResizes`): collect the changed observed
+    /// nodes, then route one `resize` per node that is still alive and observed.
+    /// Returns how many were delivered.
+    pub fn deliverResizes(self: *Harness) !usize {
+        const gpa = self.registry.allocator;
+        var changed: std.ArrayListUnmanaged(reg.UIRegistry.Resized) = .empty;
+        defer changed.deinit(gpa);
+        try self.registry.collectResized(&changed, gpa);
+        var n: usize = 0;
+        for (changed.items) |r| {
+            const node = self.registry.getNode(r.id) orelse continue;
+            if (!node.observe_resize) continue;
+            _ = self.router.route(.{ .name = "resize", .id = "", .node_id = r.id, .width = r.w, .height = r.h });
+            n += 1;
+        }
+        return n;
+    }
+
+    /// `solve` followed by `deliverResizes` — one frame as the observer sees it.
+    pub fn frame(self: *Harness, root: reg.NodeId, w: f32, h: f32) !usize {
+        self.solve(root, w, h);
+        return self.deliverResizes();
+    }
+
     /// Resolved geometry of `id` after `solve` — all zeroes if the node is gone.
     pub fn geom(self: *Harness, id: reg.NodeId) reg.Geometry {
         const node = self.registry.getNode(id) orelse return .{};

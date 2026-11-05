@@ -49,6 +49,11 @@ pub const Event = struct {
     y: f32 = 0,
     key_code: u32 = 0,
     scroll_delta: f32 = 0,
+    /// `resize`: the node's new solved border-box size (logical px). On the C ABI
+    /// these travel in `x`/`y`; here they get their own names so a handler never
+    /// confuses them with a pointer position.
+    width: f32 = 0,
+    height: f32 = 0,
     /// char_input / IME composed text (UTF-8).
     text: []const u8 = "",
     /// Keyboard modifiers held during the event.
@@ -93,6 +98,8 @@ pub const EventKind = enum {
     text_composition,
     text_commit,
     double_click,
+    /// Solved size changed (`on_resize`); `Event.width/height` carry the size.
+    resize,
 };
 
 /// Maps an engine event name to the `EventKind` used for node-handler lookup, or
@@ -117,6 +124,7 @@ pub fn kindFromName(name: []const u8) ?EventKind {
         .{ "text_composition", EventKind.text_composition },
         .{ "text_commit", EventKind.text_commit },
         .{ "double_click", EventKind.double_click },
+        .{ "resize", EventKind.resize },
     };
     inline for (map) |m| {
         if (std.mem.eql(u8, name, m[0])) return m[1];
@@ -288,6 +296,14 @@ pub const EventRouter = struct {
     /// Registers (or replaces) the handler for `(node, kind)`. Replacing in place is
     /// what keeps the table from growing across rebuilds — a build re-applies the
     /// same props, so the same (node, kind) pair is overwritten, not duplicated.
+    /// The handler registered for (`node`, `kind`), if any.
+    pub fn nodeHandler(self: *const EventRouter, node: u32, kind: EventKind) ?Handler {
+        for (self.node_handlers.items) |e| {
+            if (e.node == node and e.kind == kind) return e.h;
+        }
+        return null;
+    }
+
     pub fn onNode(self: *EventRouter, node: u32, kind: EventKind, h: Handler) !void {
         for (self.node_handlers.items) |*e| {
             if (e.node == node and e.kind == kind) {
@@ -521,6 +537,13 @@ pub const EventRouter = struct {
     /// Routes a structured C-ABI event (the live path) — no JSON parsing.
     pub fn dispatchEvent(self: *EventRouter, ev: *const core_events.CelerisEvent) usize {
         const et: core_events.EventType = @enumFromInt(ev.event_type);
+        if (et == .resize) return self.route(.{
+            .name = et.name(),
+            .id = std.mem.span(ev.action_id),
+            .width = ev.x,
+            .height = ev.y,
+            .node_id = ev.node_id,
+        });
         return self.route(.{
             .name = et.name(),
             .id = std.mem.span(ev.action_id),

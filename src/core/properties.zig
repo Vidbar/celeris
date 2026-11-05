@@ -224,8 +224,9 @@ pub const ChangedProp = union(enum) {
 /// Central property store.  NodeIds are dense u32 starting at 0, so we use a
 /// direct-indexed ArrayList — O(1) lookup without any hash overhead.
 ///
-/// String values (identifiers, text content) are owned by `string_arena`
-/// and freed as a batch in `deinit`, avoiding per-string tracking.
+/// String values (identifiers, text content) are allocated from
+/// `stringAllocator()` (the store's general allocator). The setter that receives
+/// one takes ownership and frees it when it is replaced, cleared, or on `deinit`.
 pub const PropertyStore = struct {
     /// Indexed directly by NodeId. `props.items[id]` is always valid after
     /// `registerNode(id)` because we fill gaps with empty NodeProps.

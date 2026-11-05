@@ -160,7 +160,8 @@ typedef enum CelerisEventType {
     CELERIS_EVENT_TEXT_COMMIT,      /* IME commit (text = finalized string) */
     CELERIS_EVENT_DROP,             /* drag-and-drop (text = uri-list / path / text) */
     CELERIS_EVENT_DOUBLE_CLICK,     /* double/triple click; key_code = click count (2|3) */
-    CELERIS_EVENT_SCROLL_H          /* horizontal scroll; scroll_delta = notches (+ = right) */
+    CELERIS_EVENT_SCROLL_H,         /* horizontal scroll; scroll_delta = notches (+ = right) */
+    CELERIS_EVENT_RESIZE            /* observed node's solved size changed; x = width, y = height */
 } CelerisEventType;
 
 /* A structured UI event. action_id/text are engine-owned, NUL-terminated, and

@@ -74,6 +74,11 @@ pub const ScrollView = struct {
     // State (auto-created in onMount; preserved across rebuilds). `scroll_offset` is
     // the fallback when the caller passes no `offset` signal.
     scroll_offset: signals.Signal(f32) = undefined,
+    /// Solved heights reported by `on_resize` (0 = not solved yet). The visuals
+    /// effect subscribes to both, so a window resize or content growth updates
+    /// the thumb and re-clamps the offset without waiting for a wheel event.
+    viewport_h_sig: signals.Signal(f32) = undefined,
+    content_h_sig: signals.Signal(f32) = undefined,
     scope: signals.Scope = undefined,
     dragging: bool = false,
     drag_start_y: f32 = 0,
@@ -91,12 +96,28 @@ pub const ScrollView = struct {
 
     pub fn onMount(self: *ScrollView, allocator: std.mem.Allocator) void {
         self.scroll_offset = signals.Signal(f32).init(allocator, 0);
+        self.viewport_h_sig = signals.Signal(f32).init(allocator, 0);
+        self.content_h_sig = signals.Signal(f32).init(allocator, 0);
         self.scope = signals.Scope.init(allocator);
     }
 
     pub fn deinit(self: *ScrollView) void {
         self.scope.deinit();
+        self.content_h_sig.deinit();
+        self.viewport_h_sig.deinit();
         self.scroll_offset.deinit();
+    }
+
+    fn onViewportResize(self: *ScrollView, ev: events.Event) void {
+        self.viewport_h_sig.set(ev.height);
+        self.setScrollClamped(self.offsetSig().peek());
+    }
+
+    fn onContentResize(self: *ScrollView, ev: events.Event) void {
+        // Safe to observe this hug-sized node: the handler only writes the thumb
+        // and the render-only offset, neither of which changes the content's size.
+        self.content_h_sig.set(ev.height);
+        self.setScrollClamped(self.offsetSig().peek());
     }
 
     /// Removes the global drag handler before the instance is freed.
@@ -131,6 +152,8 @@ pub const ScrollView = struct {
     /// Prefers the resolved layout height of the content wrapper over the
     /// caller's `content_height` estimate (available once a solve has run).
     fn contentHeightNow(self: *const ScrollView) f32 {
+        const reported = self.content_h_sig.peek();
+        if (reported > 0) return reported;
         if (self.registry) |r| {
             if (r.getNode(self.wrapper_node)) |node| {
                 if (node.geometry.height > 0) return node.geometry.height;
@@ -144,6 +167,8 @@ pub const ScrollView = struct {
     /// has run; otherwise, and before the first solve, the `viewport_height` prop.
     fn viewportHeightNow(self: *const ScrollView) f32 {
         if (self.fill or self.viewport_height == DEFAULT_VIEWPORT_HEIGHT) {
+            const reported = self.viewport_h_sig.peek();
+            if (reported > 0) return reported;
             if (self.registry) |r| {
                 if (r.getNode(self.viewport_node)) |node| {
                     if (node.geometry.height > 0) return node.geometry.height;
@@ -211,6 +236,9 @@ pub const ScrollView = struct {
         const store = self.store orelse return;
         if (self.viewport_node == reg.NULL_NODE) return;
         const offset = self.offsetSig().get();
+        // Subscribe: a resize of the viewport or the content resizes the thumb.
+        _ = self.viewport_h_sig.get();
+        _ = self.content_h_sig.get();
 
         // Scroll is a render-only translation — `scroll_offset_y` shifts the
         // viewport's children (wrapper + content) without a global layout solve.
@@ -247,6 +275,7 @@ const Body = struct {
             .grow = 1,
             .height = component.pct(100),
             .on_scroll = ctx.handler(sv, ScrollView.onScroll),
+            .on_resize = ctx.handler(sv, ScrollView.onViewportResize),
         }, .{
             Wrapper{ .sv = sv },
         });
@@ -301,6 +330,8 @@ const Wrapper = struct {
         const wrapper = try b.openNodeKeyed(.box, null);
         self.sv.wrapper_node = wrapper;
         try b.width(wrapper, 100, .percent);
+        // Observe the content's solved height.
+        try ctx.onResize(wrapper, ctx.handler(self.sv, ScrollView.onContentResize));
         // No scrollbar padding here: the track is a sibling of the viewport, so the
         // channel is already outside this box. The 20px that used to live here
         // double-counted it and shaved that much off every full-width row.
@@ -586,4 +617,39 @@ test "ScrollView: an explicit viewport_height without fill is honored (backward 
         _ = env.router.route(.{ .name = "scroll", .id = "", .node_id = sv.viewport_node, .scroll_delta = -1.0 });
     }
     try testing.expectApproxEqAbs(@as(f32, -700.0), sv.scroll_offset.peek(), 0.001);
+}
+
+test "ScrollView fill: a window resize re-clamps the offset and resizes the thumb with no wheel event" {
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+
+    var tall = TallChild{};
+    const sv = try mountScrollView(&env, .{
+        .fill = true,
+        .content = component.childOf(TallChild, &tall),
+        .content_height = 1000,
+    });
+    try env.store.setLayout(0, .width, .{ .dimension = .{ .value = 100, .unit = .percent } });
+    try env.store.setLayout(0, .height, .{ .dimension = .{ .value = 100, .unit = .percent } });
+
+    // 400px window: viewport and content both report on the first frame.
+    _ = try env.frame(0, 300, 400);
+    try testing.expectApproxEqAbs(@as(f32, 400), sv.viewport_h_sig.peek(), 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 1000), sv.content_h_sig.peek(), 0.5);
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        _ = env.router.route(.{ .name = "scroll", .id = "", .node_id = sv.viewport_node, .scroll_delta = -1.0 });
+    }
+    try testing.expectApproxEqAbs(@as(f32, -600), sv.scroll_offset.peek(), 0.01); // bottom
+    _ = try env.frame(0, 300, 400);
+    const thumb_400 = env.geom(sv.thumb_node).height;
+
+    // Window grows to 800: max scroll is now 200 — the offset follows without a
+    // wheel event (before on_resize it stayed at -600, past the end), and the
+    // thumb grows because more of the content is visible.
+    _ = try env.frame(0, 300, 800);
+    try testing.expectApproxEqAbs(@as(f32, -200), sv.scroll_offset.peek(), 0.01);
+    _ = try env.frame(0, 300, 800);
+    try testing.expect(env.geom(sv.thumb_node).height > thumb_400 + 1);
 }

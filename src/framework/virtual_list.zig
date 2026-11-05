@@ -59,7 +59,13 @@ pub fn VirtualList(comptime Item: type) type {
         /// of it — only the visible window.
         items: []const Item = &.{},
         item_height: f32 = 24,
+        /// Fixed viewport height (px). With `fill` it is only the frame-0 estimate,
+        /// used until the first solve reports the real height.
         viewport_height: f32 = 400,
+        /// Size the viewport to 100% of the parent's height and track the real
+        /// height via `on_resize`: growing the window materializes more rows
+        /// without a scroll, shrinking it materializes fewer.
+        fill: bool = false,
         /// Extra rows kept above/below the viewport so a fast scroll doesn't flash
         /// blank before the next range rebuild.
         overdraw: u32 = 4,
@@ -72,8 +78,14 @@ pub fn VirtualList(comptime Item: type) type {
 
         // ── State (created in onMount / first build) ────────────────────────────
         scroll_top: signals.Signal(f32) = undefined,
+        /// Solved viewport height from `on_resize` (`fill` only); 0 = not solved
+        /// yet, use the `viewport_height` estimate.
+        measured_h: signals.Signal(f32) = undefined,
         scope: signals.Scope = undefined,
         start_sig: *signals.Computed(usize) = undefined,
+        /// Materialized row count, memoized from `measured_h`: the range effect
+        /// re-runs only when a resize changes how many rows fit, not per pixel.
+        win_sig: *signals.Computed(usize) = undefined,
 
         // ── Captured during build() ─────────────────────────────────────────────
         store: ?*props.PropertyStore = null,
@@ -88,24 +100,39 @@ pub fn VirtualList(comptime Item: type) type {
 
         pub fn onMount(self: *Self, allocator: std.mem.Allocator) void {
             self.scroll_top = signals.Signal(f32).init(allocator, 0);
+            self.measured_h = signals.Signal(f32).init(allocator, 0);
             self.scope = signals.Scope.init(allocator);
         }
 
         pub fn deinit(self: *Self) void {
-            // Effects (range + translation) and the computed's recompute effect are
-            // torn down first, unsubscribing while scroll_top is still alive; then
-            // the signal is freed.
+            // Effects (range + translation) and the computeds' recompute effects are
+            // torn down first, unsubscribing while the signals are still alive; then
+            // the signals are freed.
             self.scope.deinit();
+            self.measured_h.deinit();
             self.scroll_top.deinit();
         }
 
         // ── Range math ──────────────────────────────────────────────────────────
 
+        /// The viewport height the window is sized for: the solved height once
+        /// `on_resize` reported it (`fill`), else the `viewport_height` prop.
+        fn viewportH(self: *const Self) f32 {
+            const m = self.measured_h.peek();
+            return if (self.fill and m > 0) m else self.viewport_height;
+        }
+
         /// Number of rows materialized: the visible count plus overdraw both sides.
         fn windowLen(self: *const Self) usize {
             if (self.item_height <= 0) return 0;
-            const vis: usize = @intFromFloat(@ceil(self.viewport_height / self.item_height));
+            const vis: usize = @intFromFloat(@ceil(self.viewportH() / self.item_height));
             return vis + 2 * @as(usize, self.overdraw);
+        }
+
+        /// `win_sig`'s compute: subscribes to `measured_h`, memoized on the count.
+        fn computeWindow(self: *Self) usize {
+            _ = self.measured_h.get();
+            return self.windowLen();
         }
 
         fn totalHeight(self: *const Self) f32 {
@@ -133,9 +160,16 @@ pub fn VirtualList(comptime Item: type) type {
         fn setScrollClamped(self: *Self, value: f32) void {
             var t = value;
             if (t < 0) t = 0;
-            const max_t = @max(0.0, self.totalHeight() - self.viewport_height);
+            const max_t = @max(0.0, self.totalHeight() - self.viewportH());
             if (t > max_t) t = max_t;
             self.scroll_top.set(t);
+        }
+
+        fn onResize(self: *Self, ev: events.Event) void {
+            self.measured_h.set(ev.height);
+            // A taller viewport lowers the max scroll: re-clamp so a list scrolled
+            // to the bottom doesn't leave a gap under its last row.
+            self.setScrollClamped(self.scroll_top.peek());
         }
 
         // ── Effects ───────────────────────────────────────────────────────────────
@@ -145,6 +179,7 @@ pub fn VirtualList(comptime Item: type) type {
         fn rebuildRange(self: *Self) void {
             const registry = self.registry orelse return;
             _ = self.start_sig.get(); // subscribe: window shifts
+            _ = self.win_sig.get(); // subscribe: window grows/shrinks (resize)
             if (self.data_rev) |rv| _ = rv.get(); // subscribe: data changes
             if (self.body_node == reg.NULL_NODE) return;
 
@@ -161,7 +196,7 @@ pub fn VirtualList(comptime Item: type) type {
 
         fn populate(self: *Self, b: *builder_mod.UIBuilder, ctx: *BuildContext) !void {
             const count = self.items.len;
-            const win = self.windowLen();
+            const win = self.win_sig.peek(); // already subscribed in rebuildRange
             var start = self.start_sig.peek(); // already subscribed in rebuildRange
             var end = start + win;
             if (end > count) end = count;
@@ -214,7 +249,17 @@ pub fn VirtualList(comptime Item: type) type {
             self.theme = b.theme;
 
             // Viewport clips the overflow and owns the wheel (routed here by node id).
-            const viewport = try ctx.boxNode(.{
+            // With `fill` the viewport takes its parent's height and reports the real
+            // value through `on_resize` (first solve included).
+            const viewport = if (self.fill) try ctx.boxNode(.{
+                .width = component.pct(100),
+                .height = component.pct(100),
+                .direction = .column,
+                .on_scroll = ctx.handler(self, onScroll),
+                .on_resize = ctx.handler(self, onResize),
+            }, .{
+                Body{ .vl = self },
+            }) else try ctx.boxNode(.{
                 .width = component.pct(100),
                 .height = self.viewport_height,
                 .direction = .column,
@@ -228,6 +273,7 @@ pub fn VirtualList(comptime Item: type) type {
             if (!self.bound) {
                 // `body` exists now; the range effect's first run populates it.
                 self.start_sig = try self.scope.createComputed(usize, self, computeStart);
+                self.win_sig = try self.scope.createComputed(usize, self, computeWindow);
                 _ = try self.scope.createEffect(self, rebuildRange);
                 _ = try self.scope.createEffect(self, updateTranslation);
                 self.bound = true;
@@ -499,4 +545,93 @@ test "VirtualList mount/unmount ×64 without leaks" {
         b.close();
     }
     // testing.allocator asserts no leaks at env.deinit().
+}
+
+fn mountVLIn(env: *TestEnv, init_props: anytype) !struct { vl: *VL, root: reg.NodeId } {
+    var b = component.UIBuilder.init(&env.registry, &env.store);
+    b.theme = theme_mod.Theme.dark();
+    var ctx = BuildContext{ .builder = &b, .router = &env.router, .mounts = &env.mounts };
+    const root = try b.openNodeKeyed(.box, null);
+    try b.width(root, 100, .percent);
+    try b.height(root, 100, .percent);
+    try ctx.mountOwned(VL, init_props);
+    b.close();
+    const anchor = env.registry.getNode(root).?.first_child;
+    return .{ .vl = @ptrCast(@alignCast(env.mounts.get(anchor).?.component_ptr)), .root = root };
+}
+
+/// The row wrapper keyed by absolute index `idx`, or null if not materialized.
+fn rowAt(env: *TestEnv, vl: *VL, idx: usize) ?reg.NodeId {
+    var nodes = std.array_list.Managed(reg.NodeId).init(testing.allocator);
+    defer nodes.deinit();
+    rowNodes(&env.registry, vl.body_node, &nodes) catch return null;
+    // [top spacer, rows start.., bottom spacer]
+    const start = vl.start_sig.peek();
+    if (idx < start or idx - start + 1 >= nodes.items.len - 1) return null;
+    return nodes.items[idx - start + 1];
+}
+
+test "VirtualList fill: growing the window materializes the rows that now fit, no scroll needed" {
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+
+    var items: [10_000]Row = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .n = i };
+    var rec = Recorder{};
+
+    const m = try mountVLIn(&env, .{
+        .items = @as([]const Row, &items),
+        .item_height = 20,
+        .viewport_height = 100, // deliberately wrong estimate: 5 rows
+        .fill = true,
+        .overdraw = 2,
+        .render = VL.renderFn(*Recorder, Recorder.draw),
+        .payload = &rec,
+    });
+    // Frame 0 builds from the estimate.
+    try testing.expectEqual(@as(usize, 5 + 4), m.vl.windowLen());
+
+    // First frame at 800×400: the solve reports 400px → 20 visible rows.
+    _ = try env.frame(m.root, 800, 400);
+    try testing.expectEqual(@as(usize, 20 + 4), m.vl.windowLen());
+    _ = try env.frame(m.root, 800, 400); // apply the rebuilt window
+    try testing.expect(env.isVisible(rowAt(&env, m.vl, 19).?));
+    try testing.expect(rowAt(&env, m.vl, 30) == null);
+
+    // Window grows to 900: row 44 (y = 880) is now on screen and must exist —
+    // this is the "empty band until the next scroll" the client hit.
+    _ = try env.frame(m.root, 800, 900);
+    _ = try env.frame(m.root, 800, 900);
+    try testing.expectEqual(@as(usize, 45 + 4), m.vl.windowLen());
+    const row44 = rowAt(&env, m.vl, 44).?;
+    try testing.expect(env.isVisible(row44));
+    try testing.expectApproxEqAbs(@as(f32, 880), env.geom(row44).y, 0.5);
+
+    // Shrinking materializes fewer rows again.
+    _ = try env.frame(m.root, 800, 200);
+    _ = try env.frame(m.root, 800, 200);
+    try testing.expectEqual(@as(usize, 10 + 4), m.vl.windowLen());
+}
+
+test "VirtualList fill: a resize re-clamps a list scrolled to the bottom" {
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+
+    var items: [100]Row = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .n = i };
+    var rec = Recorder{};
+    const m = try mountVLIn(&env, .{
+        .items = @as([]const Row, &items),
+        .item_height = 20,
+        .fill = true,
+        .render = VL.renderFn(*Recorder, Recorder.draw),
+        .payload = &rec,
+    });
+    _ = try env.frame(m.root, 800, 400);
+    m.vl.setScrollClamped(1e9); // bottom: 2000 - 400
+    try testing.expectApproxEqAbs(@as(f32, 1600), m.vl.scroll_top.peek(), 0.01);
+    _ = try env.frame(m.root, 800, 1000);
+    try testing.expectApproxEqAbs(@as(f32, 1000), m.vl.scroll_top.peek(), 0.01);
 }

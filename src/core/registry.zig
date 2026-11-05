@@ -105,6 +105,14 @@ pub const Node = struct {
     layout_w: f32 = -1.0,
     layout_h: f32 = -1.0,
 
+    /// Size observation (`on_resize`). `observe_resize` marks membership in
+    /// `UIRegistry.resize_observers`; `resize_last_w/h` is the size last reported
+    /// (seeded -1 so the first solve after observation always reports). A recycled
+    /// slot is re-initialized by `createNode`, so these never leak across nodes.
+    observe_resize: bool = false,
+    resize_last_w: f32 = -1.0,
+    resize_last_h: f32 = -1.0,
+
     /// Propagation generation in which this node (a component anchor) was last
     /// rebuilt by the reactive build layer. If it equals the current
     /// propagation gen when the node's own build-effect fires, the effect skips —
@@ -149,6 +157,11 @@ pub const UIRegistry = struct {
     /// new subsystem needs a slot.
     node_removed_listeners: BoundedArray(NodeRemovedListener, 8) = .{},
 
+    /// Nodes with `observe_resize` set (see `observeResize`). Kept as a list so the
+    /// post-solve diff is O(observers), not O(tree) — a frame with no observers
+    /// costs nothing extra.
+    resize_observers: std.ArrayListUnmanaged(NodeId) = .empty,
+
     pub fn init(allocator: std.mem.Allocator) UIRegistry {
         return .{
             .nodes = std.array_list.Managed(Node).init(allocator),
@@ -161,6 +174,47 @@ pub const UIRegistry = struct {
         self.clear();
         self.nodes.deinit();
         self.free_list.deinit();
+        self.resize_observers.deinit(self.allocator);
+    }
+
+    /// One size change found by `collectResized`.
+    pub const Resized = struct { id: NodeId, w: f32, h: f32 };
+
+    /// Sub-pixel jitter below this (logical px) is not reported as a resize.
+    pub const RESIZE_EPSILON: f32 = 0.5;
+
+    /// Opt `id` into size observation: after every layout solve in which its
+    /// solved size differs from the size last reported, `collectResized` yields
+    /// it. Idempotent (re-applying on rebuild keeps the last reported size, so a
+    /// rebuild does not re-report an unchanged size). The first solve after the
+    /// node is first observed always reports.
+    pub fn observeResize(self: *UIRegistry, id: NodeId) !void {
+        if (id >= self.nodes.items.len) return;
+        const node = &self.nodes.items[id];
+        if (!node.alive or node.observe_resize) return;
+        try self.resize_observers.append(self.allocator, id);
+        node.observe_resize = true;
+        node.resize_last_w = -1;
+        node.resize_last_h = -1;
+    }
+
+    /// Appends to `out` every observed node whose solved border-box size changed
+    /// (beyond `RESIZE_EPSILON`) since it was last reported, and records the new
+    /// size as reported. Call right after a layout solve. Collected into a list
+    /// (not a callback) on purpose: delivering a resize runs user code that may
+    /// rebuild or remove nodes, which mutates `resize_observers`.
+    pub fn collectResized(self: *UIRegistry, out: *std.ArrayListUnmanaged(Resized), gpa: std.mem.Allocator) !void {
+        for (self.resize_observers.items) |id| {
+            const node = &self.nodes.items[id];
+            // Never solved yet (e.g. inside a display:none subtree): nothing to say.
+            if (node.layout_w < 0) continue;
+            const w = node.geometry.width;
+            const h = node.geometry.height;
+            if (@abs(w - node.resize_last_w) < RESIZE_EPSILON and @abs(h - node.resize_last_h) < RESIZE_EPSILON) continue;
+            try out.append(gpa, .{ .id = id, .w = w, .h = h });
+            node.resize_last_w = w;
+            node.resize_last_h = h;
+        }
     }
 
     /// Clears all nodes and frees associated caches (e.g., text layout)
@@ -179,6 +233,7 @@ pub const UIRegistry = struct {
         }
         self.nodes.clearRetainingCapacity();
         self.free_list.clearRetainingCapacity();
+        self.resize_observers.clearRetainingCapacity();
     }
 
     /// Creates a new node and adds it to the registry.
@@ -414,6 +469,17 @@ pub const UIRegistry = struct {
             tl.deinit();
             self.allocator.destroy(tl);
             self.nodes.items[id].prev_text_layout = null;
+        }
+
+        // Drop from the size-observer list (order is irrelevant → swap-remove).
+        if (self.nodes.items[id].observe_resize) {
+            self.nodes.items[id].observe_resize = false;
+            for (self.resize_observers.items, 0..) |oid, i| {
+                if (oid == id) {
+                    _ = self.resize_observers.swapRemove(i);
+                    break;
+                }
+            }
         }
 
         // Mark the slot dead before recycling so a stale id stops resolving.

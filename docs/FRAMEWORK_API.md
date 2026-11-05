@@ -515,6 +515,17 @@ fn onFilterChanged(self: *MyApp, ev: fw.events.Event) void {
 
 > `ev.text` is **borrowed** — it aliases the widget's internal buffer and is only valid for the duration of the call. Use it immediately; if you need to retain it (store it in a field or a `Signal`), copy it into memory you own first.
 
+### Size changes (`on_resize`)
+
+`.on_resize = ctx.handler(self, onResize)` on a box (or `ctx.onResize(id, h)` for a node opened with the raw builder) reports the node's **solved border-box size** in `ev.width` / `ev.height` (logical px). The equivalent of the web's `ResizeObserver`.
+
+- **When.** After every rendered frame whose layout solve changed the node's size by ≥ 0.5px, and **once after the first solve** — so a widget that needs its real size (a virtualizer, a canvas) gets it without polling and without `measuredSize`'s first-build `null`.
+- **Never inside the solve.** The engine collects changes after the frame is on screen; whatever the handler writes lands in the next frame. A node reports at most once per solve.
+- **Observe a node whose size is imposed** (`pct`, `fill`, `grow`), not one that hugs content the handler itself changes — that loop would advance one frame per round trip. Observing a hug-sized node is fine when the handler doesn't affect its size (`ScrollView` observes its content wrapper only to update the thumb).
+- **Rebuilds.** Re-applying the same handler reports nothing new; binding a different receiver to the same node re-reports the current size to it. A removed node stops reporting.
+- `VirtualList(.fill = true)`, `VirtualGrid(.fill = true)` and `ScrollView` use it: growing the window materializes the rows that now fit and re-clamps the scroll, with no wheel event. `viewport_height`/`viewport_width` remain as the frame-0 estimate.
+- C hosts receive `CELERIS_EVENT_RESIZE` with the size in `x` / `y`.
+
 ### Pointer event delivery rules
 
 These are load-bearing behaviours; downstream apps (node editors, canvases) rely on them.
