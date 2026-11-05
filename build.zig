@@ -106,6 +106,7 @@ const example_apps = [_]ExampleApp{
     .{ .name = "perf_bench", .root = "examples/perf_bench.zig", .step = "perf_bench", .desc = "Headless build+layout throughput bench (no window; unattended)" },
     .{ .name = "uia_showcase", .root = "examples/uia_showcase.zig", .step = "uia_showcase", .desc = "Widgets exercising UIA action patterns (Invoke/Toggle/Value/Expand/Selection) for Inspect.exe/NVDA validation" },
     .{ .name = "path_demo", .root = "examples/path_demo.zig", .step = "path_demo", .desc = "NodeType.path visual check: diagonal / cubic / elbow / connection / closed triangle at 3 scales" },
+    .{ .name = "resize_list", .root = "examples/resize_list.zig", .step = "resize_list", .desc = "on_resize: full-window VirtualList(fill) that tracks the window height" },
     .{ .name = "virtual_grid", .root = "examples/virtual_grid.zig", .step = "virtual_grid", .desc = "VirtualGrid: 100k x 40 windowed grid over a pull source, frozen header, keyboard cell nav" },
 };
 

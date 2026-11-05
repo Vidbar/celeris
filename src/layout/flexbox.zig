@@ -489,6 +489,28 @@ pub const LayoutEngine = struct {
 
         if (flow_children.len == 0) return;
 
+        // Start every flow item's MAIN size from its measured base (`layout_w` /
+        // `layout_h`), not from `geometry`. A clean child hits the measure cache,
+        // which leaves `geometry` holding last solve's post-grow/shrink size; flex
+        // distribution reading that would treat an old grown width as the base
+        // and overflow the line when a sibling gets wider (a `grow` viewport kept
+        // its full width when the scrollbar slot beside it gained a track). The
+        // previous main size is kept so a size that ends up different still forces
+        // a re-place.
+        var prev_main: BoundedArray(f32, 1024) = .{};
+        {
+            var bi: usize = 0;
+            while (bi < flow_children.len) : (bi += 1) {
+                const child = self.registry.getNode(flow_children.get(bi)).?;
+                const cur = if (is_row) child.geometry.width else child.geometry.height;
+                prev_main.append(cur) catch {};
+                const base = if (is_row) child.layout_w else child.layout_h;
+                if (base >= 0) {
+                    if (is_row) child.geometry.width = base else child.geometry.height = base;
+                }
+            }
+        }
+
         // flex-basis: override each flow item's main-axis base size before the line
         // pass reads it (for wrapping decisions + grow/shrink distribution).
         {
@@ -679,6 +701,18 @@ pub const LayoutEngine = struct {
                     if (ri > 0) line_main_size += explicit_gap;
                 }
                 remaining = main_avail - line_main_size;
+            }
+
+            // A line item whose final main size differs from last solve's must be
+            // re-placed even if grow/shrink didn't touch it (e.g. it was shrunk
+            // last solve and isn't now). Checked before placing this line.
+            {
+                var ci = current_idx;
+                while (ci < current_idx + line_count and ci < prev_main.len) : (ci += 1) {
+                    const child = self.registry.getNode(flow_children.get(ci)).?;
+                    const now = if (is_row) child.geometry.width else child.geometry.height;
+                    if (now != prev_main.get(ci)) child.measured_gen = self.gen; // resized → re-place
+                }
             }
 
             // Justify Content
@@ -2951,4 +2985,55 @@ test "Flexbox property-fuzz: random trees are finite, non-negative, settle-stabl
             return e;
         };
     }
+}
+
+test "Flexbox repro — a hug sibling gaining a child via rootAt shrinks the grow sibling" {
+    // Isolated repro of the ScrollView bar flip: row [grow viewport][hug slot].
+    // The slot is emptied and later refilled through a `rootAt` rebuild +
+    // markLayoutDirty(slot); the grow sibling must give the channel back.
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    store.setRegistry(&registry);
+
+    var b = builder.UIBuilder.init(&registry, &store);
+    const row = try b.openBox();
+    try b.flexRow(row);
+    try b.width(row, 400, .px);
+    try b.height(row, 400, .px);
+    const vp = try b.openBox();
+    try b.width(vp, 0, .px);
+    try b.flexGrow(vp, 1);
+    try b.height(vp, 100, .percent);
+    b.close();
+    const slot = try b.openBox();
+    try b.height(slot, 100, .percent);
+    const t = try b.openBox();
+    try b.width(t, 14, .px);
+    b.close();
+    b.close();
+    b.close();
+
+    var engine = LayoutEngine.init(&registry, &store, null);
+    engine.solve(row, 0, 0, 400, 400);
+    try std.testing.expectApproxEqAbs(@as(f32, 386), registry.getNode(vp).?.geometry.width, 0.5);
+
+    // Empty the slot.
+    try b.rootAt(slot);
+    b.close();
+    registry.markLayoutDirty(slot);
+    engine.solve(row, 0, 0, 400, 400);
+    try std.testing.expectApproxEqAbs(@as(f32, 400), registry.getNode(vp).?.geometry.width, 0.5);
+
+    // Refill it.
+    try b.rootAt(slot);
+    const t2 = try b.openBox();
+    try b.width(t2, 14, .px);
+    b.close();
+    b.close();
+    registry.markLayoutDirty(slot);
+    engine.solve(row, 0, 0, 400, 400);
+    try std.testing.expectApproxEqAbs(@as(f32, 14), registry.getNode(slot).?.geometry.width, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 386), registry.getNode(vp).?.geometry.width, 0.5);
 }

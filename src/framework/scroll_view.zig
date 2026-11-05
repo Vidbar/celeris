@@ -21,6 +21,7 @@ const signals = @import("../core/signals.zig");
 const events = @import("events.zig");
 const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
+const theme_mod = @import("theme.zig");
 
 const BuildContext = component.BuildContext;
 
@@ -92,7 +93,11 @@ pub const ScrollView = struct {
     wrapper_node: reg.NodeId = reg.NULL_NODE,
     track_node: reg.NodeId = reg.NULL_NODE,
     thumb_node: reg.NodeId = reg.NULL_NODE,
+    bar_slot: reg.NodeId = reg.NULL_NODE,
+    mounts: ?*component.MountTable = null,
+    theme: theme_mod.Theme = undefined,
     bound: bool = false,
+    bar_bound: bool = false,
 
     pub fn onMount(self: *ScrollView, allocator: std.mem.Allocator) void {
         self.scroll_offset = signals.Signal(f32).init(allocator, 0);
@@ -209,13 +214,40 @@ pub const ScrollView = struct {
     }
 
     fn hasScrollbar(self: *const ScrollView) bool {
-        return self.content_height > self.viewportHeightNow();
+        return self.contentHeightNow() > self.viewportHeightNow();
+    }
+
+    /// Effect: when a resize (window or content) flips whether a scrollbar is
+    /// needed, rebuild just the bar slot — never the viewport or the hosted
+    /// content. Subscribes to the two `on_resize` signals only.
+    fn syncBar(self: *ScrollView) void {
+        _ = self.viewport_h_sig.get();
+        _ = self.content_h_sig.get();
+        const want = self.hasScrollbar();
+        const have = self.track_node != reg.NULL_NODE;
+        if (want == have) return;
+        const store = self.store orelse return;
+        const registry = self.registry orelse return;
+        if (self.bar_slot == reg.NULL_NODE) return;
+
+        const prev = signals.untrackedBegin();
+        defer signals.untrackedEnd(prev);
+        var b = component.UIBuilder.init(registry, store);
+        b.theme = self.theme;
+        b.rootAt(self.bar_slot) catch return;
+        var ctx = BuildContext{ .builder = &b, .router = self.router, .mounts = self.mounts };
+        buildBar(self, &ctx) catch {};
+        b.close();
+        registry.markLayoutDirty(self.bar_slot);
+        self.updateVisuals();
     }
 
     pub fn build(self: *ScrollView, ctx: *BuildContext) !void {
         self.store = ctx.builder.store;
         self.registry = ctx.builder.registry;
         self.router = ctx.router;
+        self.mounts = ctx.mounts;
+        self.theme = ctx.builder.theme;
 
         // Outer row: viewport + scrollbar side-by-side.
         try ctx.box(.{
@@ -230,6 +262,10 @@ pub const ScrollView = struct {
         // events.zig), and the node-removed hook prunes it on unmount.
         if (ctx.router) |r| try r.onGlobal(self.viewport_node, self, onGlobal);
         try component.bindVisuals(self, &self.scope, &self.bound, updateVisuals);
+        if (!self.bar_bound) {
+            _ = try self.scope.createEffect(self, syncBar);
+            self.bar_bound = true;
+        }
     }
 
     fn updateVisuals(self: *ScrollView) void {
@@ -282,7 +318,22 @@ const Body = struct {
         sv.viewport_node = viewport;
         try b.overflowHidden(viewport);
 
-        // Scrollbar track + thumb.
+        // Scrollbar slot: hugs whatever `buildBar` puts in it (track, stable-gutter
+        // spacer, or nothing) and is the root `syncBar` rebuilds on a flip.
+        const slot = try b.openNodeKeyed(.box, null);
+        sv.bar_slot = slot;
+        try b.height(slot, 100, .percent);
+        try buildBar(sv, ctx);
+        b.close();
+    }
+    pub fn deinit(_: *Body) void {}
+};
+
+/// The scrollbar track + thumb, the stable-gutter spacer, or nothing — into the
+/// currently open parent (the bar slot).
+fn buildBar(sv: *ScrollView, ctx: *BuildContext) !void {
+    const b = ctx.builder;
+    {
         sv.track_node = reg.NULL_NODE;
         sv.thumb_node = reg.NULL_NODE;
         if (sv.hasScrollbar()) {
@@ -296,7 +347,7 @@ const Body = struct {
             try b.backgroundAlpha(track, t.scrollbar_track.r, t.scrollbar_track.g, t.scrollbar_track.b, @as(f32, @floatFromInt(t.scrollbar_track.a)) / 255.0);
 
             const track_h = @max(0.0, sv.viewportHeightNow() - 4.0);
-            const content_h = @max(sv.content_height, sv.viewportHeightNow() + 1.0);
+            const content_h = @max(sv.contentHeightNow(), sv.viewportHeightNow() + 1.0);
             const thumb_h = @max(20.0, (track_h / content_h) * track_h);
 
             const thumb = try ctx.boxNode(.{
@@ -319,8 +370,7 @@ const Body = struct {
             b.close();
         }
     }
-    pub fn deinit(_: *Body) void {}
-};
+}
 
 /// The scroll-offset wrapper — its `margin_top` (effect-driven) is the scroll.
 const Wrapper = struct {
@@ -344,7 +394,6 @@ const Wrapper = struct {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
-const theme_mod = @import("theme.zig");
 
 /// A minimal stub component (fixed-height box) hosted as a `component.Child`.
 const StubChild = struct {
@@ -652,4 +701,43 @@ test "ScrollView fill: a window resize re-clamps the offset and resizes the thum
     try testing.expectApproxEqAbs(@as(f32, -200), sv.scroll_offset.peek(), 0.01);
     _ = try env.frame(0, 300, 800);
     try testing.expect(env.geom(sv.thumb_node).height > thumb_400 + 1);
+}
+
+test "ScrollView fill: the scrollbar appears and disappears as a resize flips whether content fits" {
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+
+    var tall = TallChild{}; // 1000px of content
+    const sv = try mountScrollView(&env, .{
+        .fill = true,
+        .content = component.childOf(TallChild, &tall),
+        .content_height = 1000,
+    });
+    try env.store.setLayout(0, .width, .{ .dimension = .{ .value = 100, .unit = .percent } });
+    try env.store.setLayout(0, .height, .{ .dimension = .{ .value = 100, .unit = .percent } });
+    const viewport = sv.viewport_node;
+    const wrapper = sv.wrapper_node;
+
+    // 400px tall: content overflows → bar shown, viewport loses the channel.
+    _ = try env.frame(0, 400, 400);
+    _ = try env.frame(0, 400, 400);
+    try testing.expect(sv.track_node != reg.NULL_NODE);
+    try testing.expect(env.isVisible(sv.thumb_node));
+    try testing.expectApproxEqAbs(@as(f32, 400 - SCROLLBAR_WIDTH), env.geom(viewport).width, 0.5);
+
+    // 1200px tall: everything fits → the bar goes away with no rebuild of the
+    // content (same viewport + wrapper nodes) and the viewport takes full width.
+    _ = try env.frame(0, 400, 1200);
+    _ = try env.frame(0, 400, 1200);
+    try testing.expect(sv.track_node == reg.NULL_NODE);
+    try testing.expectEqual(viewport, sv.viewport_node);
+    try testing.expectEqual(wrapper, sv.wrapper_node);
+    try testing.expectApproxEqAbs(@as(f32, 400), env.geom(viewport).width, 0.5);
+
+    // Back down: the bar comes back.
+    _ = try env.frame(0, 400, 400);
+    _ = try env.frame(0, 400, 400);
+    try testing.expect(env.isVisible(sv.thumb_node));
+    try testing.expectApproxEqAbs(@as(f32, 400 - SCROLLBAR_WIDTH), env.geom(viewport).width, 0.5);
 }
