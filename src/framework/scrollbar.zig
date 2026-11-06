@@ -329,6 +329,8 @@ const Body = struct {
         if (v) try growAlongColumn(b.store, track);
         try b.padding(track, TRACK_PADDING, TRACK_PADDING, TRACK_PADDING, TRACK_PADDING);
         try b.overflowHidden(track);
+        // Explicit arrow: a clickable node otherwise resolves to the hand cursor.
+        try b.cursor(track, "default");
         try b.backgroundAlpha(track, t.scrollbar_track.r, t.scrollbar_track.g, t.scrollbar_track.b, @as(f32, @floatFromInt(t.scrollbar_track.a)) / 255.0);
     }
     pub fn deinit(_: *Body) void {}
@@ -353,6 +355,9 @@ const Thumb = struct {
             .on_hover = ctx.signalSetter(&bar.hovered),
         }, .{});
         bar.thumb_node = thumb;
+        // Set on the thumb too: the cursor resolver stops at the first clickable
+        // node walking up, so the track's cursor never reaches it.
+        try ctx.builder.cursor(thumb, "default");
         // Out of flow: the track can never hug the thumb, so a mount without a
         // definite length fails loudly (a 0-length track, no thumb) on the first
         // frame instead of the track and thumb shrinking each other frame by frame.
@@ -560,6 +565,15 @@ test "Scrollbar: accessible roles — ScrollBar root, Thumb thumb, track is not 
     try testing.expectEqualStrings("scrollbar", a11y.accessibleRole(&f.env.store, sb.root_node, .box));
     try testing.expectEqualStrings("thumb", a11y.accessibleRole(&f.env.store, sb.thumb_node, .box));
     try testing.expectEqualStrings("group", a11y.accessibleRole(&f.env.store, sb.track_node, .box));
+}
+
+test "Scrollbar: track and thumb pin the arrow cursor despite being clickable" {
+    const f = try Fixture.create(.vertical);
+    defer f.destroy();
+    const sb = f.bar();
+    for ([_]reg.NodeId{ sb.track_node, sb.thumb_node }) |id| {
+        try testing.expectEqualStrings("default", f.env.store.getModifier(id, .cursor).?.string);
+    }
 }
 
 test "Scrollbar: the thumb is out of flow, so a hugging mount can't feed its length back" {

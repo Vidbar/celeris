@@ -440,13 +440,31 @@ pub const RECT = extern struct {
     right: i32,
     bottom: i32,
 };
-extern "user32" fn AdjustWindowRect(lpRect: *RECT, dwStyle: u32, bMenu: windows.BOOL) callconv(WINAPI) windows.BOOL;
 extern "user32" fn GetWindowRect(hwnd: HWND, lpRect: *RECT) callconv(WINAPI) windows.BOOL;
 extern "user32" fn GetWindowLongA(hwnd: HWND, nIndex: i32) callconv(WINAPI) i32;
 extern "user32" fn SetWindowLongPtrA(hwnd: HWND, nIndex: i32, dwNewLong: LPARAM) callconv(WINAPI) LPARAM;
 extern "user32" fn GetWindowLongPtrA(hwnd: HWND, nIndex: i32) callconv(WINAPI) LPARAM;
 extern "uiautomationcore" fn UiaReturnRawElementProvider(hwnd: HWND, wParam: WPARAM, lParam: LPARAM, el: ?*anyopaque) callconv(WINAPI) LRESULT;
 extern "user32" fn IsZoomed(hwnd: HWND) callconv(WINAPI) i32;
+extern "user32" fn GetSystemMetricsForDpi(index: i32, dpi: UINT) callconv(WINAPI) i32;
+extern "user32" fn GetClientRect(hwnd: HWND, lpRect: *RECT) callconv(WINAPI) windows.BOOL;
+const SIZE = extern struct { cx: i32, cy: i32 };
+
+/// Physical thickness of the sizing frame at the window's DPI (SM_CXSIZEFRAME +
+/// SM_CXPADDEDBORDER) — the invisible border a native window resizes from.
+fn resizeFrame(hwnd: HWND) i32 {
+    const dpi = GetDpiForWindow(hwnd);
+    const d: UINT = if (dpi > 0) dpi else 96;
+    return GetSystemMetricsForDpi(32, d) + GetSystemMetricsForDpi(92, d);
+}
+
+/// The sizing frame WM_NCCALCSIZE keeps outside the client (left/right/bottom),
+/// or 0 when there is none (fixed-size or maximized window).
+fn invisibleFrame(hwnd: HWND) i32 {
+    const style = GetWindowLongA(hwnd, -16); // GWL_STYLE
+    if ((style & 0x00040000) == 0 or IsZoomed(hwnd) != 0) return 0;
+    return resizeFrame(hwnd);
+}
 extern "user32" fn MonitorFromWindow(hwnd: HWND, flags: u32) callconv(WINAPI) HANDLE;
 extern "user32" fn GetMonitorInfoA(hmon: HANDLE, lpmi: *MONITORINFO) callconv(WINAPI) i32;
 
@@ -612,6 +630,24 @@ fn wndProc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(WINAPI) LRESU
             const scale: f32 = if (dpi > 0) @as(f32, @floatFromInt(dpi)) / 96.0 else 1.0;
             cb(.{ .win32 = .{ .hwnd = hwnd, .hinst = null } }, g_resize_w, g_resize_h, scale);
         }
+    } else if (msg == 0x02E4) { // WM_GETDPISCALEDSIZE
+        // Sent before WM_DPICHANGED, still at the old DPI. Windows' default scales
+        // the whole outer rect linearly, but the sizing frame isn't linear in DPI
+        // (8 px at 96, 11 at 144), so the client would drift by a few px. Scale
+        // the client instead and re-add the frame at the new DPI.
+        const f_old = invisibleFrame(hwnd);
+        if (f_old == 0) return 0; // no frame: the linear default is exact
+        const old_dpi = GetDpiForWindow(hwnd);
+        if (old_dpi == 0) return 0;
+        const new_dpi: UINT = @truncate(wp);
+        var cr: RECT = undefined;
+        if (GetClientRect(hwnd, &cr) == .FALSE) return 0;
+        const ratio = @as(f32, @floatFromInt(new_dpi)) / @as(f32, @floatFromInt(old_dpi));
+        const f_new = GetSystemMetricsForDpi(32, new_dpi) + GetSystemMetricsForDpi(92, new_dpi);
+        const size: *SIZE = @ptrFromInt(@as(usize, @bitCast(lp)));
+        size.cx = @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(cr.right - cr.left)) * ratio))) + 2 * f_new;
+        size.cy = @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(cr.bottom - cr.top)) * ratio))) + f_new;
+        return 1;
     } else if (msg == 0x02E0) { // WM_DPICHANGED
         // Windows hands us a suggested rect for the new DPI; moving the window to
         // it fires a WM_SIZE that carries the new scale to the resize callback.
@@ -636,10 +672,28 @@ fn wndProc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(WINAPI) LRESU
             }
         }
     } else if (msg == 0x0083) { // WM_NCCALCSIZE
-        if (wp == 1) return 0; // Remove standard non-client area (title bar)
+        // wParam 0 (the first calc, inside CreateWindowEx) passes a bare RECT,
+        // wParam 1 a NCCALCSIZE_PARAMS whose first field is that same RECT: handle
+        // both, or DefWindowProc frames the first frame (client 2px wide/6px short).
+        {
+            // No caption: the client starts at the window's top edge. A resizable,
+            // restored window keeps its left/right/bottom sizing frame as non-client
+            // — DWM draws it invisible (Win10+), so the resize grip sits *outside*
+            // the visible window, as in native Windows 11 windows, and content
+            // flush with the edge (a scrollbar) never loses clicks to it. Maximized
+            // windows have nothing to resize: the client takes the whole rect.
+            const f = invisibleFrame(hwnd);
+            if (f > 0) {
+                const params: *RECT = @ptrFromInt(@as(usize, @bitCast(lp))); // RECT or NCCALCSIZE_PARAMS.rgrc[0]
+                params.left += f;
+                params.right -= f;
+                params.bottom -= f;
+            }
+            return 0;
+        }
     } else if (msg == 0x0084) { // WM_NCHITTEST
         const style = GetWindowLongA(hwnd, -16); // GWL_STYLE
-        if ((style & 0x00040000) != 0) { // WS_THICKFRAME
+        if ((style & 0x00040000) != 0 and IsZoomed(hwnd) == 0) { // WS_THICKFRAME, restored
             const ulLParam = @as(usize, @bitCast(lp));
             const x: i16 = @bitCast(@as(u16, @truncate(ulLParam)));
             const y: i16 = @bitCast(@as(u16, @truncate(ulLParam >> 16)));
@@ -647,7 +701,11 @@ fn wndProc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(WINAPI) LRESU
             var rect: RECT = undefined;
             _ = GetWindowRect(hwnd, &rect);
 
-            const border = 8;
+            // Left/right/bottom: exactly the invisible non-client frame (see
+            // WM_NCCALCSIZE). Top has no frame outside the client, so the grip
+            // there is inside the content — it overlaps the app bar's drag area,
+            // not interactive content.
+            const border = resizeFrame(hwnd);
             var hit: LRESULT = 1; // HTCLIENT
 
             const on_left = x < rect.left + border;
@@ -789,7 +847,9 @@ pub const Win32Window = struct {
         const ph: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(h)) * scale));
         // NOACTIVATE: repositioning an overlay must not steal focus from whatever
         // the user is actually working in — that's the whole point of a HUD.
-        _ = SetWindowPos(hwnd, null, px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
+        // Bounds are the visible window; the invisible sizing frame goes around it.
+        const f = invisibleFrame(hwnd);
+        _ = SetWindowPos(hwnd, null, px - f, py, pw + 2 * f, ph + f, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     fn getBounds(ptr: *anyopaque) platform.Rect {
@@ -797,6 +857,10 @@ pub const Win32Window = struct {
         const hwnd = self.hwnd orelse return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
         var rect: RECT = undefined;
         if (GetWindowRect(hwnd, &rect) == .FALSE) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        const f = invisibleFrame(hwnd);
+        rect.left += f;
+        rect.right -= f;
+        rect.bottom -= f;
         const scale = getScale(ptr);
         return .{
             .x = @intFromFloat(@round(@as(f32, @floatFromInt(rect.left)) / scale)),
@@ -893,16 +957,22 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
     // area is width×height regardless of DPI.
     const phys_w: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(width)) * scale));
     const phys_h: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(height)) * scale));
-    var rect = RECT{ .left = 0, .top = 0, .right = phys_w, .bottom = phys_h };
     const style_flags: u32 = 0x80000000 | (if (config.resizable) @as(u32, 0x00040000) else 0);
-    _ = AdjustWindowRect(&rect, style_flags, @enumFromInt(0));
+    // WM_NCCALCSIZE keeps a sizing frame on the left, right and bottom only (none
+    // on top), so the window is the client plus that frame on three sides.
+    const frame: i32 = if (config.resizable) blk: {
+        const dpi: UINT = @intFromFloat(@round(scale * 96.0));
+        break :blk GetSystemMetricsForDpi(32, dpi) + GetSystemMetricsForDpi(92, dpi);
+    } else 0;
 
-    const win_w = rect.right - rect.left;
-    const win_h = rect.bottom - rect.top;
+    const win_w = phys_w + 2 * frame;
+    const win_h = phys_h + frame;
 
     // Requested position is logical; CreateWindowExA wants physical. Null keeps the
     // historical default spot.
-    const pos_x: i32 = if (config.x) |lx| @intFromFloat(@round(@as(f32, @floatFromInt(lx)) * scale)) else 200;
+    // The outer rect includes the invisible left frame; shift it so the *visible*
+    // window lands at x (matching setBounds).
+    const pos_x: i32 = (if (config.x) |lx| @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(lx)) * scale))) else 200) - frame;
     const pos_y: i32 = if (config.y) |ly| @intFromFloat(@round(@as(f32, @floatFromInt(ly)) * scale)) else 150;
     // WS_EX_TOPMOST (0x8) at creation rather than a post-hoc SetWindowPos, so an
     // overlay is never painted once below the window it is supposed to float over.

@@ -9,6 +9,22 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Fixed
+
+- **Scrollbar cursor** — the track and thumb showed the hand cursor (implied by
+  `clickable`); they now pin the arrow, as the docs said.
+- **Windows: resize border no longer eats edge clicks** — resizable windows keep
+  their left/right/bottom sizing frame outside the visible window (invisible, as
+  in native Windows 11 windows) instead of an 8 px strip inside the content, so a
+  scrollbar flush with the edge gets every click. The top grip stays inside, over
+  the caption. The client is now exactly the requested size and position, and `getBounds` /
+  `setBounds` describe the visible window, not the invisible frame. Moving
+  between monitors of different DPI keeps the client exact (the frame isn't
+  linear in DPI, so the window answers `WM_GETDPISCALEDSIZE` itself), and the
+  first frame no longer starts a few px off before the first resize.
+
 ## 0.1.4 — 2026-11-05
 
 ### Added

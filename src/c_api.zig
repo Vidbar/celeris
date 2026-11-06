@@ -1944,17 +1944,17 @@ fn recheckHover(engine: *EngineState) void {
     updateHover(engine, top_hit, p.x, p.y, 0);
 }
 
-fn resolveCursor(engine: *EngineState, hit: ?reg.NodeId) platform_mod.CursorType {
+fn resolveCursor(store: *props.PropertyStore, registry: *reg.UIRegistry, hit: ?reg.NodeId) platform_mod.CursorType {
     var id: reg.NodeId = hit orelse return .default;
     while (id != reg.NULL_NODE) {
-        if (engine.store.getModifier(id, .cursor)) |c| {
+        if (store.getModifier(id, .cursor)) |c| {
             return parseCursor(switch (c) {
                 .string => |s| s,
                 else => "",
             });
         }
-        if (engine.store.getModifier(id, .clickable) != null) return .pointer;
-        const node = engine.registry.getNode(id) orelse break;
+        if (store.getModifier(id, .clickable) != null) return .pointer;
+        const node = registry.getNode(id) orelse break;
         id = node.parent;
     }
     return .default;
@@ -2017,7 +2017,7 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
 
         // Update the mouse cursor for what's under the pointer.
         if (engine.window != null) {
-            const cur = resolveCursor(engine, top_hit);
+            const cur = resolveCursor(&engine.store, &engine.registry, top_hit);
             if (cur != engine.current_cursor) {
                 engine.current_cursor = cur;
                 platform_mod.setCursor(cur);
@@ -3451,6 +3451,32 @@ test "ClickSynthTarget: clickable node yields its center; text targets and non-c
     const plain = try registry.createNode(.box);
     try store.registerNode(plain);
     try std.testing.expectEqual(@as(?@TypeOf(c), null), clickSynthTarget(&store, &registry, plain));
+}
+
+test "resolveCursor: clickable implies the hand; an explicit cursor on the node wins" {
+    const a = std.testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+
+    const parent = try registry.createNode(.box);
+    try store.registerNode(parent);
+    const child = try registry.createNode(.box);
+    try store.registerNode(child);
+    registry.getNode(child).?.parent = parent;
+    try store.setModifier(parent, .clickable, .{ .string = try store.stringAllocator().dupe(u8, "p") });
+    try store.setModifier(child, .clickable, .{ .string = try store.stringAllocator().dupe(u8, "c") });
+
+    try std.testing.expectEqual(platform_mod.CursorType.pointer, resolveCursor(&store, &registry, child));
+    // Explicit arrow on the parent only: the clickable child stops the walk first
+    // (why Scrollbar pins "default" on both its track and its thumb).
+    try store.setModifier(parent, .cursor, .{ .string = try store.stringAllocator().dupe(u8, "default") });
+    try std.testing.expectEqual(platform_mod.CursorType.pointer, resolveCursor(&store, &registry, child));
+    try store.setModifier(child, .cursor, .{ .string = try store.stringAllocator().dupe(u8, "default") });
+    try std.testing.expectEqual(platform_mod.CursorType.default, resolveCursor(&store, &registry, child));
+    try std.testing.expectEqual(platform_mod.CursorType.default, resolveCursor(&store, &registry, null));
 }
 
 test "Tab traversal skips disabled, zero-sized and clipped-away focusables" {
