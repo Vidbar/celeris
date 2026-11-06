@@ -256,7 +256,7 @@ pub fn build(self: *MyForm, ctx: *fw.component.BuildContext) !void {
 **Available widgets:**
 
 1. **Buttons & Inputs:** `fw.button.Button`, `fw.icon_button.IconButton`, `fw.checkbox.Checkbox`, `fw.radio.Radio`, `fw.slider.Slider`, `fw.dropdown.Dropdown`, `fw.text_input.TextInput`, `fw.text_area.TextArea`.
-2. **Layout & Containers:** `fw.tabs.Tabs`, `fw.split_pane.SplitPane`, `fw.stack.Stack`, `fw.grid.Grid`, `fw.scroll_view.ScrollView`, `fw.tree_view.TreeView`.
+2. **Layout & Containers:** `fw.tabs.Tabs`, `fw.split_pane.SplitPane`, `fw.stack.Stack`, `fw.grid.Grid`, `fw.scroll_view.ScrollView`, `fw.scrollbar.Scrollbar`, `fw.tree_view.TreeView`.
 
 Widgets that host children (Tabs, SplitPane, ScrollView) take a `Child` via `fw.component.childOf(ChildType, &instance)`; `ChildType` needs both `pub fn build(self, ctx) !void` and `pub fn deinit(self) void` (an empty `deinit` is fine; it runs when the child unmounts); some (e.g. a `Button` with composed content) take a slot via `fw.component.slot(&.{ ... })`. See `examples/dashboard.zig` for the full showcase.
 
@@ -272,6 +272,7 @@ This is the same mechanism across the widget suite:
 | `TreeView` | `.selected`, `.hovered` | `*Signal(?usize)` | react to / drive selection & hover by node id |
 | `SplitPane` | `.ratio` | `*Signal(f32)` | set or animate the split (collapse/expand a pane) |
 | `ScrollView` | `.offset` | `*Signal(f32)` | read/drive the scroll position (px, `<= 0`; 0 = top) |
+| `Scrollbar` | `.offset`, `.content_size`, `.viewport_size` | `*Signal(f32)` | standalone bar for a view that draws only its visible slice; same offset convention as `ScrollView` |
 
 ```zig
 // App owns the state. Declare the signal BEFORE the mount table so teardown

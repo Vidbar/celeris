@@ -74,6 +74,9 @@ pub const Theme = struct {
     // ── Scrollbar ───────────────────────────────────────────────────────────
     scrollbar_track: Color = Color.transparent(),
     scrollbar_thumb: Color = Color.transparent(),
+    /// Thumb under the pointer / while dragged (`fw.scrollbar.Scrollbar`).
+    scrollbar_thumb_hover: Color = Color.transparent(),
+    scrollbar_thumb_active: Color = Color.transparent(),
 
     // ── Accents & Text ──────────────────────────────────────────────────────
     accent: Color = Color.transparent(),
@@ -214,6 +217,8 @@ pub const Theme = struct {
 
             .scrollbar_track = .{ .r = 24, .g = 24, .b = 30 },
             .scrollbar_thumb = .{ .r = 70, .g = 70, .b = 82 },
+            .scrollbar_thumb_hover = .{ .r = 92, .g = 92, .b = 106 },
+            .scrollbar_thumb_active = .{ .r = 116, .g = 116, .b = 132 },
 
             .accent = .{ .r = 60, .g = 130, .b = 246 },
             .accent_hover = .{ .r = 82, .g = 148, .b = 250 },
@@ -265,6 +270,8 @@ pub const Theme = struct {
 
             .scrollbar_track = .{ .r = 238, .g = 240, .b = 244 },
             .scrollbar_thumb = .{ .r = 190, .g = 193, .b = 200 },
+            .scrollbar_thumb_hover = .{ .r = 165, .g = 168, .b = 176 },
+            .scrollbar_thumb_active = .{ .r = 140, .g = 143, .b = 152 },
 
             .accent = .{ .r = 37, .g = 99, .b = 235 },
             .accent_hover = .{ .r = 29, .g = 78, .b = 216 },

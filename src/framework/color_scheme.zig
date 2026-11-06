@@ -221,6 +221,8 @@ pub fn themeFromSeed(seed: Color, brightness: Brightness) Theme {
 
         .scrollbar_track = scheme.surface_container_low,
         .scrollbar_thumb = scheme.outline_variant,
+        .scrollbar_thumb_hover = scheme.outline,
+        .scrollbar_thumb_active = scheme.on_surface_variant,
 
         .accent = scheme.primary,
         .accent_hover = colorFromArgb(accent_hover),
