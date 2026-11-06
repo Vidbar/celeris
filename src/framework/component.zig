@@ -182,10 +182,61 @@ fn typeId(comptime T: type) usize {
 
 // ── BuildContext ──────────────────────────────────────────────────────────────
 
-/// Logical-pixel size of a node's content box, as resolved by the previous layout
-/// solve. Returned by `BuildContext.measuredSize` — position is deliberately not
-/// included (ask for `x`/`y` off the registry directly if you ever need them).
+/// Logical-pixel size of a node's border box (padding included, margin excluded),
+/// as resolved by the previous layout solve. Returned by
+/// `BuildContext.measuredSize`; `measuredRect` adds the position.
 pub const MeasuredSize = struct { w: f32, h: f32 };
+
+/// A node's resolved border box in window coordinates (logical px) — the same
+/// space as `Event.x/y` and the space hit-testing runs in. Scroll offsets of
+/// scrolling ancestors are already applied: this is where the node is painted.
+pub const MeasuredRect = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+
+    pub const Point = struct { x: f32, y: f32 };
+
+    /// Convert a window-space point (e.g. `ev.x, ev.y`) to coordinates relative
+    /// to this rect's top-left corner. Not clamped: during a drag that leaves
+    /// the node the result is negative or larger than `w`/`h`, by design.
+    pub fn toLocal(self: MeasuredRect, x: f32, y: f32) Point {
+        return .{ .x = x - self.x, .y = y - self.y };
+    }
+
+    /// Whether the window-space point lies inside the rect (half-open).
+    pub fn contains(self: MeasuredRect, x: f32, y: f32) bool {
+        return x >= self.x and y >= self.y and x < self.x + self.w and y < self.y + self.h;
+    }
+};
+
+/// Resolved-geometry reader a widget keeps past `build` for use in its event
+/// handlers (a `BuildContext` is only valid during the build that received it).
+/// Obtain one with `ctx.layoutReader()`; it is a plain value, cheap to copy, and
+/// stays valid for the lifetime of the window the widget is mounted in.
+///
+/// In a handler the read is fresh: input is dispatched after the solve of the
+/// frame the user acted on.
+pub const LayoutReader = struct {
+    registry: *reg.UIRegistry,
+
+    /// `id`'s resolved border box, or null if it was never solved or is gone.
+    pub fn rect(self: LayoutReader, id: NodeId) ?MeasuredRect {
+        const node = self.registry.getNode(id) orelse return null;
+        // `layout_w` is seeded to -1 and only set once `measure` has run on the
+        // node, so it doubles as a "was this ever solved?" flag.
+        if (node.layout_w < 0) return null;
+        const g = node.geometry;
+        return .{ .x = g.x, .y = g.y, .w = g.width, .h = g.height };
+    }
+
+    /// Shorthand for `rect(id).toLocal(x, y)`; null when `rect(id)` is.
+    pub fn toLocal(self: LayoutReader, id: NodeId, x: f32, y: f32) ?MeasuredRect.Point {
+        const r = self.rect(id) orelse return null;
+        return r.toLocal(x, y);
+    }
+};
 
 pub const BuildContext = struct {
     builder: *UIBuilder,
@@ -288,7 +339,7 @@ pub const BuildContext = struct {
         return self.handler(widget, Wrap.call);
     }
 
-    /// The content-box size (logical px) that `id` resolved to in the **previous**
+    /// The border-box size (logical px) that `id` resolved to in the **previous**
     /// layout solve, or `null` if `id` has never been measured yet (the first
     /// build, before any solve) or the node is gone.
     ///
@@ -311,11 +362,23 @@ pub const BuildContext = struct {
     ///   • Measures the border box the layout engine placed — padding included,
     ///     margin excluded, same as `geometry.width/height`.
     pub fn measuredSize(self: *BuildContext, id: NodeId) ?MeasuredSize {
-        const node = self.builder.registry.getNode(id) orelse return null;
-        // `layout_w` is seeded to -1 and only set once `measure` has run on the
-        // node, so it doubles as a "was this ever solved?" flag.
-        if (node.layout_w < 0) return null;
-        return .{ .w = node.geometry.width, .h = node.geometry.height };
+        const r = self.measuredRect(id) orelse return null;
+        return .{ .w = r.w, .h = r.h };
+    }
+
+    /// `measuredSize` plus position: `id`'s border box in window coordinates
+    /// from the previous solve, or null under the same rules. Same caveats
+    /// (one frame stale in `build`, not reactive — position changes don't
+    /// re-run `build`). For pointer hit-testing in handlers, keep a
+    /// `layoutReader()` instead.
+    pub fn measuredRect(self: *BuildContext, id: NodeId) ?MeasuredRect {
+        return self.layoutReader().rect(id);
+    }
+
+    /// A `LayoutReader` a widget can store and use from its event handlers to
+    /// turn window-space pointer coordinates into node-local ones.
+    pub fn layoutReader(self: *BuildContext) LayoutReader {
+        return .{ .registry = self.builder.registry };
     }
 
     /// Opens a Box, applies `props_` (an anonymous struct literal of styling /

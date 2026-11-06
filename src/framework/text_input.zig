@@ -85,6 +85,8 @@ pub const TextInput = struct {
 
     // Captured during build().
     store: ?*props.PropertyStore = null,
+    /// Public resolved-geometry reader (pointer → text-local coords).
+    layout: ?component.LayoutReader = null,
     router: ?*events.EventRouter = null,
     measure: ?component.TextMeasure = null,
     clipboard: ?component.Clipboard = null,
@@ -192,11 +194,9 @@ pub const TextInput = struct {
 
     /// Column under a pointer x (absolute), via exact measurement when available.
     fn colFromClick(self: *TextInput, gx: f32) usize {
-        const store = self.store orelse return self.cursor_pos;
-        const registry = store.registry orelse return self.cursor_pos;
+        const layout = self.layout orelse return self.cursor_pos;
         if (self.text_node == reg.NULL_NODE) return self.cursor_pos;
-        const node = registry.getNode(self.text_node) orelse return self.cursor_pos;
-        const local = gx - node.geometry.x;
+        const local = (layout.toLocal(self.text_node, gx, 0) orelse return self.cursor_pos).x;
         if (self.is_password) {
             // Hit-test the bullets, then map the codepoint index back to a real byte.
             const disp = component.columnAtX(self.measure, self.shadow.items, FONT_SIZE, local);
@@ -375,6 +375,7 @@ pub const TextInput = struct {
         const b = ctx.builder;
         self.theme = b.theme;
         self.store = b.store;
+        self.layout = ctx.layoutReader();
         self.router = ctx.router;
         self.measure = b.measure;
         self.clipboard = b.clipboard;
@@ -698,6 +699,7 @@ test "TextInput mouse_down positions the cursor by measured x (midpoint rule)" {
 
     // Solved layout: text node at x=0.
     env.registry.getNode(input.text_node).?.geometry = .{ .x = 0, .y = 0, .width = 200, .height = 20 };
+    env.registry.getNode(input.text_node).?.layout_w = 200; // mark as solved for LayoutReader
 
     // mouse_down at x=12: 'h' [0,10) mid 5, 'e' [10,20) mid 15 → 12 < 15 → before 'e' (1).
     env.route(.{ .name = "mouse_down", .id = "", .node_id = id, .x = 12.0, .y = 5.0 });
@@ -715,6 +717,7 @@ test "TextInput double_click selects the word, triple selects the line" {
     const input = try mount(&env, .{ .initial_text = "this world" });
     const id = input.root_id;
     env.registry.getNode(input.text_node).?.geometry = .{ .x = 0, .y = 0, .width = 200, .height = 20 };
+    env.registry.getNode(input.text_node).?.layout_w = 200; // mark as solved for LayoutReader
 
     // Double-click at x=12 (col 1, inside "this") selects the whole word.
     env.route(.{ .name = "double_click", .id = "", .node_id = id, .x = 12.0, .y = 5.0, .key_code = 2 });
@@ -1034,6 +1037,7 @@ test "TextInput password caret & click map through the bullet run" {
     const input = try mount(&env, .{ .is_password = true, .initial_text = "abc" });
     const id = input.root_id;
     env.registry.getNode(input.text_node).?.geometry = .{ .x = 0, .y = 0, .width = 200, .height = 20 };
+    env.registry.getNode(input.text_node).?.layout_w = 200; // mark as solved for LayoutReader
     env.route(.{ .name = "focus", .id = "", .node_id = id });
 
     // Caret after "abc" → 3 bullets. mockMeasure returns 10px per byte, and the

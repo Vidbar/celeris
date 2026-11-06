@@ -89,6 +89,31 @@ pub const Query = struct {
         _ = self.h.router.route(.{ .name = "focus", .id = "", .node_id = node_id });
     }
 
+    pub const PointerError = error{NodeNotSolved};
+
+    /// Routes a pointer event (`mouse_down`, `mouse_up`, `click`, `double_click`)
+    /// at `node_id`, placed at node-local (`lx`, `ly`). The window coordinates
+    /// the handler receives in `ev.x/y` come from the node's resolved rect via
+    /// the public `LayoutReader` — call `h.solve(...)` first — so a widget that
+    /// converts back in its handler sees exactly what production gives it.
+    pub fn pointerAt(self: Query, name: []const u8, node_id: reg.NodeId, lx: f32, ly: f32) PointerError!void {
+        const r = self.h.reader().rect(node_id) orelse return PointerError.NodeNotSolved;
+        _ = self.h.router.route(.{ .name = name, .id = "", .node_id = node_id, .x = r.x + lx, .y = r.y + ly });
+    }
+
+    /// `pointerAt("mouse_down", ...)`.
+    pub fn mouseDownAt(self: Query, node_id: reg.NodeId, lx: f32, ly: f32) PointerError!void {
+        return self.pointerAt("mouse_down", node_id, lx, ly);
+    }
+
+    /// Routes a global (untargeted) pointer event — what `router.onGlobal`
+    /// handlers see during a drag — at a point given relative to `ref_node`.
+    /// `lx`/`ly` may be negative or past the node's size (pointer left it).
+    pub fn globalPointerAt(self: Query, name: []const u8, ref_node: reg.NodeId, lx: f32, ly: f32) PointerError!void {
+        const r = self.h.reader().rect(ref_node) orelse return PointerError.NodeNotSolved;
+        _ = self.h.router.route(.{ .name = name, .id = "", .node_id = 0, .x = r.x + lx, .y = r.y + ly });
+    }
+
     pub const AssertError = error{NodeNotVisible};
 
     /// Fails unless `node_id` resolved to a non-zero box after `h.solve(...)`
@@ -182,4 +207,98 @@ test "measureStub tells roles apart, kerns AV, counts codepoints and tracking" {
     try std.testing.expectEqual(@as(f32, 3 * 14), m.widthStyled("abc", 16, .{ .role = .mono, .letter_spacing = 2 }));
     // Invalid UTF-8 does not trap.
     try std.testing.expectEqual(@as(f32, 10), m.width("\xff", 16));
+}
+
+// ── Node-local pointer coordinates through the public API ─────────────────────
+
+const component = @import("component.zig");
+
+/// Stand-in for a third-party widget: it uses only `fw.component` (no registry,
+/// no store) to turn pointer events into coordinates local to its own node.
+const LocalProbe = struct {
+    reader: ?component.LayoutReader = null,
+    target: reg.NodeId = 0,
+    down: ?component.MeasuredRect.Point = null,
+    drag: ?component.MeasuredRect.Point = null,
+
+    fn onDown(self: *LocalProbe, ev: events.Event) void {
+        self.down = self.reader.?.toLocal(ev.node_id, ev.x, ev.y);
+    }
+    fn onGlobal(self: *LocalProbe, ev: events.Event) void {
+        if (!std.mem.eql(u8, ev.name, "mouse_move")) return;
+        self.drag = self.reader.?.toLocal(self.target, ev.x, ev.y);
+    }
+
+    /// Outer row (padding l=20,t=15) → 30px sibling → 100×40 target.
+    fn build(self: *LocalProbe, ctx: *component.BuildContext, outer: *reg.NodeId) !void {
+        self.reader = ctx.layoutReader();
+        outer.* = try ctx.boxNode(.{
+            .width = component.px(400),
+            .height = component.px(200),
+            .direction = .row,
+            .padding = component.EdgeInsets{ .l = 20, .t = 15 },
+            .@"align" = .start,
+        }, .{});
+        try ctx.builder.rootAt(outer.*);
+        try ctx.box(.{ .width = component.px(30), .height = component.px(10) }, .{});
+        self.target = try ctx.boxNode(.{
+            .width = component.px(100),
+            .height = component.px(40),
+            .on_mouse_down = ctx.handler(self, onDown),
+        }, .{});
+        ctx.builder.close();
+        if (ctx.router) |r| try r.onGlobal(self.target, self, onGlobal);
+    }
+};
+
+test "LayoutReader: local coords on an offset node, scrolled ancestor, drag out of bounds" {
+    var h = Harness.init(std.testing.allocator);
+    defer h.deinit();
+    h.wire();
+    var b = builder_mod.UIBuilder.init(&h.registry, &h.store);
+    var ctx = component.BuildContext.initWithRouter(&b, &h.router);
+
+    var probe = LocalProbe{};
+    var outer: reg.NodeId = 0;
+    // Not solved yet: no rect, and the testkit refuses to invent coordinates.
+    try probe.build(&ctx, &outer);
+    try std.testing.expect(ctx.measuredRect(probe.target) == null);
+    const q = Query.init(&h);
+    try std.testing.expectError(Query.PointerError.NodeNotSolved, q.mouseDownAt(probe.target, 0, 0));
+
+    h.solve(outer, 400, 200);
+    const r = ctx.measuredRect(probe.target).?;
+    // Offset by the parent's padding (20) and the sibling (30) — window space.
+    try std.testing.expectEqual(@as(f32, 50), r.x);
+    try std.testing.expectEqual(@as(f32, 15), r.y);
+    try std.testing.expectEqual(@as(f32, 100), r.w);
+    try std.testing.expectEqual(@as(f32, 40), r.h);
+    try std.testing.expectEqual(ctx.measuredSize(probe.target).?.w, r.w);
+
+    // Left edge is local 0, whatever the offset.
+    try q.mouseDownAt(probe.target, 0, 0);
+    try std.testing.expectEqual(@as(f32, 0), probe.down.?.x);
+    try std.testing.expectEqual(@as(f32, 0), probe.down.?.y);
+    try q.mouseDownAt(probe.target, 37, 12);
+    try std.testing.expectEqual(@as(f32, 37), probe.down.?.x);
+    try std.testing.expectEqual(@as(f32, 12), probe.down.?.y);
+    // The raw window coords are untouched.
+    try std.testing.expect(r.contains(50 + 37, 15 + 12));
+
+    // Drag leaves the node: locals go negative / past the size, unclamped.
+    try q.globalPointerAt("mouse_move", probe.target, -25, 60);
+    try std.testing.expectEqual(@as(f32, -25), probe.drag.?.x);
+    try std.testing.expectEqual(@as(f32, 60), probe.drag.?.y);
+    try q.globalPointerAt("mouse_move", probe.target, 130, -5);
+    try std.testing.expectEqual(@as(f32, 130), probe.drag.?.x);
+    try std.testing.expectEqual(@as(f32, -5), probe.drag.?.y);
+
+    // A scrolled ancestor moves the painted rect; the reader follows it, so a
+    // click at the node's painted left edge is still local 0.
+    try b.scrollOffsetY(outer, -10);
+    const rs = ctx.measuredRect(probe.target).?;
+    try std.testing.expectEqual(@as(f32, 5), rs.y);
+    _ = h.router.route(.{ .name = "mouse_down", .id = "", .node_id = probe.target, .x = 50, .y = 5 });
+    try std.testing.expectEqual(@as(f32, 0), probe.down.?.x);
+    try std.testing.expectEqual(@as(f32, 0), probe.down.?.y);
 }

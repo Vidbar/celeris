@@ -104,6 +104,12 @@ pub const Harness = struct {
         return node.geometry;
     }
 
+    /// The public `LayoutReader` over this harness's registry — the same value a
+    /// widget gets from `ctx.layoutReader()`.
+    pub fn reader(self: *Harness) component.LayoutReader {
+        return .{ .registry = &self.registry };
+    }
+
     /// Whether `id` ended up with a non-zero box after `solve` — the cheapest
     /// "would a user actually see this?" assertion.
     pub fn isVisible(self: *Harness, id: reg.NodeId) bool {

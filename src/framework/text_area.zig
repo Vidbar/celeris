@@ -23,7 +23,7 @@
 //! and copy/cut/paste/typing all act on the range.
 //!
 //! Caret/click positioning is a monospace, line-based estimate read from the
-//! text node's solved geometry in the registry — no C-ABI round-trip. It does
+//! text node's solved geometry via the public `LayoutReader` — no C-ABI round-trip. It does
 //! not account for the engine's word-wrapping; exact metrics come from
 //! `builder.measure` when present (same compromise documented in TextInput).
 //!
@@ -85,6 +85,8 @@ pub const TextArea = struct {
 
     // Captured during build().
     store: ?*props.PropertyStore = null,
+    /// Public resolved-geometry reader (pointer → text-local coords).
+    layout: ?component.LayoutReader = null,
     router: ?*events.EventRouter = null,
     measure: ?component.TextMeasure = null,
     clipboard: ?component.Clipboard = null,
@@ -347,12 +349,11 @@ pub const TextArea = struct {
 
     /// Byte index for a click at absolute (gx, gy), from the text node's geometry.
     fn indexFromClick(self: *TextArea, gx: f32, gy: f32) usize {
-        const store = self.store orelse return self.cursor_pos;
-        const registry = store.registry orelse return self.cursor_pos;
+        const layout = self.layout orelse return self.cursor_pos;
         if (self.text_node == reg.NULL_NODE) return self.cursor_pos;
-        const node = registry.getNode(self.text_node) orelse return self.cursor_pos;
-        const local_x = gx - node.geometry.x;
-        const local_y = gy - node.geometry.y;
+        const p = layout.toLocal(self.text_node, gx, gy) orelse return self.cursor_pos;
+        const local_x = p.x;
+        const local_y = p.y;
 
         const line: usize = if (local_y <= 0) 0 else @intFromFloat(local_y / self.lineH());
         const buf = self.text_buffer.items;
@@ -372,6 +373,7 @@ pub const TextArea = struct {
         const b = ctx.builder;
         self.theme = b.theme;
         self.store = b.store;
+        self.layout = ctx.layoutReader();
         self.router = ctx.router;
         self.measure = b.measure;
         self.clipboard = b.clipboard;
@@ -786,6 +788,7 @@ test "TextArea click positions the cursor from solved geometry" {
 
     // Solved layout: text node at origin.
     env.registry.getNode(ta.text_node).?.geometry = .{ .x = 0, .y = 0, .width = 200, .height = 40 };
+    env.registry.getNode(ta.text_node).?.layout_w = 200; // mark as solved for LayoutReader
 
     // Click on the second line, ~col 3 → index of 'l' in "world".
     env.route(.{ .name = "mouse_down", .id = "", .node_id = id, .x = 24.0, .y = 25.0 });
@@ -799,6 +802,7 @@ test "TextArea click uses measured x to pick the column on the clicked line" {
     const ta = try mount(&env, .{ .initial_text = "ab\ncde" });
     const id = ta.root_id;
     env.registry.getNode(ta.text_node).?.geometry = .{ .x = 0, .y = 0, .width = 200, .height = 40 };
+    env.registry.getNode(ta.text_node).?.layout_w = 200; // mark as solved for LayoutReader
 
     // Click line 1 (y=25 → line 1), x=12: 'c'[0,10)mid5, 'd'[10,20)mid15 → 12<15 →
     // col 1 → index 4 ('d') in "ab\ncde".

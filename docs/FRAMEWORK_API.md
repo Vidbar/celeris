@@ -197,7 +197,7 @@ pub fn build(self: *Canvas, ctx: *fw.component.BuildContext) !void {
 }
 ```
 
-`measuredSize(id: NodeId) ?MeasuredSize` returns `{ w: f32, h: f32 }` (the border box, padding included, margin excluded — the same numbers as the node's resolved `geometry`), or `null` if the node has never been through a solve or its id is dead. Position is intentionally not returned.
+`measuredSize(id: NodeId) ?MeasuredSize` returns `{ w: f32, h: f32 }` (the border box, padding included, margin excluded — the same numbers as the node's resolved `geometry`), or `null` if the node has never been through a solve or its id is dead. `ctx.measuredRect(id)` returns the same box with its position; see [Pointer coordinates local to a node](#pointer-coordinates-local-to-a-node).
 
 Two properties to design around:
 
@@ -206,9 +206,11 @@ Two properties to design around:
 
   ```zig
   size_sig: fw.signals.Signal(fw.component.MeasuredSize),   // created in onMount
+  layout: fw.component.LayoutReader,                         // self.layout = ctx.layoutReader() in build
 
   fn refreshSize(self: *Canvas) void {                       // runs on the UI thread
-      if (self.ctx.measuredSize(self.root)) |now| {
+      if (self.layout.rect(self.root)) |r| {
+          const now: fw.component.MeasuredSize = .{ .w = r.w, .h = r.h };
           const cur = self.size_sig.peek();
           if (now.w != cur.w or now.h != cur.h) self.size_sig.set(now);
       }
@@ -219,6 +221,48 @@ Two properties to design around:
   Reading `size_sig.get()` in `build` then re-windows the canvas through the normal fine-grained path — the subtree rebuild stays O(visible). (This is the pattern `ScrollView` uses for its post-solve content-height read.)
 
 There is deliberately **no** `viewportSize()` for "the window content area": in Celeris the title bar, split panes, sidebars and dialogs are all nodes, so a component is rarely the whole window. `measuredSize(your_root)` gives the number that actually matters and composes regardless of where the component is mounted. If you genuinely need the OS window size, that is `AppOptions` / the window API (see [Windows](#windows)), not `BuildContext`.
+
+### Pointer coordinates local to a node
+
+Pointer events (`mouse_down`, `mouse_up`, `mouse_move`, `click`, `double_click`) carry `ev.x` / `ev.y` in **window coordinates** (logical px). A widget that hit-tests its own content — click → line and column in a text editor, a point on a chart, a cell in a custom grid — needs them relative to its node. Keep a `LayoutReader` from `build` and convert in the handler:
+
+```zig
+const Editor = struct {
+    layout: ?fw.component.LayoutReader = null,
+    text_node: fw.component.NodeId = 0,
+
+    pub fn build(self: *Editor, ctx: *fw.component.BuildContext) !void {
+        self.layout = ctx.layoutReader(); // a BuildContext only lives for this build
+        self.text_node = try ctx.boxNode(.{
+            .grow = 1,
+            .on_mouse_down = ctx.handler(self, onDown),
+        }, .{});
+    }
+
+    fn onDown(self: *Editor, ev: fw.events.Event) void {
+        const p = self.layout.?.toLocal(self.text_node, ev.x, ev.y) orelse return;
+        // p.x / p.y: 0,0 is the node's top-left corner. Map them to your
+        // content, e.g. line = p.y / line_height, then
+        // fw.component.columnAtX(measure, that_line, font_size, p.x).
+        self.caretTo(p.x, p.y);
+    }
+};
+```
+
+- `ctx.layoutReader() LayoutReader` — a plain value you can store. It stays valid for as long as the window the widget is mounted in.
+- `reader.rect(id) ?MeasuredRect` — `{ x, y, w, h }`, the node's **border box** (padding included, margin excluded) in window coordinates. `null` if the node was never solved or is gone.
+- `reader.toLocal(id, x, y) ?Point` — the same as `rect(id).?.toLocal(x, y)`. `MeasuredRect` also has `toLocal(x, y)` and `contains(x, y)`.
+- `ctx.measuredRect(id)` — the same read during `build`, with the caveats of `measuredSize` above (one frame stale, not reactive: a node that moves does not re-run `build`).
+
+What the rect means:
+
+- **It is where the node is painted.** Scroll offsets of scrolling ancestors are already applied, so the conversion is correct inside a `ScrollView`.
+- **It is fresh in a handler.** Input is dispatched after the solve of the frame the user acted on.
+- **It is not clamped.** During a drag (`router.onGlobal` delivers `mouse_move` with `ev.node_id == 0`) the pointer can leave the node. Convert against the node id you stored, and the local coordinates come out negative or larger than `w`/`h`, which is what a drag-select needs.
+
+There is no `ev.local_x`: `ev.node_id` is the node whose handler fires, not always the node you want coordinates for (often an inner text node), and a global handler has no node at all. Naming the reference node, as above, works the same in both cases.
+
+In tests, `fw.testkit.Query.mouseDownAt(node, lx, ly)` / `pointerAt(name, node, lx, ly)` place an event at node-local coordinates, and `globalPointerAt(name, ref_node, lx, ly)` sends an untargeted one, as during a drag. They derive `ev.x/y` from the solved rect (call `h.solve(...)` first), so the handler's conversion runs exactly as in production.
 
 ## Framework-Owned Widgets
 

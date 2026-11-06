@@ -9,6 +9,33 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.1.8 — 2026-11-06
+
+### Added
+
+- **`ctx.layoutReader()` → `fw.component.LayoutReader`** — read a node's resolved
+  geometry from an event handler without touching `celeris.internal`.
+  `reader.rect(id)` returns a `MeasuredRect { x, y, w, h }`: the border box in
+  window coordinates (the space of `ev.x/y`), with ancestor scroll already applied.
+  `reader.toLocal(id, ev.x, ev.y)` converts a pointer to node-local coordinates. They
+  are not clamped, so a drag outside the node gives negative or larger-than-size values.
+- **`ctx.measuredRect(id)`** — the same rect during `build`, with the same caveats
+  as `measuredSize` (one frame stale, not reactive).
+- **`MeasuredRect.toLocal` / `contains`.**
+- **`fw.testkit.Query.mouseDownAt` / `pointerAt` / `globalPointerAt`** — route
+  pointer events at node-local coordinates. `ev.x/y` comes from the solved rect,
+  the same way as in production.
+
+### Changed
+
+- `TextInput` and `TextArea` hit-test clicks through `LayoutReader` instead of
+  reading the registry directly.
+- Docs: `MeasuredSize` is the border box; one code comment wrongly said content box.
+  The `FRAMEWORK_API.md` resize example no longer keeps a `BuildContext` past
+  `build`, which was invalid. It keeps a `LayoutReader` instead.
+
+No BREAKING changes. `ev.x/y` keep their meaning. `CELERIS_ABI_VERSION` unchanged (6).
+
 ## 0.1.7 — 2026-11-06
 
 ### Added
