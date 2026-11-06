@@ -35,6 +35,7 @@ pub const NodeId = reg.NodeId;
 pub const UIBuilder = builder_mod.UIBuilder;
 pub const TextMeasure = builder_mod.TextMeasure;
 pub const verticalFallback = builder_mod.verticalFallback;
+pub const verticalFallbackWith = builder_mod.verticalFallbackWith;
 /// Advance per character when no measurement is injected — see `text.fallbackCharWidth`.
 pub const fallbackCharWidth = @import("../render/text.zig").fallbackCharWidth;
 pub const Clipboard = builder_mod.Clipboard;
@@ -1458,8 +1459,6 @@ fn applyBoxProps(ctx: *BuildContext, id: NodeId, props_: anytype) !void {
             try store.setStyle(id, .opacity, .{ .number = numF32(v) });
         } else if (comptime std.mem.eql(u8, name, "font_size")) {
             try store.setStyle(id, .font_size, .{ .dimension = .{ .value = numF32(v), .unit = .px } });
-        } else if (comptime std.mem.eql(u8, name, "line_height")) {
-            try store.setStyle(id, .line_height, .{ .number = numF32(v) });
         } else if (comptime std.mem.eql(u8, name, "id")) {
             try ctx.builder.nodeId(id, v);
         } else if (comptime std.mem.eql(u8, name, "clickable")) {
@@ -2977,18 +2976,30 @@ test "ctx.onScroll / onScrollH wire scroll handlers on a raw-builder node, like 
     defer mounts.deinit();
 
     const Spy = struct {
-        var hits: u32 = 0;
-        fn on(_: ?*anyopaque, _: events.Event) void {
-            hits += 1;
+        var v_delta: f32 = 0;
+        var h_delta: f32 = 0;
+        fn onV(_: ?*anyopaque, ev: events.Event) void {
+            v_delta = ev.scroll_delta;
+        }
+        fn onH(_: ?*anyopaque, ev: events.Event) void {
+            h_delta = ev.scroll_delta;
         }
     };
     var b = UIBuilder.init(&registry, &store);
     var ctx = BuildContext{ .builder = &b, .router = &router, .mounts = &mounts };
+    // A root first, so the scrollable node isn't id 0 (which routing treats as "no node").
+    _ = try b.openNodeKeyed(.box, null);
     const id = try b.openNodeKeyed(.box, null);
-    try ctx.onScroll(id, .{ .ptr = null, .call = Spy.on });
-    try ctx.onScrollH(id, .{ .ptr = null, .call = Spy.on });
+    try ctx.onScroll(id, .{ .ptr = null, .call = Spy.onV });
+    try ctx.onScrollH(id, .{ .ptr = null, .call = Spy.onH });
+    b.close();
     b.close();
 
-    try testing.expect(router.nodeHandler(id, .scroll) != null);
-    try testing.expect(router.nodeHandler(id, .scroll_h) != null);
+    // Marked scrollable, so the engine's wheel hit-test can reach it.
+    try testing.expect(store.getModifier(id, .scrollable) != null);
+    // And each kind is routed to its own handler with the delta.
+    _ = router.route(.{ .name = "scroll", .id = "n", .node_id = id, .scroll_delta = 2.0 });
+    _ = router.route(.{ .name = "scroll_h", .id = "n", .node_id = id, .scroll_delta = -3.0 });
+    try testing.expectApproxEqAbs(@as(f32, 2.0), Spy.v_delta, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, -3.0), Spy.h_delta, 0.0001);
 }

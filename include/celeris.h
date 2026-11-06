@@ -38,7 +38,7 @@ extern "C" {
 
 /* C-ABI version of this header / build. Compare against celeris_abi_version() at
  * load time; a mismatch means the .dll/.so doesn't match this header. */
-#define CELERIS_ABI_VERSION 5u
+#define CELERIS_ABI_VERSION 6u
 uint32_t celeris_abi_version(void);
 
 /* ── Diagnostics: zone profiler ───────────────────────────────────────────────
@@ -298,6 +298,16 @@ int32_t celeris_get_caret_metrics(int32_t engine_id, const char *text, size_t le
                                   float *out_x, float *out_y, float *out_line_height);
 int32_t celeris_get_char_index_at(int32_t engine_id, const char *text, size_t len,
                                   float font_size, float max_width, float local_x, float local_y);
+/* The _lh variants take the text node's line_height multiplier (the "line_height"
+ * style; <= 0 or non-finite = default 1.55) so the caret line, its y and the
+ * hit-tested line match what the engine renders. The plain forms use the default. */
+int32_t celeris_get_caret_metrics_lh(int32_t engine_id, const char *text, size_t len,
+                                     float font_size, float max_width, float line_height,
+                                     size_t char_index,
+                                     float *out_x, float *out_y, float *out_line_height);
+int32_t celeris_get_char_index_at_lh(int32_t engine_id, const char *text, size_t len,
+                                     float font_size, float max_width, float line_height,
+                                     float local_x, float local_y);
 
 /* ── Application typefaces ───────────────────────────────────────────── */
 /* One face: bytes + length, or {NULL, 0} for "not supplied". */

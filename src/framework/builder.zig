@@ -72,18 +72,28 @@ pub const TextMeasure = struct {
     /// Vertical geometry from the engine's real font. Optional: a stub measure (tests,
     /// headless) leaves it null and `vertical` falls back to the same computation over
     /// default proportions — the same code, not a second rule.
-    verticalFn: ?*const fn (*anyopaque, font_size: f32, box_height: f32, num_lines: usize) text_mod.VerticalLayout = null,
+    /// The last argument is the line-height multiplier (`text.LINE_HEIGHT_FACTOR`
+    /// for the default).
+    verticalFn: ?*const fn (*anyopaque, font_size: f32, box_height: f32, num_lines: usize, line_height_factor: f32) text_mod.VerticalLayout = null,
 
     pub fn width(self: TextMeasure, text: []const u8, font_size: f32) f32 {
         return self.measureFn(self.ctx, text, font_size);
     }
 
     /// Where the baseline, the ink and the caret band land inside a `box_height`-tall
-    /// box. The widget-side door to `text.verticalLayoutFor` — a widget that draws a
-    /// caret, a selection band or an underline asks here instead of hardcoding px.
+    /// box, at the default line height. The widget-side door to
+    /// `text.verticalLayoutFor` — a widget that draws a caret, a selection band or an
+    /// underline asks here instead of hardcoding px.
     pub fn vertical(self: TextMeasure, font_size: f32, box_height: f32, num_lines: usize) text_mod.VerticalLayout {
-        if (self.verticalFn) |f| return f(self.ctx, font_size, box_height, num_lines);
-        return text_mod.verticalLayoutFor(.{}, font_size, box_height, num_lines);
+        return self.verticalWith(font_size, box_height, num_lines, text_mod.LINE_HEIGHT_FACTOR);
+    }
+
+    /// `vertical` for text with a `line_height` multiplier (the node's style, or a
+    /// theme `TextStyle.line_height`). Pass the same factor the text node has, or the
+    /// caret/selection band drifts from the glyphs line by line.
+    pub fn verticalWith(self: TextMeasure, font_size: f32, box_height: f32, num_lines: usize, line_height_factor: f32) text_mod.VerticalLayout {
+        if (self.verticalFn) |f| return f(self.ctx, font_size, box_height, num_lines, line_height_factor);
+        return text_mod.verticalLayoutWith(.{}, font_size, box_height, num_lines, line_height_factor);
     }
 
     /// Height of one line slot at `font_size` — what a text node of that size
@@ -92,12 +102,22 @@ pub const TextMeasure = struct {
     pub fn lineHeight(_: TextMeasure, font_size: f32) f32 {
         return text_mod.lineHeight(font_size);
     }
+
+    /// `lineHeight` with an explicit multiplier (sanitized like the style).
+    pub fn lineHeightWith(_: TextMeasure, font_size: f32, line_height_factor: f32) f32 {
+        return text_mod.lineHeightWith(font_size, line_height_factor);
+    }
 };
 
 /// Vertical geometry without a measure handle at all (no engine, no stub): still the
 /// one implementation, over default font proportions.
 pub fn verticalFallback(font_size: f32, box_height: f32, num_lines: usize) text_mod.VerticalLayout {
     return text_mod.verticalLayoutFor(.{}, font_size, box_height, num_lines);
+}
+
+/// `verticalFallback` with a line-height multiplier.
+pub fn verticalFallbackWith(font_size: f32, box_height: f32, num_lines: usize, line_height_factor: f32) text_mod.VerticalLayout {
+    return text_mod.verticalLayoutWith(.{}, font_size, box_height, num_lines, line_height_factor);
 }
 
 /// Type-erased clipboard access injected by the engine (the platform layer's
@@ -1174,4 +1194,21 @@ test "BUG: rebuilding after the root id was removed must not panic on a tombston
     b.close();
     try std.testing.expect(registry.getNode(root) != null);
     try std.testing.expectEqual(reg.NULL_NODE, registry.getNode(root).?.parent);
+}
+
+test "TextMeasure.verticalWith / lineHeightWith honour the factor, with or without an engine" {
+    const Stub = struct {
+        fn w(_: *anyopaque, _: []const u8, _: f32) f32 {
+            return 0;
+        }
+    };
+    var dummy: u8 = 0;
+    const m = TextMeasure{ .ctx = @ptrCast(&dummy), .measureFn = Stub.w };
+    try std.testing.expectApproxEqAbs(@as(f32, 20), m.lineHeightWith(16, 1.25), 0.0001);
+    try std.testing.expectApproxEqAbs(text_mod.lineHeight(16), m.lineHeight(16), 0.0001);
+    const vl = m.verticalWith(16, 40, 2, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 16), vl.line_height, 0.0001);
+    const fb = verticalFallbackWith(16, 40, 2, 1.0);
+    try std.testing.expectApproxEqAbs(vl.baseline, fb.baseline, 0.0001);
+    try std.testing.expectApproxEqAbs(text_mod.lineHeight(16), m.vertical(16, 40, 1).line_height, 0.0001);
 }

@@ -866,11 +866,18 @@ Set it any of these ways:
 | Raw builder | `try b.lineHeight(text_id, 1.2);` |
 | `Text` component | `fw.component.Text{ .content = "…", .size = 14, .line_height = 1.2 }` |
 | Theme style | `Text{ .content = "…", .style = t.typography.body_medium }` applies that style's `line_height` (1.42) |
-| Box prop | `.line_height = 1.2` (on a node that carries text) |
-| C ABI / C# | style key `"line_height"` with a number, e.g. `celeris_node_add_style(e, id, "line_height", "1.2")` |
+| C ABI / C# | style key `"line_height"` with a number on the **text node**, e.g. `celeris_node_add_style(e, text_id, "line_height", "1.2")` |
 
 `Text.line_height` wins over the style's. Changing it re-lays out the node, the
-same as changing `font_size`.
+same as changing `font_size`. Styles are **not inherited**: the multiplier goes on
+the text node itself. There is no `.line_height` box prop, because a box is not
+measured as text (the same holds for `font_size` on a box).
+
+Built-in widgets label with theme styles (`Button` → `label_large`, overridable with
+its `text_style`; `Checkbox`, `Radio`, `RadioGroup`, `Dropdown` → `body_medium`), so
+their labels use that style's line height. Both are 1.42, so a 14px label is 19.9px
+tall, not 21.7px. To change it app-wide, set the style's `line_height` in your theme's
+`typography`.
 
 **Sizing rows to text (virtualized lists, code views).** Don't hardcode a row
 height: a 16px font has a 24.8px slot at the default, so a 20px row overlaps its
@@ -883,19 +890,42 @@ const font_size: f32 = 16;
 const row_h = fw.text.lineHeight(font_size); // 24.8 — default multiplier
 // If your rows' text nodes set `.line_height = 1.25`, use the same factor:
 const tight_row_h = fw.text.lineHeightWith(font_size, 1.25); // 20.0
+// Rows built from a theme style: use the style's own factor.
+const st = ctx.theme().typography.body_medium;
+const styled_row_h = fw.text.lineHeightWith(st.size, st.line_height orelse fw.text.default_line_height); // 19.88
 ```
 
+Use the **same factor the text node has**. `lineHeight(size)` is only right for
+text that leaves `line_height` unset.
+
 These are pure functions of the font size and factor (no engine, no font), so they
-are exact in `build`, in tests and headless. `TextMeasure.lineHeight(size)` gives
-the same value from a measure handle. For the baseline and caret band *inside* a
-box, use `TextMeasure.vertical(size, box_h, lines)` (engine-exact) or
-`fw.builder.verticalFallback`.
+are exact in `build`, in tests and headless. `TextMeasure.lineHeight(size)` /
+`TextMeasure.lineHeightWith(size, f)` give the same values from a measure handle.
+
+**Baseline and caret band inside a box.** A widget that draws a caret, selection
+band or underline over text asks for the geometry instead of hardcoding px:
+
+- `TextMeasure.vertical(size, box_h, lines)` — default line height, engine-exact.
+- `TextMeasure.verticalWith(size, box_h, lines, f)` — for text with a
+  `line_height`; pass the node's factor, or the band drifts from the glyphs line by
+  line.
+- `fw.builder.verticalFallback` / `verticalFallbackWith` — the same computation
+  without a measure handle.
+
+**C hosts.** `celeris_get_caret_metrics` and `celeris_get_char_index_at` measure at
+the default line height. For text whose node has a `line_height` style, call
+`celeris_get_caret_metrics_lh` / `celeris_get_char_index_at_lh` with the same
+factor (ABI 6). Otherwise the caret and the clicked line come out at 1.55 slots
+while the engine draws at yours.
 
 **Limits.** The slot is a multiplier of the font size. It is not computed from the
 face's own ascent/descent/line gap (CSS `line-height: normal`), and there is no
 per-node font family: faces are the app-wide roles from `setAppFonts`. Both are
 listed under *Deferred work* in `ARCHITECTURE.md`. The built-in `TextInput` and
-`TextArea` keep their own fixed metrics and do not read `line_height`.
+`TextArea` keep their own fixed metrics and do not read `line_height`. Layout
+without a font atlas (some headless setups) sizes a text node as
+`font_size + padding`, ignoring line count and `line_height`. With an atlas, which
+real windows always have, the height is `lines × font_size × line_height`.
 
 ## Theming
 

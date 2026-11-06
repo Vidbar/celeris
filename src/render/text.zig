@@ -145,13 +145,13 @@ pub fn verticalLayoutFor(m: FontMetrics, size: f32, box_height: f32, num_lines: 
     return verticalLayoutWith(m, size, box_height, num_lines, LINE_HEIGHT_FACTOR);
 }
 
+// Alias so `FontAtlas.verticalLayoutWith` can reach the free function below
+// without the method name shadowing it.
+const text_vertical_with = verticalLayoutWith;
+
 /// `verticalLayoutFor` with an explicit line-height multiplier (a node's
 /// `line_height` style). The cap band stays centered in each slot, so a taller
 /// line adds leading evenly above and below the text.
-/// Alias so `FontAtlas.verticalLayoutWith` can reach the free function without
-/// shadowing its name.
-const text_vertical_with = verticalLayoutWith;
-
 pub fn verticalLayoutWith(m: FontMetrics, size: f32, box_height: f32, num_lines: usize, line_height_factor: f32) VerticalLayout {
     const line_height = lineHeightWith(size, line_height_factor);
     const lines: f32 = @floatFromInt(@max(@as(usize, 1), num_lines));
@@ -1256,4 +1256,57 @@ test "BUG: CVE-2026-18497 — a glyph whose declared point count can't fit the b
     const n_unbounded = stb.stbtt_GetGlyphShape(&info, 0, &vertices);
     try testing.expect(n_unbounded != 0);
     if (vertices != null) stb.stbtt_FreeShape(&info, vertices);
+}
+
+test "lineHeightWith: explicit factor scales the slot; unusable factors fall back to the default" {
+    try testing.expectApproxEqAbs(@as(f32, 20), lineHeightWith(16, 1.25), 0.0001);
+    try testing.expectApproxEqAbs(lineHeight(16), lineHeightWith(16, LINE_HEIGHT_FACTOR), 0.0001);
+    const bad = [_]f32{ 0, -1, std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) };
+    for (bad) |f| {
+        try testing.expectApproxEqAbs(lineHeight(16), lineHeightWith(16, f), 0.0001);
+    }
+}
+
+test "verticalLayoutWith: slot follows the factor and the cap band stays optically centered" {
+    const m = FontMetrics{};
+    const box: f32 = 40;
+    for ([_]f32{ 1.0, 1.55, 2.0 }) |f| {
+        const vl = verticalLayoutWith(m, 16, box, 1, f);
+        try testing.expectApproxEqAbs(16 * f, vl.line_height, 0.0001);
+        // Space above the caps == space below the baseline, whatever the leading.
+        try testing.expectApproxEqAbs(vl.cap_top, box - vl.baseline, 0.0001);
+    }
+    // The default entry point is the default factor.
+    const a = verticalLayoutFor(m, 16, box, 2);
+    const b = verticalLayoutWith(m, 16, box, 2, LINE_HEIGHT_FACTOR);
+    try testing.expectApproxEqAbs(a.baseline, b.baseline, 0.0001);
+    try testing.expectApproxEqAbs(a.line_height, b.line_height, 0.0001);
+}
+
+test "line_height factor travels from measurement to total_height, caret and hit-testing" {
+    const ttf = try loadTestFont(testing.allocator);
+    defer testing.allocator.free(ttf);
+    var atlas = try FontAtlas.init(testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+
+    const s = "one\ntwo\nthree";
+    var layout = try atlas.measureTextMultilinePref(s, 16, 0, 0, 0, 1.0, testing.allocator);
+    defer layout.deinit();
+    try testing.expectApproxEqAbs(@as(f32, 1.0), layout.line_height_factor, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 48), layout.total_height, 0.01);
+
+    // Caret on line 3 sits at 2 × 16, not 2 × 24.8.
+    const cm = atlas.getCaretMetrics(s, &layout, 16, 9, 1.0);
+    try testing.expectEqual(@as(usize, 2), cm.line_index);
+    try testing.expectApproxEqAbs(@as(f32, 32), cm.y, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 16), cm.line_height, 0.01);
+
+    // y = 20 is inside line 2 at factor 1.0 (it would be line 1 at 1.55).
+    const idx = atlas.getCharIndexAt(s, &layout, 16, 0, 20);
+    try testing.expectEqual(@as(usize, 4), idx); // start of "two"
+
+    // A bad factor is sanitized at measurement time.
+    var dflt = try atlas.measureTextMultilinePref(s, 16, 0, 0, 0, std.math.nan(f32), testing.allocator);
+    defer dflt.deinit();
+    try testing.expectApproxEqAbs(LINE_HEIGHT_FACTOR, dflt.line_height_factor, 0.0001);
 }

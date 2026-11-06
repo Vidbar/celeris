@@ -1081,6 +1081,10 @@ pub const LayoutEngine = struct {
                 // Fallback for when atlas is not provided (headless testing)
                 // We don't have engine_id here, but we can pass 0 for now as a fallback since headless tests usually don't rely heavily on text measuring
                 w += celeris_measure_text(0, c.ptr, c.len, fs);
+                // Height stays `font_size + padding` here: an approximation that
+                // ignores line count and `line_height`. Headless tests assert
+                // geometry built on it, so it is left as is; real layout always has
+                // an atlas and measures `lines × font_size × line_height`.
             }
         }
         return .{ .w = w, .h = h };

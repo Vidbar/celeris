@@ -11,29 +11,46 @@ listed here as well.
 
 ## Unreleased
 
+`CELERIS_ABI_VERSION` 6 (additive).
+
+### BREAKING
+
+- **`TextStyle.line_height` is now `?f32`** (was `f32 = 1.2`, which nothing
+  applied). Default `null` = the engine default (1.55). Replacement: code reading it
+  as a number writes `style.line_height orelse fw.text.default_line_height`.
+- **Theme typography's line height is now applied, so widget labels get shorter.**
+  `Text{ .style = … }` and every built-in widget that uses a theme style
+  (`Button` → `label_large`, `Checkbox` / `Radio` / `RadioGroup` / `Dropdown` →
+  `body_medium`, all 1.42) lay text out at that style's line height. A 14px label
+  goes from 21.7px to 19.9px tall. Fixed-height controls stay centered, but
+  hug-height rows (dropdown options, radio-group rows, a button without `.height`)
+  shrink by about 1.8px. Replacement, to keep the old spacing: for `Button`, pass
+  `.text_style = .{ .size = 14, .weight = .medium }` (no `line_height` = default);
+  for the others, set `line_height = null` (or 1.55) on the theme's
+  `typography.body_medium` / `label_large`; for your own `Text`, `.line_height = 1.55`.
+- `FontAtlas.measureTextMultilinePref` (reachable through `celeris.internal`)
+  takes a `lh_factor` argument before the allocator. Pass
+  `text.LINE_HEIGHT_FACTOR` for the old behaviour.
+- `TextMeasure.verticalFn` (for hosts that inject their own measure) takes a
+  trailing `line_height_factor: f32`.
+
 ### Added
 
 - **`line_height` per text node** — a unitless multiplier (CSS `line-height`,
   Flutter `TextStyle.height`): each line slot is `font_size × line_height`.
-  Measurement, the renderer, the caret and hit-testing all use it. Set it with
-  `b.lineHeight(id, f)`, `Text{ .line_height = f }`, the box prop `.line_height`,
-  or the style key `"line_height"` from C / C#. Unset keeps the old 1.55.
+  Measurement, the renderer, the atlas caret and hit-testing all use it. Set it on
+  the text node with `b.lineHeight(id, f)`, `Text{ .line_height = f }`, or the style
+  key `"line_height"` from C / C#. Unset keeps 1.55; ≤ 0, NaN or ∞ means default.
 - **`fw.text`** — public text metrics: `lineHeight(size)`,
   `lineHeightWith(size, factor)`, `default_line_height`. Size virtualized rows
-  from these instead of `celeris.internal.text`. Also
-  `TextMeasure.lineHeight(size)`.
+  from these instead of `celeris.internal.text`.
+- **`TextMeasure.lineHeight` / `lineHeightWith` / `verticalWith`** and
+  `fw.builder.verticalFallbackWith`, so a widget drawing a caret or a selection
+  band over text with a `line_height` gets matching geometry.
+- **C ABI:** `celeris_get_caret_metrics_lh` / `celeris_get_char_index_at_lh` take
+  the node's line-height factor. The existing functions keep the default.
 - **`ctx.onScroll(id, h)` / `ctx.onScrollH(id, h)`** — the raw-builder forms of the
   `on_scroll` / `on_scroll_h` props, matching `ctx.onResize`.
-
-### Changed
-
-- **Theme typography's `line_height` is now applied.** `Text{ .style = … }` and
-  widgets that take a `text_style` (e.g. `Button`, whose label defaults to
-  `label_large`, 1.42) now lay out text at that style's line height instead of
-  ignoring it. Single-line labels stay centered; a multi-line label is a little
-  shorter. `TextStyle.line_height` is now `?f32` (default `null` = engine default),
-  so an ad-hoc `.{ .size = 13 }` style keeps 1.55.
-- `FontAtlas.measureTextMultilinePref` (internal) takes the line-height factor.
 
 ## 0.1.2 — 2026-11-05
 

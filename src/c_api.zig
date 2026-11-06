@@ -850,9 +850,10 @@ pub export fn celeris_last_error() [*:0]const u8 {
 /// The C-ABI version of this build (see include/celeris.h). Additive surface
 /// changes bump it; breaking changes are a new major. v3 adds the folder picker
 /// (celeris_pick_directory) and thread-safe repaint (celeris_request_redraw);
-/// v5 adds the CELERIS_EVENT_RESIZE event type.
+/// v5 adds the CELERIS_EVENT_RESIZE event type; v6 adds the `line_height` style
+/// key and celeris_get_caret_metrics_lh / celeris_get_char_index_at_lh.
 pub export fn celeris_abi_version() u32 {
-    return 5;
+    return 6;
 }
 
 // ─── Diagnostics: zone profiler ────────────────────────────────────────────────
@@ -1232,9 +1233,9 @@ fn atlasMeasureWidth(ctx: *anyopaque, text: []const u8, font_size: f32) f32 {
 
 /// Wraps FontAtlas.verticalLayout for the component layer, so a widget drawing a
 /// caret or a selection band gets the same geometry the renderer draws glyphs with.
-fn atlasVerticalLayout(ctx: *anyopaque, font_size: f32, box_height: f32, num_lines: usize) text_mod.VerticalLayout {
+fn atlasVerticalLayout(ctx: *anyopaque, font_size: f32, box_height: f32, num_lines: usize, line_height_factor: f32) text_mod.VerticalLayout {
     const m_ctx: *const MeasureContext = @ptrCast(@alignCast(ctx));
-    return m_ctx.atlas.verticalLayout(0, font_size, box_height, num_lines);
+    return m_ctx.atlas.verticalLayoutWith(0, font_size, box_height, num_lines, line_height_factor);
 }
 
 // Platform clipboard wrappers for the component layer's type-erased Clipboard.
@@ -2653,7 +2654,15 @@ pub export fn celeris_measure_text(engine_id: i32, text: [*c]const u8, len: usiz
 }
 
 pub export fn celeris_get_caret_metrics(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, char_index: usize, out_x_opt: ?*f32, out_y_opt: ?*f32, out_lh_opt: ?*f32) i32 {
+    return celeris_get_caret_metrics_lh(engine_id, text, len, font_size, max_width, text_mod.LINE_HEIGHT_FACTOR, char_index, out_x_opt, out_y_opt, out_lh_opt);
+}
+
+/// `celeris_get_caret_metrics` for text whose node has a `line_height` style: pass
+/// the same multiplier so the caret's line and y match the rendered lines. A
+/// non-positive / non-finite factor means the default (1.55).
+pub export fn celeris_get_caret_metrics_lh(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, line_height: f32, char_index: usize, out_x_opt: ?*f32, out_y_opt: ?*f32, out_lh_opt: ?*f32) i32 {
     const engine = getEngine(engine_id) orelse return -1;
+    const lh = text_mod.sanitizeLineHeight(line_height);
     // NULL out-params are allowed (the value is just not reported).
     var sink: [3]f32 = undefined;
     const out_x = out_x_opt orelse &sink[0];
@@ -2662,13 +2671,13 @@ pub export fn celeris_get_caret_metrics(engine_id: i32, text: [*c]const u8, len:
     if (engine.atlas == null or text == null or len == 0) {
         out_x.* = 0;
         out_y.* = 0;
-        out_line_height.* = text_mod.lineHeight(font_size);
+        out_line_height.* = text_mod.lineHeightWith(font_size, lh);
         return 0;
     }
 
     const slice = text[0..len];
     if (engine.atlas) |*atlas| {
-        if (atlas.measureTextMultiline(slice, font_size, max_width, engine.gpa.allocator())) |layout| {
+        if (atlas.measureTextMultilinePref(slice, font_size, max_width, 0, 0, lh, engine.gpa.allocator())) |layout| {
             var mut_layout = layout;
             defer mut_layout.deinit();
             const metrics = atlas.getCaretMetrics(slice, &layout, font_size, char_index, engine.scale);
@@ -2681,17 +2690,23 @@ pub export fn celeris_get_caret_metrics(engine_id: i32, text: [*c]const u8, len:
 
     out_x.* = 0;
     out_y.* = 0;
-    out_line_height.* = text_mod.lineHeight(font_size);
+    out_line_height.* = text_mod.lineHeightWith(font_size, lh);
     return 0;
 }
 
 pub export fn celeris_get_char_index_at(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, local_x: f32, local_y: f32) i32 {
+    return celeris_get_char_index_at_lh(engine_id, text, len, font_size, max_width, text_mod.LINE_HEIGHT_FACTOR, local_x, local_y);
+}
+
+/// `celeris_get_char_index_at` for text with a `line_height` style (same factor
+/// the node has; non-positive / non-finite = default).
+pub export fn celeris_get_char_index_at_lh(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, line_height: f32, local_x: f32, local_y: f32) i32 {
     const engine = getEngine(engine_id) orelse return -1;
     if (engine.atlas == null or text == null or len == 0) return 0;
 
     const slice = text[0..len];
     if (engine.atlas) |*atlas| {
-        if (atlas.measureTextMultiline(slice, font_size, max_width, engine.gpa.allocator())) |layout| {
+        if (atlas.measureTextMultilinePref(slice, font_size, max_width, 0, 0, text_mod.sanitizeLineHeight(line_height), engine.gpa.allocator())) |layout| {
             var mut_layout = layout;
             defer mut_layout.deinit();
             return @intCast(atlas.getCharIndexAt(slice, &layout, font_size, local_x, local_y));
