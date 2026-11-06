@@ -548,7 +548,7 @@ These are load-bearing behaviours; downstream apps (node editors, canvases) rely
 
 - **Modifiers on every pointer event.** `ev.shift` / `ev.ctrl` / `ev.alt` are filled on `mouse_down`, `mouse_up`/`click`, `mouse_move`, `right_click`, `mouse_enter`/`mouse_leave`, `double_click` and `scroll`/`scroll_h` — not just on keys. They reflect the key state at the moment the OS delivered the pointer message (Win32 `GetKeyState`, Wayland xkb state), so shift-click multi-select and shift-drag marquee work: `if (ev.shift) self.toggleSelect(id) else self.selectOnly(id);`. (C hosts read the same bits in `CelerisEvent.modifiers`.)
 - **Presses bubble through clickable ancestors.** A `mouse_down` (and the `click` on release) is dispatched capture → target → bubble along the hit node's ancestor chain: the child's handler runs first, then the handler of **every clickable ancestor**, e.g. a clickable canvas root behind a clickable node. `right_click` bubbles the same way through right-clickable ancestors. An ancestor that must ignore presses already handled by a child has to check `ev.node_id` (or keep a "handled this press" flag); `.no_drag` stops the bubble at that node.
-- **Wheel only reaches scrollable nodes.** `scroll`/`scroll_h` go to the **nearest ancestor-or-self of the hit node marked scrollable** (`on_scroll` / `.scrollable`) and stop there — exactly one node receives each wheel event, and a plain clickable box never sees one. Give a zoomable canvas an `on_scroll` handler to receive the wheel.
+- **Wheel only reaches scrollable nodes.** `scroll`/`scroll_h` go to the **nearest ancestor-or-self of the hit node marked scrollable** (`on_scroll` / `.scrollable`) and stop there — exactly one node receives each wheel event, and a plain clickable box never sees one. Give a zoomable canvas an `on_scroll` handler to receive the wheel (or `ctx.onScroll(id, h)` for a raw-builder node — see [Wheel on raw-builder nodes](#wheel-on-raw-builder-nodes-ctxonscroll--ctxonscrollh)).
 - **Release goes where the press went (implicit pointer capture).** On release the engine emits the global `mouse_up` (no node, for drag-follow handlers), then a node-targeted `mouse_up` to every clickable node that received the `mouse_down` — even if the pointer is now elsewhere — and only then the `click` to the node under the pointer. A node removed by a rebuild between press and release gets its `mouse_up` at removal time. So `on_press` / `on_mouse_up` state (`Button.pressed`) can't get stuck, including when the click handler re-mounts the button. `Button`/`IconButton` also drop `pressed` on `mouse_leave`.
 - **Hover survives rebuilds.** If a rebuild removes the hovered node (e.g. a `Button` whose click rebuilds its parent is re-created), that node receives its `mouse_leave` **at removal time** — a removed node is never hovered — so hover-driven state (`Button.hovered`) resets even if the pointer leaves before the next frame or the re-mounted widget is no longer under it. After the next frame is baked, hover is re-evaluated at the last pointer position: a replacement still under the pointer gets `mouse_enter`, and its own `mouse_leave` later. Note that such a `mouse_leave` handler can run *during* a rebuild; keep hover handlers to state writes (the `on_hover` signal-setter pattern).
 
@@ -914,7 +914,7 @@ band or underline over text asks for the geometry instead of hardcoding px:
 
 **C hosts.** `celeris_get_caret_metrics` and `celeris_get_char_index_at` measure at
 the default line height. For text whose node has a `line_height` style, call
-`celeris_get_caret_metrics_lh` / `celeris_get_char_index_at_lh` with the same
+`celeris_get_caret_metrics_ex` / `celeris_get_char_index_at_ex` with the same
 factor (ABI 6). Otherwise the caret and the clicked line come out at 1.55 slots
 while the engine draws at yours.
 
@@ -944,7 +944,7 @@ b.close();
 
 **Typography.** `t.typography` holds Material-style `TextStyle`s (`display_large` …
 `label_small`), each with a `size`, `weight` and `line_height`. Passing one to
-`fw.component.Text{ .style = … }` (or a widget's `text_style`) applies its size
+`fw.component.Text{ .style = … }` (or `Button.text_style`) applies its size
 **and its line height**. A hand-written `TextStyle{ .size = 13 }` leaves
 `line_height = null` and keeps the engine default (1.55). See
 [Text line height and metrics](#text-line-height-and-metrics-line_height-fwtext).

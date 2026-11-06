@@ -26,8 +26,10 @@ listed here as well.
   hug-height rows (dropdown options, radio-group rows, a button without `.height`)
   shrink by about 1.8px. Replacement, to keep the old spacing: for `Button`, pass
   `.text_style = .{ .size = 14, .weight = .medium }` (no `line_height` = default);
-  for the others, set `line_height = null` (or 1.55) on the theme's
-  `typography.body_medium` / `label_large`; for your own `Text`, `.line_height = 1.55`.
+  for the others, set `line_height = null` (or 1.55) on `typography.body_medium` /
+  `label_large` of the **app theme** (`b.theme`, or `ctx.themeSignal().?.set(...)`),
+  not on a widget's own `theme` field, which `build` overwrites; for your own
+  `Text`, `.line_height = 1.55`.
 - `FontAtlas.measureTextMultilinePref` (reachable through `celeris.internal`)
   takes a `lh_factor` argument before the allocator. Pass
   `text.LINE_HEIGHT_FACTOR` for the old behaviour.
@@ -47,7 +49,7 @@ listed here as well.
 - **`TextMeasure.lineHeight` / `lineHeightWith` / `verticalWith`** and
   `fw.builder.verticalFallbackWith`, so a widget drawing a caret or a selection
   band over text with a `line_height` gets matching geometry.
-- **C ABI:** `celeris_get_caret_metrics_lh` / `celeris_get_char_index_at_lh` take
+- **C ABI:** `celeris_get_caret_metrics_ex` / `celeris_get_char_index_at_ex` take
   the node's line-height factor. The existing functions keep the default.
 - **`ctx.onScroll(id, h)` / `ctx.onScrollH(id, h)`** — the raw-builder forms of the
   `on_scroll` / `on_scroll_h` props, matching `ctx.onResize`.

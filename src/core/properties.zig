@@ -315,6 +315,15 @@ pub const PropertyStore = struct {
             entry.path_data = null;
         }
 
+        // Styles that shape text (see setStyle). Dropping one of them changes the
+        // measured text, so the cached layout must be rebuilt — otherwise a reused
+        // node that loses e.g. `line_height` keeps drawing at the old factor.
+        const shaping_keys = [_]StyleKey{ .font_size, .font_role, .letter_spacing, .line_height };
+        var had_shaping_style = false;
+        for (shaping_keys) |k| {
+            if (entry.style[@intFromEnum(k)] != null) had_shaping_style = true;
+        }
+
         self.freeEntryStrings(entry);
         entry.* = .{}; // reset all domains to "unset" (every slot null)
         entry.text_content = preserved_text;
@@ -322,6 +331,9 @@ pub const PropertyStore = struct {
 
         // Mark as dirty
         if (self.registry) |r| {
+            if (had_shaping_style) {
+                if (r.getNode(node_id)) |n| n.text_dirty = true;
+            }
             r.global_layout_dirty = true;
             r.global_render_dirty = true;
             var curr_id = node_id;

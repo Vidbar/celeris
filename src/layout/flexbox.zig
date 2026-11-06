@@ -3098,3 +3098,39 @@ test "Flexbox — line_height scales each line slot and relayouts when changed" 
     engine.solve(col, 0, 0, 400, 400);
     try std.testing.expectApproxEqAbs(@as(f32, 2 * text_mod.lineHeight(16)), registry.getNode(tight).?.geometry.height, 0.01);
 }
+
+test "Flexbox — a reused text node that loses line_height on rebuild re-measures at the default" {
+    const ttf = try loadRegressionFont(std.testing.allocator);
+    defer std.testing.allocator.free(ttf);
+    var atlas = try text_mod.FontAtlas.init(std.testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    store.setRegistry(&registry);
+
+    var b = builder.UIBuilder.init(&registry, &store);
+    const col = try b.openBox();
+    try b.width(col, 400, .px);
+    try b.height(col, 400, .px);
+    try b.flexColumn(col);
+    const t1 = try b.addText("one\ntwo");
+    try b.lineHeight(t1, 1.0);
+    b.close();
+
+    var engine = LayoutEngine.init(&registry, &store, &atlas);
+    engine.solve(col, 0, 0, 400, 400);
+    try std.testing.expectApproxEqAbs(@as(f32, 32), registry.getNode(t1).?.geometry.height, 0.01);
+
+    // Rebuild: same content, same position — the node is reused — but no line_height.
+    try b.rootAt(col);
+    const t2 = try b.addText("one\ntwo");
+    b.close();
+    try std.testing.expectEqual(t1, t2);
+    engine.solve(col, 0, 0, 400, 400);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 2 * text_mod.lineHeight(16)), registry.getNode(t2).?.geometry.height, 0.01);
+    try std.testing.expectApproxEqAbs(text_mod.LINE_HEIGHT_FACTOR, registry.getNode(t2).?.text_layout.?.line_height_factor, 0.0001);
+}

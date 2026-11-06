@@ -851,7 +851,7 @@ pub export fn celeris_last_error() [*:0]const u8 {
 /// changes bump it; breaking changes are a new major. v3 adds the folder picker
 /// (celeris_pick_directory) and thread-safe repaint (celeris_request_redraw);
 /// v5 adds the CELERIS_EVENT_RESIZE event type; v6 adds the `line_height` style
-/// key and celeris_get_caret_metrics_lh / celeris_get_char_index_at_lh.
+/// key and celeris_get_caret_metrics_ex / celeris_get_char_index_at_ex.
 pub export fn celeris_abi_version() u32 {
     return 6;
 }
@@ -2654,13 +2654,13 @@ pub export fn celeris_measure_text(engine_id: i32, text: [*c]const u8, len: usiz
 }
 
 pub export fn celeris_get_caret_metrics(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, char_index: usize, out_x_opt: ?*f32, out_y_opt: ?*f32, out_lh_opt: ?*f32) i32 {
-    return celeris_get_caret_metrics_lh(engine_id, text, len, font_size, max_width, text_mod.LINE_HEIGHT_FACTOR, char_index, out_x_opt, out_y_opt, out_lh_opt);
+    return celeris_get_caret_metrics_ex(engine_id, text, len, font_size, max_width, text_mod.LINE_HEIGHT_FACTOR, char_index, out_x_opt, out_y_opt, out_lh_opt);
 }
 
 /// `celeris_get_caret_metrics` for text whose node has a `line_height` style: pass
 /// the same multiplier so the caret's line and y match the rendered lines. A
 /// non-positive / non-finite factor means the default (1.55).
-pub export fn celeris_get_caret_metrics_lh(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, line_height: f32, char_index: usize, out_x_opt: ?*f32, out_y_opt: ?*f32, out_lh_opt: ?*f32) i32 {
+pub export fn celeris_get_caret_metrics_ex(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, line_height: f32, char_index: usize, out_x_opt: ?*f32, out_y_opt: ?*f32, out_lh_opt: ?*f32) i32 {
     const engine = getEngine(engine_id) orelse return -1;
     const lh = text_mod.sanitizeLineHeight(line_height);
     // NULL out-params are allowed (the value is just not reported).
@@ -2695,12 +2695,12 @@ pub export fn celeris_get_caret_metrics_lh(engine_id: i32, text: [*c]const u8, l
 }
 
 pub export fn celeris_get_char_index_at(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, local_x: f32, local_y: f32) i32 {
-    return celeris_get_char_index_at_lh(engine_id, text, len, font_size, max_width, text_mod.LINE_HEIGHT_FACTOR, local_x, local_y);
+    return celeris_get_char_index_at_ex(engine_id, text, len, font_size, max_width, text_mod.LINE_HEIGHT_FACTOR, local_x, local_y);
 }
 
 /// `celeris_get_char_index_at` for text with a `line_height` style (same factor
 /// the node has; non-positive / non-finite = default).
-pub export fn celeris_get_char_index_at_lh(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, line_height: f32, local_x: f32, local_y: f32) i32 {
+pub export fn celeris_get_char_index_at_ex(engine_id: i32, text: [*c]const u8, len: usize, font_size: f32, max_width: f32, line_height: f32, local_x: f32, local_y: f32) i32 {
     const engine = getEngine(engine_id) orelse return -1;
     if (engine.atlas == null or text == null or len == 0) return 0;
 

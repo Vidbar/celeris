@@ -45,8 +45,9 @@ pub const text = struct {
     /// Height of one line slot at `font_size` with an explicit multiplier — the
     /// same value a text node with `.line_height = factor` measures per line.
     pub const lineHeightWith = t.lineHeightWith;
-    /// Vertical geometry (baseline, caret band, …) inside a box, from default font
-    /// proportions. Engine-exact geometry: `TextMeasure.vertical`.
+    /// The type of a text block's vertical geometry (baseline, caret band, …) in a
+    /// box. Get one from `TextMeasure.vertical` / `verticalWith` (engine-exact) or
+    /// `fw.builder.verticalFallback` / `verticalFallbackWith`.
     pub const VerticalLayout = t.VerticalLayout;
 };
 pub const theme = @import("framework/theme.zig");

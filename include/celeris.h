@@ -298,14 +298,14 @@ int32_t celeris_get_caret_metrics(int32_t engine_id, const char *text, size_t le
                                   float *out_x, float *out_y, float *out_line_height);
 int32_t celeris_get_char_index_at(int32_t engine_id, const char *text, size_t len,
                                   float font_size, float max_width, float local_x, float local_y);
-/* The _lh variants take the text node's line_height multiplier (the "line_height"
+/* The _ex variants take the text node's line_height multiplier (the "line_height"
  * style; <= 0 or non-finite = default 1.55) so the caret line, its y and the
  * hit-tested line match what the engine renders. The plain forms use the default. */
-int32_t celeris_get_caret_metrics_lh(int32_t engine_id, const char *text, size_t len,
+int32_t celeris_get_caret_metrics_ex(int32_t engine_id, const char *text, size_t len,
                                      float font_size, float max_width, float line_height,
                                      size_t char_index,
                                      float *out_x, float *out_y, float *out_line_height);
-int32_t celeris_get_char_index_at_lh(int32_t engine_id, const char *text, size_t len,
+int32_t celeris_get_char_index_at_ex(int32_t engine_id, const char *text, size_t len,
                                      float font_size, float max_width, float line_height,
                                      float local_x, float local_y);
 
