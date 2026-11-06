@@ -19,7 +19,9 @@ listed here as well.
   `<= 0` px convention as `ScrollView.offset`, so one signal can be shared).
   Proportional thumb with a minimum length, drag with global follow, track click
   pages one viewport, wheel over the bar, hover/pressed colours, vertical and
-  horizontal. Exposed to UI Automation as a ScrollBar control.
+  horizontal. Exposed to UI Automation as a ScrollBar with a Thumb child.
+  Known limitation: holding the mouse on the track pages once, it does not
+  auto-repeat (native scrollbars keep paging until the thumb reaches the pointer).
 - **Theme:** `scrollbar_thumb_hover` and `scrollbar_thumb_active` (set in the dark,
   light and seed themes; a theme that leaves them unset falls back to
   `scrollbar_thumb`).

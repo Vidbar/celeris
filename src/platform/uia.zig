@@ -292,6 +292,7 @@ pub const UIA_ToolBarControlTypeId: i32 = 50021;
 pub const UIA_TreeControlTypeId: i32 = 50023;
 pub const UIA_TreeItemControlTypeId: i32 = 50024;
 pub const UIA_GroupControlTypeId: i32 = 50026;
+pub const UIA_ThumbControlTypeId: i32 = 50027;
 pub const UIA_WindowControlTypeId: i32 = 50032;
 pub const UIA_SeparatorControlTypeId: i32 = 50038;
 
@@ -436,6 +437,7 @@ pub fn ariaRoleToControlType(role: []const u8) i32 {
         .{ .role = "text", .ct = UIA_TextControlTypeId },
         .{ .role = "slider", .ct = UIA_SliderControlTypeId },
         .{ .role = "scrollbar", .ct = UIA_ScrollBarControlTypeId },
+        .{ .role = "thumb", .ct = UIA_ThumbControlTypeId },
         .{ .role = "menuitem", .ct = UIA_MenuItemControlTypeId },
         .{ .role = "tab", .ct = UIA_TabControlTypeId },
         .{ .role = "tabitem", .ct = UIA_TabItemControlTypeId },

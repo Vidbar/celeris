@@ -22,8 +22,9 @@
 //! of the content re-clamps (it knows when its content shrank).
 //!
 //! **Sizing.** The bar is `thickness` across and grows along its axis to fill
-//! its mount anchor, so the anchor needs a *definite* length or the track hugs
-//! the thumb and collapses a bit more every frame (silently). Either mount it
+//! its mount anchor, so the anchor needs a *definite* length — otherwise the
+//! track measures 0 and no thumb shows (the thumb is out of flow, so the track
+//! can't hug it and creep smaller frame by frame). Either mount it
 //! as a direct child of a row (vertical bar) / column (horizontal bar) beside
 //! the view, so the cross-axis stretch gives it its length — or mount it with
 //! `.fill = true` inside a holder whose length is definite via `grow`/px.
@@ -315,6 +316,9 @@ const Body = struct {
             .height = component.pct(100),
             .direction = @as(props.Keyword, if (v) .column else .row),
             .radius = t.radius_base,
+            // Clickable (page on press) but not a control of its own: without an
+            // explicit role it would be exposed as an unnamed Button.
+            .role = "group",
             .on_mouse_down = ctx.handler(bar, Scrollbar.onTrackDown),
             .on_mouse_up = ctx.handler(bar, Scrollbar.onUp),
             .on_resize = ctx.handler(bar, Scrollbar.onTrackResize),
@@ -338,17 +342,25 @@ const Thumb = struct {
         const v = bar.vertical();
         const m = bar.metricsNow();
         const t = ctx.builder.theme;
+        const cross = @max(0.0, bar.thickness - 2 * TRACK_PADDING);
         const thumb = try ctx.boxNode(.{
-            .width = if (v) component.pct(100) else component.px(m.thumb_len),
-            .height = if (v) component.px(m.thumb_len) else component.pct(100),
+            .width = component.px(if (v) cross else m.thumb_len),
+            .height = component.px(if (v) m.thumb_len else cross),
             .radius = t.radius_base,
+            .role = "thumb",
             .on_mouse_down = ctx.handler(bar, Scrollbar.onThumbDown),
             .on_mouse_up = ctx.handler(bar, Scrollbar.onUp),
             .on_hover = ctx.signalSetter(&bar.hovered),
         }, .{});
         bar.thumb_node = thumb;
-        // Without a definite flex-basis the thumb would shrink to the track.
-        try ctx.builder.store.setLayout(thumb, .flex_shrink, .{ .number = 0 });
+        // Out of flow: the track can never hug the thumb, so a mount without a
+        // definite length fails loudly (a 0-length track, no thumb) on the first
+        // frame instead of the track and thumb shrinking each other frame by frame.
+        // The track's scroll offset still moves it (it shifts every child).
+        const store = ctx.builder.store;
+        try store.setLayout(thumb, .position, .{ .keyword = .absolute });
+        try store.setLayout(thumb, .left, .{ .dimension = .{ .value = TRACK_PADDING, .unit = .px } });
+        try store.setLayout(thumb, .top, .{ .dimension = .{ .value = TRACK_PADDING, .unit = .px } });
         const c = t.scrollbar_thumb;
         try ctx.builder.backgroundAlpha(thumb, c.r, c.g, c.b, @as(f32, @floatFromInt(c.a)) / 255.0);
     }
@@ -538,4 +550,44 @@ test "Scrollbar: global drag handler is removed on unmount" {
     try b.rootAt(0);
     b.close();
     try testing.expectEqual(@as(usize, 0), f.env.router.global_handlers.items.len);
+}
+
+test "Scrollbar: accessible roles — ScrollBar root, Thumb thumb, track is not a Button" {
+    const a11y = @import("../core/accessibility.zig");
+    const f = try Fixture.create(.vertical);
+    defer f.destroy();
+    const sb = f.bar();
+    try testing.expectEqualStrings("scrollbar", a11y.accessibleRole(&f.env.store, sb.root_node, .box));
+    try testing.expectEqualStrings("thumb", a11y.accessibleRole(&f.env.store, sb.thumb_node, .box));
+    try testing.expectEqualStrings("group", a11y.accessibleRole(&f.env.store, sb.track_node, .box));
+}
+
+test "Scrollbar: the thumb is out of flow, so a hugging mount can't feed its length back" {
+    // A column parent with no definite height: the anchor hugs. With the thumb in
+    // flow the track used to hug it and the two shrank each other frame by frame;
+    // out of flow the track measures 0 from the start — stable, not creeping.
+    const a = testing.allocator;
+    var offset = signals.Signal(f32).init(a, 0);
+    defer offset.deinit();
+    var content = signals.Signal(f32).init(a, 1000);
+    defer content.deinit();
+    var viewport = signals.Signal(f32).init(a, 250);
+    defer viewport.deinit();
+    var env = Harness.init(a);
+    defer env.deinit();
+    env.wire();
+    var b = component.UIBuilder.init(&env.registry, &env.store);
+    b.theme = theme_mod.Theme.dark();
+    var ctx = BuildContext{ .builder = &b, .router = &env.router, .mounts = &env.mounts };
+    _ = try b.openNodeKeyed(.box, null);
+    try ctx.mountOwned(Scrollbar, .{ .offset = &offset, .content_size = &content, .viewport_size = &viewport });
+    b.close();
+    const anchor = env.registry.getNode(0).?.first_child;
+    const sb: *Scrollbar = @ptrCast(@alignCast(env.mounts.get(anchor).?.component_ptr));
+    _ = try env.frame(0, 400, 400);
+    const h1 = env.geom(sb.track_node).height;
+    var i: usize = 0;
+    while (i < 5) : (i += 1) _ = try env.frame(0, 400, 400);
+    try testing.expectApproxEqAbs(h1, env.geom(sb.track_node).height, 0.01);
+    try testing.expect(h1 <= 2 * TRACK_PADDING + 0.01);
 }
