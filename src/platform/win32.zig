@@ -675,22 +675,21 @@ fn wndProc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(WINAPI) LRESU
         // wParam 0 (the first calc, inside CreateWindowEx) passes a bare RECT,
         // wParam 1 a NCCALCSIZE_PARAMS whose first field is that same RECT: handle
         // both, or DefWindowProc frames the first frame (client 2px wide/6px short).
-        {
-            // No caption: the client starts at the window's top edge. A resizable,
-            // restored window keeps its left/right/bottom sizing frame as non-client
-            // — DWM draws it invisible (Win10+), so the resize grip sits *outside*
-            // the visible window, as in native Windows 11 windows, and content
-            // flush with the edge (a scrollbar) never loses clicks to it. Maximized
-            // windows have nothing to resize: the client takes the whole rect.
-            const f = invisibleFrame(hwnd);
-            if (f > 0) {
-                const params: *RECT = @ptrFromInt(@as(usize, @bitCast(lp))); // RECT or NCCALCSIZE_PARAMS.rgrc[0]
-                params.left += f;
-                params.right -= f;
-                params.bottom -= f;
-            }
-            return 0;
+        //
+        // No caption: the client starts at the window's top edge. A resizable,
+        // restored window keeps its left/right/bottom sizing frame as non-client
+        // — DWM draws it invisible, so the resize grip sits *outside* the visible
+        // window, as in native Windows 11 windows, and content flush with the edge
+        // (a scrollbar) never loses clicks to it. Maximized windows have nothing
+        // to resize: the client takes the whole rect.
+        const f = invisibleFrame(hwnd);
+        if (f > 0) {
+            const params: *RECT = @ptrFromInt(@as(usize, @bitCast(lp))); // RECT or NCCALCSIZE_PARAMS.rgrc[0]
+            params.left += f;
+            params.right -= f;
+            params.bottom -= f;
         }
+        return 0;
     } else if (msg == 0x0084) { // WM_NCHITTEST
         const style = GetWindowLongA(hwnd, -16); // GWL_STYLE
         if ((style & 0x00040000) != 0 and IsZoomed(hwnd) == 0) { // WS_THICKFRAME, restored
