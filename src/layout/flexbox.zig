@@ -1059,7 +1059,8 @@ pub const LayoutEngine = struct {
                         self.registry.dbg_reshaped += 1;
                         const pref = atlas.fontIndexForRole(self.fontRole(node_id));
                         const ls = self.letterSpacing(node_id);
-                        if (atlas.measureTextMultilinePref(c, fs, max_w, pref, ls, alloc)) |layout| {
+                        const lh = self.lineHeightFactor(node_id);
+                        if (atlas.measureTextMultilinePref(c, fs, max_w, pref, ls, lh, alloc)) |layout| {
                             const tl_ptr = alloc.create(text_mod.TextLayoutInfo) catch null;
                             if (tl_ptr) |ptr| {
                                 ptr.* = layout;
@@ -1097,6 +1098,14 @@ pub const LayoutEngine = struct {
             if (v == .number) return v.number;
         }
         return 0;
+    }
+
+    /// The node's `line_height` multiplier, or the engine default.
+    fn lineHeightFactor(self: *const LayoutEngine, node_id: reg.NodeId) f32 {
+        if (self.store.getStyle(node_id, .line_height)) |v| {
+            if (v == .number) return text_mod.sanitizeLineHeight(v.number);
+        }
+        return text_mod.LINE_HEIGHT_FACTOR;
     }
 
     fn fontRole(self: *const LayoutEngine, node_id: reg.NodeId) text_mod.FontRole {
@@ -3036,4 +3045,52 @@ test "Flexbox repro — a hug sibling gaining a child via rootAt shrinks the gro
     engine.solve(row, 0, 0, 400, 400);
     try std.testing.expectApproxEqAbs(@as(f32, 14), registry.getNode(slot).?.geometry.width, 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, 386), registry.getNode(vp).?.geometry.width, 0.5);
+}
+
+test "Flexbox — line_height scales each line slot and relayouts when changed" {
+    const ttf = try loadRegressionFont(std.testing.allocator);
+    defer std.testing.allocator.free(ttf);
+    var atlas = try text_mod.FontAtlas.init(std.testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    store.setRegistry(&registry);
+
+    var b = builder.UIBuilder.init(&registry, &store);
+    const col = try b.openBox();
+    try b.width(col, 400, .px);
+    try b.height(col, 400, .px);
+    try b.flexColumn(col);
+    const deflt = try b.addText("one\ntwo");
+    try b.fontSize(deflt, 16);
+    const tight = try b.addText("one\ntwo");
+    try b.fontSize(tight, 16);
+    try b.lineHeight(tight, 1.0);
+    b.close();
+
+    var engine = LayoutEngine.init(&registry, &store, &atlas);
+    engine.solve(col, 0, 0, 400, 400);
+
+    // Two lines each: default slot is 16 × 1.55, the override's is 16 × 1.0.
+    try std.testing.expectApproxEqAbs(@as(f32, 2 * text_mod.lineHeight(16)), registry.getNode(deflt).?.geometry.height, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 32), registry.getNode(tight).?.geometry.height, 0.01);
+    // The factor travels on the layout, so caret metrics step by the same slot.
+    const tl = registry.getNode(tight).?.text_layout.?;
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), tl.line_height_factor, 0.0001);
+    const cm = atlas.getCaretMetrics("one\ntwo", tl, 16, 5, 1.0);
+    try std.testing.expectEqual(@as(usize, 1), cm.line_index);
+    try std.testing.expectApproxEqAbs(@as(f32, 16), cm.y, 0.01);
+
+    // Changing the style is a layout change, not paint-only.
+    try b.lineHeight(tight, 2.0);
+    engine.solve(col, 0, 0, 400, 400);
+    try std.testing.expectApproxEqAbs(@as(f32, 64), registry.getNode(tight).?.geometry.height, 0.01);
+
+    // A nonsense factor falls back to the default instead of collapsing the text.
+    try b.lineHeight(tight, 0);
+    engine.solve(col, 0, 0, 400, 400);
+    try std.testing.expectApproxEqAbs(@as(f32, 2 * text_mod.lineHeight(16)), registry.getNode(tight).?.geometry.height, 0.01);
 }

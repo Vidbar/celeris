@@ -335,6 +335,15 @@ Large follow-ups needing dedicated design, real hardware, or OS services to veri
   (text min-content).
 - **Text:** color emoji (COLR/CPAL), bidi/RTL (UAX#9), rich text runs, full UAX#14
   pair table.
+- **Text line height from font metrics** (CSS `line-height: normal`). The line slot
+  is `font_size × multiplier` (default 1.55, overridable per node with
+  `line_height`), not ascent + descent + line gap of the face. Switching the default
+  would move every text box in every app; the per-node multiplier already gives
+  control. See `docs/plans/2026-11-05-text-line-height.md`.
+- **Font family per node/component** (Monaco's `fontFamily`). Faces are process-wide
+  roles (`primary`/`bold`/`mono`/`mono_bold`, `setAppFonts` before the first window)
+  because the atlas is built at engine init and caches glyphs by font index. A
+  per-node family needs runtime face registration in the atlas — its own design.
 - **Platform:** system tray, OS notifications, global shortcuts, fractional scaling
   (`wp_fractional_scale_v1`), deep links, auto-update, Win32 native `IDropTarget`,
   scissor-rect clipping (today fragment `discard`, correct but over-shading).

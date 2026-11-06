@@ -11,15 +11,29 @@ const lb = @import("linebreak.zig");
 const Shaper = @import("shaper.zig").Shaper;
 pub const ShapedGlyph = @import("shaper.zig").ShapedGlyph;
 
-/// Leading compartido por medición, render y caret — deben coincidir siempre.
+/// Default line-height multiplier, shared by measurement, render and the caret.
+/// A text node may override it with the `line_height` style (see `lineHeightWith`).
 /// Prefer `lineHeight(size)` over multiplying by this yourself.
 pub const LINE_HEIGHT_FACTOR: f32 = 1.55;
 
-/// Height of one line slot at `size`. The one conversion from font size to line
-/// box: measurement, wrapping, hit-testing, the caret and the renderer all go
-/// through it, so none of them can drift from the others.
+/// Height of one line slot at `size` with the default multiplier. The one
+/// conversion from font size to line box: measurement, wrapping, hit-testing, the
+/// caret and the renderer all go through it (or `lineHeightWith`), so none of them
+/// can drift from the others.
 pub fn lineHeight(size: f32) f32 {
     return size * LINE_HEIGHT_FACTOR;
+}
+
+/// Height of one line slot at `size` with an explicit multiplier (CSS unitless
+/// `line-height`). A non-positive or non-finite factor falls back to the default,
+/// so a bad style value can never collapse text to zero height.
+pub fn lineHeightWith(size: f32, factor: f32) f32 {
+    return size * sanitizeLineHeight(factor);
+}
+
+/// `factor` if usable as a line-height multiplier, else `LINE_HEIGHT_FACTOR`.
+pub fn sanitizeLineHeight(factor: f32) f32 {
+    return if (std.math.isFinite(factor) and factor > 0) factor else LINE_HEIGHT_FACTOR;
 }
 
 /// Average advance as a fraction of the font size — the stand-in for real shaping
@@ -72,6 +86,11 @@ pub const TextLayoutInfo = struct {
     /// Extra tracking (px) added to every glyph advance, measured with this layout
     /// so `ensureShaped` and caret math stay in step with the measured widths.
     letter_spacing: f32 = 0,
+    /// Line-height multiplier this layout was measured with (the node's
+    /// `line_height` style, else `LINE_HEIGHT_FACTOR`). Travels with the layout so
+    /// the renderer, caret and hit-testing step lines by the same slot as
+    /// `total_height`.
+    line_height_factor: f32 = LINE_HEIGHT_FACTOR,
 
     pub fn deinit(self: *TextLayoutInfo) void {
         self.lines.deinit();
@@ -123,7 +142,18 @@ pub const VerticalLayout = struct {
 /// font (headless widgets, tests) computes the *same* geometry from `FontMetrics{}`
 /// defaults rather than inventing its own.
 pub fn verticalLayoutFor(m: FontMetrics, size: f32, box_height: f32, num_lines: usize) VerticalLayout {
-    const line_height = lineHeight(size);
+    return verticalLayoutWith(m, size, box_height, num_lines, LINE_HEIGHT_FACTOR);
+}
+
+/// `verticalLayoutFor` with an explicit line-height multiplier (a node's
+/// `line_height` style). The cap band stays centered in each slot, so a taller
+/// line adds leading evenly above and below the text.
+/// Alias so `FontAtlas.verticalLayoutWith` can reach the free function without
+/// shadowing its name.
+const text_vertical_with = verticalLayoutWith;
+
+pub fn verticalLayoutWith(m: FontMetrics, size: f32, box_height: f32, num_lines: usize, line_height_factor: f32) VerticalLayout {
+    const line_height = lineHeightWith(size, line_height_factor);
     const lines: f32 = @floatFromInt(@max(@as(usize, 1), num_lines));
     const block_height = line_height * lines;
     // A single line centers even when its slot is taller than the box (a 20px text
@@ -376,6 +406,12 @@ pub const FontAtlas = struct {
     /// a caret lands must come through here.
     pub fn verticalLayout(self: *const FontAtlas, font_index: u32, size: f32, box_height: f32, num_lines: usize) VerticalLayout {
         return verticalLayoutFor(self.metricsOf(font_index), size, box_height, num_lines);
+    }
+
+    /// `verticalLayout` with an explicit line-height multiplier (a node's
+    /// `line_height` style — the renderer passes the measured layout's factor).
+    pub fn verticalLayoutWith(self: *const FontAtlas, font_index: u32, size: f32, box_height: f32, num_lines: usize, line_height_factor: f32) VerticalLayout {
+        return text_vertical_with(self.metricsOf(font_index), size, box_height, num_lines, line_height_factor);
     }
 
     /// Vertical proportions of face `font_index` (out of range → the primary).
@@ -668,9 +704,11 @@ pub const FontAtlas = struct {
     /// Splits text into lines by '\n' and word-wrapping at `max_width`
     /// (0 = no wrap). Line widths are measured exactly via HarfBuzz.
     pub fn measureTextMultiline(self: *FontAtlas, text: []const u8, font_size: f32, max_width: f32, allocator: std.mem.Allocator) !TextLayoutInfo {
-        return self.measureTextMultilinePref(text, font_size, max_width, 0, 0, allocator);
+        return self.measureTextMultilinePref(text, font_size, max_width, 0, 0, LINE_HEIGHT_FACTOR, allocator);
     }
-    pub fn measureTextMultilinePref(self: *FontAtlas, text: []const u8, font_size: f32, max_width: f32, preferred: u32, ls: f32, allocator: std.mem.Allocator) !TextLayoutInfo {
+    /// `measureTextMultiline` with the node's face (`preferred`), tracking (`ls`)
+    /// and line-height multiplier (`lh_factor`, sanitized; see `lineHeightWith`).
+    pub fn measureTextMultilinePref(self: *FontAtlas, text: []const u8, font_size: f32, max_width: f32, preferred: u32, ls: f32, lh_factor: f32, allocator: std.mem.Allocator) !TextLayoutInfo {
         var lines = std.array_list.Managed(TextLine).init(allocator);
         var max_w: f32 = 0;
 
@@ -734,7 +772,8 @@ pub const FontAtlas = struct {
         try lines.append(.{ .start_index = line_start, .end_index = text.len, .width = lw });
         max_w = @max(max_w, lw);
 
-        const line_height = lineHeight(font_size);
+        const lh = sanitizeLineHeight(lh_factor);
+        const line_height = lineHeightWith(font_size, lh);
         return .{
             .lines = lines,
             .max_width = max_w,
@@ -743,6 +782,7 @@ pub const FontAtlas = struct {
             .shaped = std.array_list.Managed(ShapedGlyph).init(allocator),
             .preferred_font = preferred,
             .letter_spacing = ls,
+            .line_height_factor = lh,
         };
     }
 
@@ -764,7 +804,7 @@ pub const FontAtlas = struct {
     pub const CaretMetrics = struct { x: f32, y: f32, line_height: f32, line_index: usize };
 
     pub fn getCaretMetrics(self: *FontAtlas, text: []const u8, layout: *const TextLayoutInfo, font_size: f32, char_index: usize, scale: f32) CaretMetrics {
-        const line_height = lineHeight(font_size);
+        const line_height = lineHeightWith(font_size, layout.line_height_factor);
         if (layout.lines.items.len == 0) return .{ .x = 0, .y = 0, .line_height = line_height, .line_index = 0 };
 
         var target: usize = 0;
@@ -783,7 +823,7 @@ pub const FontAtlas = struct {
     }
 
     pub fn getCharIndexAt(self: *FontAtlas, text: []const u8, layout: *const TextLayoutInfo, font_size: f32, local_x: f32, local_y: f32) usize {
-        const line_height = lineHeight(font_size);
+        const line_height = lineHeightWith(font_size, layout.line_height_factor);
         if (layout.lines.items.len == 0 or line_height <= 0) return 0;
 
         var line_idx: usize = layout.lines.items.len - 1;
@@ -1008,7 +1048,7 @@ test "letter-spacing widens every glyph advance and travels on the layout" {
     try testing.expectApproxEqAbs(base - 3.0, tight, 0.01);
 
     // The spacing rides on the layout, so shaping it back gives the same advances.
-    var layout = try atlas.measureTextMultilinePref("abc", 16, 0, 0, 2, testing.allocator);
+    var layout = try atlas.measureTextMultilinePref("abc", 16, 0, 0, 2, LINE_HEIGHT_FACTOR, testing.allocator);
     defer layout.deinit();
     try testing.expectApproxEqAbs(@as(f32, 2.0), layout.letter_spacing, 0.001);
     atlas.ensureShaped(&layout, "abc");
@@ -1025,7 +1065,7 @@ test "FontRole: the preferred face travels on the layout so ensureShaped stays c
     try atlas.addRoleFont(.mono, ttf);
     const mono_idx = atlas.mono_font_index.?;
 
-    var layout = try atlas.measureTextMultilinePref("hello", 16, 0, mono_idx, 0, testing.allocator);
+    var layout = try atlas.measureTextMultilinePref("hello", 16, 0, mono_idx, 0, LINE_HEIGHT_FACTOR, testing.allocator);
     defer layout.deinit();
     try testing.expectEqual(mono_idx, layout.preferred_font);
 

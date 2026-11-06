@@ -526,6 +526,22 @@ fn onFilterChanged(self: *MyApp, ev: fw.events.Event) void {
 - `VirtualList(.fill = true)`, `VirtualGrid(.fill = true)` and `ScrollView` use it: growing the window materializes the rows that now fit and re-clamps the scroll, with no wheel event. `viewport_height`/`viewport_width` remain as the frame-0 estimate.
 - C hosts receive `CELERIS_EVENT_RESIZE` with the size in `x` / `y`.
 
+### Wheel on raw-builder nodes (`ctx.onScroll` / `ctx.onScrollH`)
+
+The `on_scroll` / `on_scroll_h` box props have raw-builder forms, the same way
+`on_resize` has `ctx.onResize`. Use them for a node opened with `b.openNodeKeyed`
+(or any id you already hold) instead of switching to `boxNode` just to get the prop:
+
+```zig
+const view = try b.openNodeKeyed(.box, null);
+try ctx.onScroll(view, ctx.handler(self, onWheel));   // vertical wheel: ev.scroll_delta
+try ctx.onScrollH(view, ctx.handler(self, onWheelH)); // horizontal: ev.scroll_delta
+b.close();
+```
+
+Same semantics as the props: the node is marked scrollable (so the wheel reaches it
+under the rules below) and `.scroll` / `.scroll_h` events go to the handler.
+
 ### Pointer event delivery rules
 
 These are load-bearing behaviours; downstream apps (node editors, canvases) rely on them.
@@ -832,6 +848,55 @@ The rule of thumb: state that refers to nodes is per-mount and is reset here; st
 is genuinely the app's (a counter, a flag) lives outside the component and is exactly
 what survives.
 
+## Text line height and metrics (`line_height`, `fw.text`)
+
+Every text node lays out its lines in **slots** of `font_size × line_height`. The
+same number drives measurement (the node's height), wrapping, the renderer's
+baselines, the caret and click-to-character hit-testing, so they cannot disagree.
+The cap band is centered in each slot: a taller line height adds leading evenly
+above and below the glyphs, like CSS.
+
+**The multiplier.** Unitless, like CSS `line-height: 1.4` or Flutter's
+`TextStyle.height`. Unset, it is `fw.text.default_line_height` (**1.55**). A value
+≤ 0, NaN or ∞ means "default", so a bad value never collapses text to zero height.
+Set it any of these ways:
+
+| Where | How |
+|---|---|
+| Raw builder | `try b.lineHeight(text_id, 1.2);` |
+| `Text` component | `fw.component.Text{ .content = "…", .size = 14, .line_height = 1.2 }` |
+| Theme style | `Text{ .content = "…", .style = t.typography.body_medium }` applies that style's `line_height` (1.42) |
+| Box prop | `.line_height = 1.2` (on a node that carries text) |
+| C ABI / C# | style key `"line_height"` with a number, e.g. `celeris_node_add_style(e, id, "line_height", "1.2")` |
+
+`Text.line_height` wins over the style's. Changing it re-lays out the node, the
+same as changing `font_size`.
+
+**Sizing rows to text (virtualized lists, code views).** Don't hardcode a row
+height: a 16px font has a 24.8px slot at the default, so a 20px row overlaps its
+neighbours. Ask `fw.text` for the number the text nodes will measure:
+
+```zig
+const fw = @import("celeris").framework;
+
+const font_size: f32 = 16;
+const row_h = fw.text.lineHeight(font_size); // 24.8 — default multiplier
+// If your rows' text nodes set `.line_height = 1.25`, use the same factor:
+const tight_row_h = fw.text.lineHeightWith(font_size, 1.25); // 20.0
+```
+
+These are pure functions of the font size and factor (no engine, no font), so they
+are exact in `build`, in tests and headless. `TextMeasure.lineHeight(size)` gives
+the same value from a measure handle. For the baseline and caret band *inside* a
+box, use `TextMeasure.vertical(size, box_h, lines)` (engine-exact) or
+`fw.builder.verticalFallback`.
+
+**Limits.** The slot is a multiplier of the font size. It is not computed from the
+face's own ascent/descent/line gap (CSS `line-height: normal`), and there is no
+per-node font family: faces are the app-wide roles from `setAppFonts`. Both are
+listed under *Deferred work* in `ARCHITECTURE.md`. The built-in `TextInput` and
+`TextArea` keep their own fixed metrics and do not read `line_height`.
+
 ## Theming
 
 The active theme is `b.theme`. Tokens are defined in `src/framework/theme.zig` — e.g. `bg_base`, `bg_surface`, `bg_input`, `accent`, `accent_hover`, `accent_pressed`, `text`, `text_secondary`, `text_disabled`, `text_on_accent`, `focus_ring`, `overlay_scrim`, `success`/`warning`/`danger`. Use the curated presets `Theme.dark()` (default) or `Theme.light()`, and read `b.theme.<token>` for custom boxes. (There is no `primary`/`text_normal` token — use `accent`/`text`.) Apply a token with the `…Of` helpers, which take a theme `Color`:
@@ -846,6 +911,13 @@ b.close();
 ```
 
 (`b.background(id, r, g, b)` takes raw 0–255 channels; `backgroundOf` / `textColorOf` / `borderColorOf` take a `Color`.)
+
+**Typography.** `t.typography` holds Material-style `TextStyle`s (`display_large` …
+`label_small`), each with a `size`, `weight` and `line_height`. Passing one to
+`fw.component.Text{ .style = … }` (or a widget's `text_style`) applies its size
+**and its line height**. A hand-written `TextStyle{ .size = 13 }` leaves
+`line_height = null` and keeps the engine default (1.55). See
+[Text line height and metrics](#text-line-height-and-metrics-line_height-fwtext).
 
 Read it reactively with `ctx.theme()` instead of `b.theme` when you want a runtime theme
 swap to re-run your component: `ctx.themeSignal().?.set(Theme.light())` restyles every
@@ -898,6 +970,10 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
 **Text styling:**
 - `try b.textColor(text_node, 255, 255, 255)`
 - `try b.fontSize(text_node, 14)`
+- `try b.letterSpacing(text_node, 0.5)` — extra px between glyphs (negative tightens)
+- `try b.lineHeight(text_node, 1.4)` — line-height multiplier; see
+  [Text line height and metrics](#text-line-height-and-metrics-line_height-fwtext)
+- `try b.fontBold(text_node, true)` / `try b.fontMono(text_node, true)` — face role
 
 **Accessibility (a11y / UIA):**
 

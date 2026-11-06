@@ -1089,7 +1089,13 @@ pub const WgpuBackend = struct {
                 // a bold or mono label has its own cap height.
                 const num_lines: usize = if (node.text_layout) |tl| tl.lines.items.len else 1;
                 const face: u32 = if (node.text_layout) |tl| tl.preferred_font else 0;
-                const vl = self.atlas.verticalLayout(face, target_size, g.height, num_lines);
+                const lh_factor: f32 = if (node.text_layout) |tl|
+                    tl.line_height_factor
+                else if (store.getStyle(node_id, .line_height)) |v|
+                    (if (v == .number) text.sanitizeLineHeight(v.number) else text.LINE_HEIGHT_FACTOR)
+                else
+                    text.LINE_HEIGHT_FACTOR;
+                const vl = self.atlas.verticalLayoutWith(face, target_size, g.height, num_lines, lh_factor);
                 const line_height = vl.line_height;
                 var current_y = g.y + vl.baseline;
                 var icon_baseline_y = g.y + vl.icon_baseline;

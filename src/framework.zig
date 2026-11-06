@@ -33,6 +33,22 @@ pub const tooltip = @import("framework/tooltip.zig");
 pub const toast = @import("framework/toast.zig");
 pub const tree_list = @import("framework/tree_list.zig");
 pub const text_input = @import("framework/text_input.zig");
+/// Text metrics that layout uses — the stable, public door to them. A component
+/// that sizes rows to text (a virtualized list, a code view) uses these instead of
+/// hardcoding px, so its rows match what the text nodes actually measure.
+pub const text = struct {
+    const t = @import("render/text.zig");
+    /// Default line-height multiplier (1.55): a line slot is `font_size × this`.
+    pub const default_line_height = t.LINE_HEIGHT_FACTOR;
+    /// Height of one line slot at `font_size` with the default line height.
+    pub const lineHeight = t.lineHeight;
+    /// Height of one line slot at `font_size` with an explicit multiplier — the
+    /// same value a text node with `.line_height = factor` measures per line.
+    pub const lineHeightWith = t.lineHeightWith;
+    /// Vertical geometry (baseline, caret band, …) inside a box, from default font
+    /// proportions. Engine-exact geometry: `TextMeasure.vertical`.
+    pub const VerticalLayout = t.VerticalLayout;
+};
 pub const theme = @import("framework/theme.zig");
 pub const color = @import("core/color.zig");
 pub const tonal_palette = @import("core/tonal_palette.zig");

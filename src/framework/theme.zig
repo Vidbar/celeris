@@ -27,7 +27,10 @@ pub const Color = struct {
 pub const TextStyle = struct {
     size: f32,
     weight: enum { regular, medium, bold } = .regular,
-    line_height: f32 = 1.2,
+    /// Line-height multiplier applied by `component.Text` (the node's
+    /// `line_height` style). Null = engine default (`fw.text.default_line_height`,
+    /// 1.55), so an ad-hoc `.{ .size = 13 }` keeps the default spacing.
+    line_height: ?f32 = null,
 };
 
 pub const Typography = struct {

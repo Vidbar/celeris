@@ -117,6 +117,10 @@ pub const StyleKey = enum {
     /// Extra tracking (px) added to every glyph advance (`.number`). Changes the
     /// measured width, so it invalidates layout like `font_size`.
     letter_spacing,
+    /// Line-height multiplier (`.number`, CSS unitless `line-height`): each line
+    /// slot is `font_size × line_height`. Unset = `text.LINE_HEIGHT_FACTOR` (1.55).
+    /// Changes the measured height, so it invalidates layout like `font_size`.
+    line_height,
     text_align,
     border_width,
     border_color,
@@ -460,7 +464,7 @@ pub const PropertyStore = struct {
                 // font_size changes the measured text size, so it must invalidate
                 // layout (and ancestors), not just paint — otherwise the cached
                 // text dimensions go stale. Other style keys are paint-only.
-                if (key == .font_size or key == .font_role or key == .letter_spacing) {
+                if (key == .font_size or key == .font_role or key == .letter_spacing or key == .line_height) {
                     r.global_layout_dirty = true;
                     r.global_render_dirty = true;
                     if (r.getNode(node_id)) |n| n.text_dirty = true; // font size changes shaping

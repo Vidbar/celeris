@@ -85,6 +85,13 @@ pub const TextMeasure = struct {
         if (self.verticalFn) |f| return f(self.ctx, font_size, box_height, num_lines);
         return text_mod.verticalLayoutFor(.{}, font_size, box_height, num_lines);
     }
+
+    /// Height of one line slot at `font_size` — what a text node of that size
+    /// measures per line with the default line height. Font-independent, so it is
+    /// exact with or without an engine. See `fw.text.lineHeight`.
+    pub fn lineHeight(_: TextMeasure, font_size: f32) f32 {
+        return text_mod.lineHeight(font_size);
+    }
 };
 
 /// Vertical geometry without a measure handle at all (no engine, no stub): still the
@@ -624,6 +631,14 @@ pub const UIBuilder = struct {
     /// so it relayouts like a font-size change.
     pub fn letterSpacing(self: *UIBuilder, id: NodeId, px: f32) !void {
         try self.store.setStyle(id, .letter_spacing, .{ .number = px });
+    }
+
+    /// Line-height multiplier for a text node (CSS unitless `line-height`): each
+    /// line slot is `font_size × factor`. Default `text.LINE_HEIGHT_FACTOR` (1.55);
+    /// a non-positive factor means "default". Measurement, render, caret and
+    /// hit-testing all use it, so it relayouts like a font-size change.
+    pub fn lineHeight(self: *UIBuilder, id: NodeId, factor: f32) !void {
+        try self.store.setStyle(id, .line_height, .{ .number = factor });
     }
 
     /// Horizontal alignment of a text node within its box (left / center / right).

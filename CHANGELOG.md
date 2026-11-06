@@ -9,6 +9,32 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Added
+
+- **`line_height` per text node** — a unitless multiplier (CSS `line-height`,
+  Flutter `TextStyle.height`): each line slot is `font_size × line_height`.
+  Measurement, the renderer, the caret and hit-testing all use it. Set it with
+  `b.lineHeight(id, f)`, `Text{ .line_height = f }`, the box prop `.line_height`,
+  or the style key `"line_height"` from C / C#. Unset keeps the old 1.55.
+- **`fw.text`** — public text metrics: `lineHeight(size)`,
+  `lineHeightWith(size, factor)`, `default_line_height`. Size virtualized rows
+  from these instead of `celeris.internal.text`. Also
+  `TextMeasure.lineHeight(size)`.
+- **`ctx.onScroll(id, h)` / `ctx.onScrollH(id, h)`** — the raw-builder forms of the
+  `on_scroll` / `on_scroll_h` props, matching `ctx.onResize`.
+
+### Changed
+
+- **Theme typography's `line_height` is now applied.** `Text{ .style = … }` and
+  widgets that take a `text_style` (e.g. `Button`, whose label defaults to
+  `label_large`, 1.42) now lay out text at that style's line height instead of
+  ignoring it. Single-line labels stay centered; a multi-line label is a little
+  shorter. `TextStyle.line_height` is now `?f32` (default `null` = engine default),
+  so an ad-hoc `.{ .size = 13 }` style keeps 1.55.
+- `FontAtlas.measureTextMultilinePref` (internal) takes the line-height factor.
+
 ## 0.1.2 — 2026-11-05
 
 `CELERIS_ABI_VERSION` 5 (additive).

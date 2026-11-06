@@ -237,6 +237,19 @@ pub const BuildContext = struct {
         try wireResize(self, id, h);
     }
 
+    /// `on_scroll` (vertical wheel) for a node opened with the raw builder — same
+    /// semantics as the box prop: marks the node scrollable and routes `.scroll`
+    /// events to `h`.
+    pub fn onScroll(self: *BuildContext, id: NodeId, h: Handler) !void {
+        try wireHandler(self, id, .scroll, .scrollable, h);
+    }
+
+    /// `on_scroll_h` (horizontal wheel / shift+wheel) for a raw-builder node —
+    /// same semantics as the box prop.
+    pub fn onScrollH(self: *BuildContext, id: NodeId, h: Handler) !void {
+        try wireHandler(self, id, .scroll_h, .scrollable, h);
+    }
+
     /// A `Handler` that drives a `*Signal(bool)` from pointer events: mouse_enter /
     /// mouse_down → true, mouse_leave / mouse_up → false. Sugar for hover/press
     /// state, wired via the `.on_hover` / `.on_press` props.
@@ -1445,6 +1458,8 @@ fn applyBoxProps(ctx: *BuildContext, id: NodeId, props_: anytype) !void {
             try store.setStyle(id, .opacity, .{ .number = numF32(v) });
         } else if (comptime std.mem.eql(u8, name, "font_size")) {
             try store.setStyle(id, .font_size, .{ .dimension = .{ .value = numF32(v), .unit = .px } });
+        } else if (comptime std.mem.eql(u8, name, "line_height")) {
+            try store.setStyle(id, .line_height, .{ .number = numF32(v) });
         } else if (comptime std.mem.eql(u8, name, "id")) {
             try ctx.builder.nodeId(id, v);
         } else if (comptime std.mem.eql(u8, name, "clickable")) {
@@ -1647,22 +1662,28 @@ pub fn buildChild(ctx: *BuildContext, child: anytype) !void {
 // ── Built-in primitive components ─────────────────────────────────────────────
 
 /// A text leaf usable inside a children tuple. Optional `color`/`size` set the
-/// glyph color and font size on the text node.
+/// glyph color and font size on the text node. `style` (a theme `TextStyle`)
+/// sets the size and, when the style has one, the line height. `line_height`
+/// overrides the line-height multiplier either way.
 pub const Text = struct {
     content: []const u8,
     color: ?Color = null,
     size: ?f32 = null,
     style: ?theme_mod.TextStyle = null,
+    line_height: ?f32 = null,
 
     pub fn build(self: *Text, ctx: *BuildContext) !void {
         const id = try ctx.text(self.content);
-        if (self.color) |c| try ctx.builder.store.setStyle(id, .color, c.toProp());
+        const store = ctx.builder.store;
+        if (self.color) |c| try store.setStyle(id, .color, c.toProp());
 
         if (self.style) |st| {
-            try ctx.builder.store.setStyle(id, .font_size, .{ .dimension = .{ .value = st.size, .unit = .px } });
+            try store.setStyle(id, .font_size, .{ .dimension = .{ .value = st.size, .unit = .px } });
         } else if (self.size) |s| {
-            try ctx.builder.store.setStyle(id, .font_size, .{ .dimension = .{ .value = s, .unit = .px } });
+            try store.setStyle(id, .font_size, .{ .dimension = .{ .value = s, .unit = .px } });
         }
+        const lh: ?f32 = self.line_height orelse if (self.style) |st| st.line_height else null;
+        if (lh) |f| try store.setStyle(id, .line_height, .{ .number = f });
     }
 };
 
@@ -2912,4 +2933,62 @@ test "on_resize: C-ABI resize event carries width/height in x/y and routes by no
     try testing.expectEqual(@as(usize, 1), env.router.dispatchEvent(&cev));
     try testing.expectApproxEqAbs(@as(f32, 321), probe.w, 0.01);
     try testing.expectApproxEqAbs(@as(f32, 123), probe.h, 0.01);
+}
+
+test "Text applies a theme style's line height; an explicit line_height wins; plain size leaves the default" {
+    const a = testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    var mounts = MountTable.init(a);
+    defer mounts.deinit();
+
+    var b = UIBuilder.init(&registry, &store);
+    var ctx = BuildContext{ .builder = &b, .mounts = &mounts };
+    const root = try b.openNodeKeyed(.box, null);
+    var styled = Text{ .content = "a", .style = .{ .size = 14, .line_height = 1.42 } };
+    try styled.build(&ctx);
+    var overridden = Text{ .content = "b", .style = .{ .size = 14, .line_height = 1.42 }, .line_height = 1.0 };
+    try overridden.build(&ctx);
+    var plain = Text{ .content = "c", .style = .{ .size = 13 } };
+    try plain.build(&ctx);
+    b.close();
+
+    const n0 = registry.getNode(root).?.first_child;
+    const n1 = registry.getNode(n0).?.next_sibling;
+    const n2 = registry.getNode(n1).?.next_sibling;
+    try testing.expectApproxEqAbs(@as(f32, 1.42), store.getStyle(n0, .line_height).?.number, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), store.getStyle(n1, .line_height).?.number, 0.0001);
+    try testing.expect(store.getStyle(n2, .line_height) == null);
+}
+
+test "ctx.onScroll / onScrollH wire scroll handlers on a raw-builder node, like the box props" {
+    const a = testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    var router = events.EventRouter.init(a);
+    defer router.deinit();
+    var mounts = MountTable.init(a);
+    defer mounts.deinit();
+
+    const Spy = struct {
+        var hits: u32 = 0;
+        fn on(_: ?*anyopaque, _: events.Event) void {
+            hits += 1;
+        }
+    };
+    var b = UIBuilder.init(&registry, &store);
+    var ctx = BuildContext{ .builder = &b, .router = &router, .mounts = &mounts };
+    const id = try b.openNodeKeyed(.box, null);
+    try ctx.onScroll(id, .{ .ptr = null, .call = Spy.on });
+    try ctx.onScrollH(id, .{ .ptr = null, .call = Spy.on });
+    b.close();
+
+    try testing.expect(router.nodeHandler(id, .scroll) != null);
+    try testing.expect(router.nodeHandler(id, .scroll_h) != null);
 }
