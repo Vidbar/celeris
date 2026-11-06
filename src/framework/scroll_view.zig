@@ -10,10 +10,9 @@
 //!
 //! The wheel arrives through the new typed `on_scroll` prop (`EventKind.scroll`,
 //! routed by node id — the engine walks the hit chain to the nearest `scrollable`
-//! node and emits with that node's id). The thumb drag-follow needs the engine's
-//! global mouse_move/up (they carry no node id), so a **global** handler is
-//! registered in `build()` against `viewport_node` — pruned automatically by the
-//! node-removed hook when that node goes away.
+//! node and emits with that node's id). The scrollbar is a mounted
+//! `fw.scrollbar.Scrollbar` sharing the offset signal (thumb drag, track paging,
+//! hover/pressed states live there); this view feeds it the effective heights.
 
 const std = @import("std");
 const component = @import("component.zig");
@@ -22,8 +21,12 @@ const events = @import("events.zig");
 const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
 const theme_mod = @import("theme.zig");
+const scrollbar_mod = @import("scrollbar.zig");
 
 const BuildContext = component.BuildContext;
+
+/// Thickness of the mounted `Scrollbar`; the rest of `SCROLLBAR_WIDTH` is its gap.
+const BAR_THICKNESS: f32 = 10;
 
 /// Total width the scrollbar channel occupies: a 10px track plus its 4px gap. The
 /// track is a flex SIBLING of the viewport, so this width is subtracted from the
@@ -80,10 +83,12 @@ pub const ScrollView = struct {
     /// the thumb and re-clamps the offset without waiting for a wheel event.
     viewport_h_sig: signals.Signal(f32) = undefined,
     content_h_sig: signals.Signal(f32) = undefined,
+    /// The effective content / viewport heights (solved when known, else the
+    /// props), mirrored for the `Scrollbar` this view mounts — it reads sizes
+    /// from signals, and the raw `on_resize` ones are 0 until the first solve.
+    bar_content_sig: signals.Signal(f32) = undefined,
+    bar_viewport_sig: signals.Signal(f32) = undefined,
     scope: signals.Scope = undefined,
-    dragging: bool = false,
-    drag_start_y: f32 = 0,
-    drag_start_offset: f32 = 0,
 
     // Captured during build().
     store: ?*props.PropertyStore = null,
@@ -94,6 +99,8 @@ pub const ScrollView = struct {
     track_node: reg.NodeId = reg.NULL_NODE,
     thumb_node: reg.NodeId = reg.NULL_NODE,
     bar_slot: reg.NodeId = reg.NULL_NODE,
+    /// Mount anchor of the `Scrollbar` (NULL while the content fits).
+    bar_anchor: reg.NodeId = reg.NULL_NODE,
     mounts: ?*component.MountTable = null,
     theme: theme_mod.Theme = undefined,
     bound: bool = false,
@@ -103,11 +110,15 @@ pub const ScrollView = struct {
         self.scroll_offset = signals.Signal(f32).init(allocator, 0);
         self.viewport_h_sig = signals.Signal(f32).init(allocator, 0);
         self.content_h_sig = signals.Signal(f32).init(allocator, 0);
+        self.bar_content_sig = signals.Signal(f32).init(allocator, 0);
+        self.bar_viewport_sig = signals.Signal(f32).init(allocator, 0);
         self.scope = signals.Scope.init(allocator);
     }
 
     pub fn deinit(self: *ScrollView) void {
         self.scope.deinit();
+        self.bar_viewport_sig.deinit();
+        self.bar_content_sig.deinit();
         self.content_h_sig.deinit();
         self.viewport_h_sig.deinit();
         self.scroll_offset.deinit();
@@ -115,6 +126,7 @@ pub const ScrollView = struct {
 
     fn onViewportResize(self: *ScrollView, ev: events.Event) void {
         self.viewport_h_sig.set(ev.height);
+        self.syncBarSizes();
         self.setScrollClamped(self.offsetSig().peek());
     }
 
@@ -122,10 +134,18 @@ pub const ScrollView = struct {
         // Safe to observe this hug-sized node: the handler only writes the thumb
         // and the render-only offset, neither of which changes the content's size.
         self.content_h_sig.set(ev.height);
+        self.syncBarSizes();
         self.setScrollClamped(self.offsetSig().peek());
     }
 
-    /// Removes the global drag handler before the instance is freed.
+    /// Pushes the effective heights to the scrollbar's size signals (only on change).
+    fn syncBarSizes(self: *ScrollView) void {
+        const c = self.contentHeightNow();
+        const v = self.viewportHeightNow();
+        if (self.bar_content_sig.peek() != c) self.bar_content_sig.set(c);
+        if (self.bar_viewport_sig.peek() != v) self.bar_viewport_sig.set(v);
+    }
+
     /// The active offset signal: caller-owned if provided, else the internal one.
     fn offsetSig(self: *ScrollView) *signals.Signal(f32) {
         return self.offset orelse &self.scroll_offset;
@@ -135,23 +155,12 @@ pub const ScrollView = struct {
         self.setScrollClamped(self.offsetSig().peek() + ev.scroll_delta * 20.0);
     }
 
-    fn onThumbDown(self: *ScrollView, ev: events.Event) void {
-        self.dragging = true;
-        self.drag_start_y = ev.y;
-        self.drag_start_offset = self.offsetSig().peek();
-    }
-
-    fn onThumbUp(self: *ScrollView, ev: events.Event) void {
-        _ = ev;
-        self.dragging = false;
-    }
-
-    fn onGlobal(self: *ScrollView, ev: events.Event) void {
-        if (std.mem.eql(u8, ev.name, "mouse_up")) {
-            self.dragging = false;
-        } else if (std.mem.eql(u8, ev.name, "mouse_move") and self.dragging) {
-            self.updateOffsetFromDrag(ev.y);
-        }
+    /// The mounted scrollbar (null while the content fits).
+    pub fn bar(self: *ScrollView) ?*scrollbar_mod.Scrollbar {
+        const mounts = self.mounts orelse return null;
+        if (self.bar_anchor == reg.NULL_NODE) return null;
+        const rec = mounts.get(self.bar_anchor) orelse return null;
+        return @ptrCast(@alignCast(rec.component_ptr));
     }
 
     /// Prefers the resolved layout height of the content wrapper over the
@@ -183,15 +192,6 @@ pub const ScrollView = struct {
         return self.viewport_height;
     }
 
-    fn updateOffsetFromDrag(self: *ScrollView, mouse_y: f32) void {
-        const content_h = @max(self.contentHeightNow(), self.viewportHeightNow() + 1.0);
-        const track_h = @max(1.0, self.viewportHeightNow() - 4.0);
-        // Pixels moved in track space → pixels moved in content space.
-        const dy = mouse_y - self.drag_start_y;
-        const content_delta = dy * (content_h / track_h);
-        self.setScrollClamped(self.drag_start_offset - content_delta);
-    }
-
     fn setScrollClamped(self: *ScrollView, value: f32) void {
         var next = value;
         if (next > 0) next = 0;
@@ -207,6 +207,7 @@ pub const ScrollView = struct {
         if (self.registry) |r| {
             if (r.getNode(self.wrapper_node)) |node| {
                 self.content_height = node.geometry.height;
+                self.syncBarSizes();
                 const max_offset = -(@max(self.content_height - self.viewportHeightNow(), 0));
                 self.offsetSig().set(max_offset);
             }
@@ -224,7 +225,7 @@ pub const ScrollView = struct {
         _ = self.viewport_h_sig.get();
         _ = self.content_h_sig.get();
         const want = self.hasScrollbar();
-        const have = self.track_node != reg.NULL_NODE;
+        const have = self.bar_anchor != reg.NULL_NODE;
         if (want == have) return;
         const store = self.store orelse return;
         const registry = self.registry orelse return;
@@ -248,6 +249,8 @@ pub const ScrollView = struct {
         self.router = ctx.router;
         self.mounts = ctx.mounts;
         self.theme = ctx.builder.theme;
+        // Props may have changed the fallbacks (content_height / viewport_height).
+        self.syncBarSizes();
 
         // Outer row: viewport + scrollbar side-by-side.
         try ctx.box(.{
@@ -258,9 +261,6 @@ pub const ScrollView = struct {
             Body{ .sv = self },
         });
 
-        // Unconditional every build: onGlobal replaces in place per owner (see
-        // events.zig), and the node-removed hook prunes it on unmount.
-        if (ctx.router) |r| try r.onGlobal(self.viewport_node, self, onGlobal);
         try component.bindVisuals(self, &self.scope, &self.bound, updateVisuals);
         if (!self.bar_bound) {
             _ = try self.scope.createEffect(self, syncBar);
@@ -272,25 +272,10 @@ pub const ScrollView = struct {
         const store = self.store orelse return;
         if (self.viewport_node == reg.NULL_NODE) return;
         const offset = self.offsetSig().get();
-        // Subscribe: a resize of the viewport or the content resizes the thumb.
-        _ = self.viewport_h_sig.get();
-        _ = self.content_h_sig.get();
-
         // Scroll is a render-only translation — `scroll_offset_y` shifts the
         // viewport's children (wrapper + content) without a global layout solve.
+        // The thumb is the mounted `Scrollbar`'s own effect.
         store.setLayout(self.viewport_node, .scroll_offset_y, .{ .dimension = .{ .value = offset, .unit = .px } }) catch {};
-
-        if (self.thumb_node != reg.NULL_NODE and self.track_node != reg.NULL_NODE) {
-            const track_h = @max(0.0, self.viewportHeightNow() - 4.0);
-            const content_h = @max(self.contentHeightNow(), self.viewportHeightNow() + 1.0);
-            const thumb_h = @max(20.0, (track_h / content_h) * track_h);
-            const thumb_y = (-offset / content_h) * track_h;
-            // Thumb height only changes when content/viewport size changes (a
-            // legitimate layout write, no-op filtered while scrolling); the
-            // thumb's position rides the track's render-only scroll offset.
-            store.setLayout(self.thumb_node, .height, .{ .dimension = .{ .value = thumb_h, .unit = .px } }) catch {};
-            store.setLayout(self.track_node, .scroll_offset_y, .{ .dimension = .{ .value = thumb_y, .unit = .px } }) catch {};
-        }
     }
 };
 
@@ -336,31 +321,28 @@ fn buildBar(sv: *ScrollView, ctx: *BuildContext) !void {
     {
         sv.track_node = reg.NULL_NODE;
         sv.thumb_node = reg.NULL_NODE;
+        sv.bar_anchor = reg.NULL_NODE;
         if (sv.hasScrollbar()) {
-            const t = b.theme;
-            const track = try b.openNodeKeyed(.box, null);
-            sv.track_node = track;
-            try b.width(track, 10, .px);
-            try b.height(track, 100, .percent);
-            try b.marginLeft(track, 4);
-            try b.padding(track, 2, 2, 2, 2);
-            try b.backgroundAlpha(track, t.scrollbar_track.r, t.scrollbar_track.g, t.scrollbar_track.b, @as(f32, @floatFromInt(t.scrollbar_track.a)) / 255.0);
-
-            const track_h = @max(0.0, sv.viewportHeightNow() - 4.0);
-            const content_h = @max(sv.contentHeightNow(), sv.viewportHeightNow() + 1.0);
-            const thumb_h = @max(20.0, (track_h / content_h) * track_h);
-
-            const thumb = try ctx.boxNode(.{
-                .width = component.pct(100),
-                .height = thumb_h,
-                .radius = t.radius_base,
-                .on_mouse_down = ctx.handler(sv, ScrollView.onThumbDown),
-                .on_mouse_up = ctx.handler(sv, ScrollView.onThumbUp),
-            }, .{});
-            sv.thumb_node = thumb;
-            try b.backgroundAlpha(thumb, t.scrollbar_thumb.r, t.scrollbar_thumb.g, t.scrollbar_thumb.b, @as(f32, @floatFromInt(t.scrollbar_thumb.a)) / 255.0);
-            try b.cursor(thumb, "pointer");
-            b.close(); // track
+            // `.fill` sizes the Scrollbar's mount anchor to this holder, so its
+            // length is definite (a hugging anchor would collapse onto the thumb).
+            // The 4px gap plus the bar's thickness is the SCROLLBAR_WIDTH channel.
+            const holder = try b.openNodeKeyed(.box, null);
+            try b.width(holder, BAR_THICKNESS, .px);
+            try b.store.setLayout(holder, .flex_grow, .{ .number = 1 });
+            try b.marginLeft(holder, SCROLLBAR_WIDTH - BAR_THICKNESS);
+            try ctx.mountOwned(scrollbar_mod.Scrollbar, .{
+                .fill = true,
+                .offset = sv.offsetSig(),
+                .content_size = &sv.bar_content_sig,
+                .viewport_size = &sv.bar_viewport_sig,
+                .thickness = BAR_THICKNESS,
+            });
+            b.close(); // holder
+            if (b.registry.getNode(holder)) |n| sv.bar_anchor = n.first_child;
+            if (sv.bar()) |sb| {
+                sv.track_node = sb.track_node;
+                sv.thumb_node = sb.thumb_node;
+            }
         } else if (sv.gutter == .stable) {
             // No scrollbar, but the caller asked for a stable content width: hold the
             // channel open with an empty (transparent) spacer of the same width.
@@ -600,11 +582,11 @@ test "ScrollView thumb drag-follow via global move; handler removed on unmount" 
     // Press the thumb (typed handler), then drag down 59.6 px of track space →
     // 100 px of content space: offset goes 0 → -100 (clamped ≥ -400).
     _ = env.router.route(.{ .name = "mouse_down", .id = "", .node_id = sv.thumb_node, .y = 10.0 });
-    try testing.expect(sv.dragging);
+    try testing.expect(sv.bar().?.dragging.peek());
     _ = env.router.route(.{ .name = "mouse_move", .id = "", .y = 10.0 + 59.6 });
     try testing.expectApproxEqAbs(@as(f32, -100.0), sv.scroll_offset.peek(), 0.01);
     _ = env.router.route(.{ .name = "mouse_up", .id = "" });
-    try testing.expect(!sv.dragging);
+    try testing.expect(!sv.bar().?.dragging.peek());
 
     // Rebuild the root empty → the anchor is reconciled away → onUnmount removes
     // the global handler (and the instance is freed without leak).
