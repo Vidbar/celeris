@@ -9,6 +9,31 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.1.7 — 2026-11-06
+
+### Added
+
+- **`TextMeasure.widthStyled` / `widthRole`** — measure text with a font role
+  (`.mono`, `.bold`, `.mono_bold`) and letter spacing, using the same face and
+  tracking the renderer draws that node with. For a prefix of a line the width is
+  the x of the next glyph, so carets and selection bands over `fontMono`/`fontBold`
+  or letter-spaced text no longer drift. `TextMeasure.MeasureStyle` carries the
+  role and spacing. `width` is unchanged (default face).
+- **`TextMeasure.verticalStyled`** — vertical caret/band geometry from a role's
+  own face.
+- **`fw.component.columnAtXStyled`** — click-to-column for styled text. Measures
+  whole prefixes (no accumulated kerning/tracking drift), returns UTF-8 codepoint
+  boundaries, and binary-searches (O(log n) measurements). `columnAtX` is unchanged.
+- **`fw.testkit.measureStub()`** — a public, role-aware `TextMeasure` for testing
+  text widgets without a window: distinct advances per role, per-codepoint
+  counting, letter spacing and an "AV" kern.
+- `TextMeasure` gains two optional fields, `measureStyledFn` and
+  `verticalStyledFn` (default `null`). A handle without them falls back to the
+  default face and ignores the style; existing struct literals keep compiling.
+
+No BREAKING changes; `CELERIS_ABI_VERSION` unchanged (6). `TextInput` and
+`TextArea` still use `columnAtX`.
+
 ## 0.1.6 — 2026-11-06
 
 ### Added

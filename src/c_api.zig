@@ -1231,6 +1231,19 @@ fn atlasMeasureWidth(ctx: *anyopaque, text: []const u8, font_size: f32) f32 {
     return m_ctx.atlas.measureWidthSnapped(text, font_size, m_ctx.scale);
 }
 
+/// `atlasMeasureWidth` with a role and tracking: resolves the role to a face exactly
+/// as layout does (`fontIndexForRole`), so the width matches what is drawn.
+fn atlasMeasureWidthStyled(ctx: *anyopaque, text: []const u8, font_size: f32, style: @import("framework/builder.zig").TextMeasure.MeasureStyle) f32 {
+    const m_ctx: *const MeasureContext = @ptrCast(@alignCast(ctx));
+    const pref = m_ctx.atlas.fontIndexForRole(style.role);
+    return m_ctx.atlas.measureWidthSnappedPref(text, font_size, m_ctx.scale, pref, style.letter_spacing);
+}
+
+fn atlasVerticalLayoutStyled(ctx: *anyopaque, font_size: f32, box_height: f32, num_lines: usize, line_height_factor: f32, role: text_mod.FontRole) text_mod.VerticalLayout {
+    const m_ctx: *const MeasureContext = @ptrCast(@alignCast(ctx));
+    return m_ctx.atlas.verticalLayoutWith(m_ctx.atlas.fontIndexForRole(role), font_size, box_height, num_lines, line_height_factor);
+}
+
 /// Wraps FontAtlas.verticalLayout for the component layer, so a widget drawing a
 /// caret or a selection band gets the same geometry the renderer draws glyphs with.
 fn atlasVerticalLayout(ctx: *anyopaque, font_size: f32, box_height: f32, num_lines: usize, line_height_factor: f32) text_mod.VerticalLayout {
@@ -1273,7 +1286,7 @@ pub fn rebuildUI(engine_id: i32, build_fn: *const fn (*@import("framework/builde
     // The context lives on the engine, not on this frame: see `measure_ctx`.
     if (engine.atlas) |*atlas| {
         engine.measure_ctx = .{ .atlas = atlas, .scale = engine.scale };
-        b.measure = .{ .ctx = @ptrCast(&engine.measure_ctx), .measureFn = atlasMeasureWidth, .verticalFn = atlasVerticalLayout };
+        b.measure = .{ .ctx = @ptrCast(&engine.measure_ctx), .measureFn = atlasMeasureWidth, .verticalFn = atlasVerticalLayout, .measureStyledFn = atlasMeasureWidthStyled, .verticalStyledFn = atlasVerticalLayoutStyled };
     }
     // Inject the platform clipboard so text widgets can copy/paste.
     b.clipboard = .{ .ctx = @ptrCast(&g_clipboard_ctx), .getFn = clipboardGetFn, .setFn = clipboardSetFn };
@@ -4807,4 +4820,103 @@ test "repro: an out-of-range virtual_focus_target is refused by the C-ABI and ig
     try h.engine.store.setModifier(n, .virtual_focus_target, .{ .number = 1e30 }); // a Zig writer
     try bakeAndRenderFrame(h.engine, false);
     try std.testing.expect(h.engine.store.modifierNodeRef(n, .virtual_focus_target) == null);
+}
+
+test "TextMeasure.widthStyled(.mono) lands on the x the renderer pens the next glyph at" {
+    var atlas = loadFontAtlas(std.testing.allocator) orelse return error.SkipZigTest;
+    defer atlas.deinit();
+    // Without a monospace face the role degrades to the primary and there is
+    // nothing to tell apart: skip rather than pass vacuously.
+    if (!atlas.hasRoleFont(.mono)) return error.SkipZigTest;
+
+    var ctx = MeasureContext{ .atlas = &atlas, .scale = 1.0 };
+    const m = @import("framework/builder.zig").TextMeasure{
+        .ctx = @ptrCast(&ctx),
+        .measureFn = atlasMeasureWidth,
+        .measureStyledFn = atlasMeasureWidthStyled,
+    };
+    const fs: f32 = 14;
+    const text = "fn main() { const AVWAil = 1 + 2; } // iiiiWWWW mono vs proportional";
+
+    // Mono and proportional disagree on the same run (the bug: width() used one rule for both).
+    const w_mono = m.widthRole(text, fs, .mono);
+    const w_prop = m.width(text, fs);
+    try std.testing.expect(@abs(w_mono - w_prop) > 1.0);
+    // Monospace: every prefix is (chars × one advance).
+    const one = m.widthRole("i", fs, .mono);
+    try std.testing.expectApproxEqAbs(one, m.widthRole("W", fs, .mono), 0.01);
+    try std.testing.expectApproxEqAbs(one * @as(f32, @floatFromInt(text.len)), w_mono, 0.05);
+
+    for ([_]f32{ 0, 1.5 }) |ls| {
+        const pref = atlas.fontIndexForRole(.mono);
+        var glyphs = std.array_list.Managed(text_mod.ShapedGlyph).init(std.testing.allocator);
+        defer glyphs.deinit();
+        try atlas.shapePref(text, fs, pref, ls, &glyphs);
+        // Pen x before each glyph = sum of the previous advances, which is exactly how
+        // the backend advances (wgpu_backend: pen_x += x_advance). Every prefix measured
+        // through the widget handle must land there.
+        var pen: f32 = 0;
+        for (glyphs.items) |g| {
+            const prefix = text[0..g.cluster];
+            const w = m.widthStyled(prefix, fs, .{ .role = .mono, .letter_spacing = ls });
+            try std.testing.expectApproxEqAbs(pen, w, 0.05);
+            pen += g.x_advance;
+        }
+        // And it is the renderer's own caret x for that node's layout.
+        var layout = try atlas.measureTextMultilinePref(text, fs, 1e6, pref, ls, text_mod.LINE_HEIGHT_FACTOR, std.testing.allocator);
+        defer layout.deinit();
+        const caret = atlas.getCaretMetrics(text, &layout, fs, 40, 1.0);
+        try std.testing.expectApproxEqAbs(caret.x, m.widthStyled(text[0..40], fs, .{ .role = .mono, .letter_spacing = ls }), 0.01);
+    }
+
+    // The hit-test agrees: clicking just right of glyph 50's left edge on a long mono
+    // line picks column 50, no accumulated drift.
+    const comp = @import("framework/component.zig");
+    const x50 = m.widthRole(text[0..50], fs, .mono) + one * 0.25;
+    try std.testing.expectEqual(@as(usize, 50), comp.columnAtXStyled(m, text, fs, .{ .role = .mono }, x50));
+}
+
+test "rebuildUI hands widgets a TextMeasure with the styled hooks wired" {
+    const config = CelerisConfig{ .is_headless = true };
+    const engine_id = celeris_create_engine(&config);
+    if (engine_id <= 0) return error.SkipZigTest;
+    defer celeris_deinit(engine_id);
+    const engine = getEngine(engine_id) orelse return error.SkipZigTest;
+    const atlas = if (engine.atlas) |*a| a else return error.SkipZigTest;
+    if (!atlas.hasRoleFont(.mono)) return error.SkipZigTest;
+
+    const Captured = struct {
+        var measure: ?@import("framework/builder.zig").TextMeasure = null;
+        fn build(b: *@import("framework/builder.zig").UIBuilder) anyerror!void {
+            measure = b.measure;
+            const root = try b.openBox();
+            try b.width(root, 100, .px);
+            b.close();
+        }
+    };
+    Captured.measure = null;
+    try rebuildUI(engine_id, Captured.build);
+    const m = Captured.measure orelse return error.SkipZigTest;
+
+    // Without the hooks, both would silently fall back to the default face.
+    try std.testing.expect(m.measureStyledFn != null);
+    try std.testing.expect(m.verticalStyledFn != null);
+    const text = "iiiiiiiiii";
+    try std.testing.expect(@abs(m.widthRole(text, 14, .mono) - m.width(text, 14)) > 1.0);
+    const pref = atlas.fontIndexForRole(.mono);
+    try std.testing.expectApproxEqAbs(
+        atlas.measureWidthPref(text, 14, pref, 1.5),
+        m.widthStyled(text, 14, .{ .role = .mono, .letter_spacing = 1.5 }),
+        0.001,
+    );
+
+    // verticalStyled reads the role's own face, exactly as the atlas computes it.
+    const want = atlas.verticalLayoutWith(pref, 14, 40, 2, 1.2);
+    const got = m.verticalStyled(14, 40, 2, 1.2, .mono);
+    try std.testing.expectApproxEqAbs(want.baseline, got.baseline, 0.001);
+    try std.testing.expectApproxEqAbs(want.line_height, got.line_height, 0.001);
+    // .default through the styled door is the plain verticalWith.
+    const d0 = m.verticalWith(14, 40, 2, 1.2);
+    const d1 = m.verticalStyled(14, 40, 2, 1.2, .default);
+    try std.testing.expectApproxEqAbs(d0.baseline, d1.baseline, 0.001);
 }

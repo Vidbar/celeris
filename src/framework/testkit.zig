@@ -106,3 +106,80 @@ fn matchesModifierId(h: *Harness, node_id: reg.NodeId, key: props.ModifierKey, i
         else => false,
     };
 }
+
+// ── Text measurement stub ─────────────────────────────────────────────────────
+
+const builder_mod = @import("builder.zig");
+
+/// A deterministic, role-aware `TextMeasure` for testing text widgets without a
+/// window or fonts. Install it with `b.measure = fw.testkit.measureStub();`.
+///
+/// Metrics (per codepoint, so UTF-8 text measures by character, not by byte):
+/// - `.default` → `default_advance` (10px), `.bold` → `bold_advance` (11px),
+///   `.mono` / `.mono_bold` → `mono_advance` (12px);
+/// - plus `letter_spacing` per codepoint, as the renderer applies tracking;
+/// - in `.default` and `.bold`, the pair "AV" kerns by `kern_av` (−3px), so a
+///   widget that sums single-character widths instead of measuring prefixes
+///   drifts here the way it would against a real font.
+/// The advances don't scale with `font_size`; tests compare columns and x, not size.
+pub const MeasureStub = struct {
+    pub const default_advance: f32 = 10;
+    pub const bold_advance: f32 = 11;
+    pub const mono_advance: f32 = 12;
+    pub const kern_av: f32 = -3;
+
+    var ctx_byte: u8 = 0;
+
+    pub fn width(ctx: *anyopaque, text: []const u8, font_size: f32) f32 {
+        return styled(ctx, text, font_size, .{});
+    }
+
+    pub fn styled(_: *anyopaque, text: []const u8, _: f32, style: builder_mod.TextMeasure.MeasureStyle) f32 {
+        const adv: f32 = switch (style.role) {
+            .default => default_advance,
+            .bold => bold_advance,
+            .mono, .mono_bold => mono_advance,
+        };
+        const kerns = style.role == .default or style.role == .bold;
+        var w: f32 = 0;
+        var prev: u21 = 0;
+        var i: usize = 0;
+        while (i < text.len) {
+            // Lenient stepping: an invalid lead byte counts as one character.
+            const n = @min(std.unicode.utf8ByteSequenceLength(text[i]) catch 1, text.len - i);
+            const cp: u21 = std.unicode.utf8Decode(text[i .. i + n]) catch 0xFFFD;
+            i += n;
+            if (kerns and prev == 'A' and cp == 'V') w += kern_av;
+            w += adv + style.letter_spacing;
+            prev = cp;
+        }
+        return w;
+    }
+};
+
+/// The `TextMeasure` handle for `MeasureStub`. Width with `width` / `widthStyled`
+/// / `widthRole`; vertical geometry falls back to the default proportions.
+pub fn measureStub() builder_mod.TextMeasure {
+    return .{
+        .ctx = @ptrCast(&MeasureStub.ctx_byte),
+        .measureFn = MeasureStub.width,
+        .measureStyledFn = MeasureStub.styled,
+    };
+}
+
+test "measureStub tells roles apart, kerns AV, counts codepoints and tracking" {
+    const m = measureStub();
+    try std.testing.expectEqual(@as(f32, 30), m.width("abc", 16));
+    try std.testing.expectEqual(@as(f32, 36), m.widthRole("abc", 16, .mono));
+    try std.testing.expectEqual(@as(f32, 33), m.widthRole("abc", 16, .bold));
+    // The un-styled width is the default role.
+    try std.testing.expectEqual(m.width("abc", 16), m.widthRole("abc", 16, .default));
+    // Kerning makes the prefix narrower than the sum of its characters.
+    try std.testing.expectEqual(@as(f32, 17), m.width("AV", 16));
+    try std.testing.expectEqual(@as(f32, 24), m.widthRole("AV", 16, .mono));
+    // "é" (2 bytes) and "日" (3 bytes) are one character each.
+    try std.testing.expectEqual(@as(f32, 20), m.width("é日", 16));
+    try std.testing.expectEqual(@as(f32, 3 * 14), m.widthStyled("abc", 16, .{ .role = .mono, .letter_spacing = 2 }));
+    // Invalid UTF-8 does not trap.
+    try std.testing.expectEqual(@as(f32, 10), m.width("\xff", 16));
+}

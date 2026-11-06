@@ -1021,6 +1021,46 @@ pub fn columnAtX(measure: ?TextMeasure, line: []const u8, font_size: f32, local_
     return @min(c, line.len);
 }
 
+/// `columnAtX` for text drawn with `style` (a `b.fontMono` / `b.fontBold` node, or
+/// one with letter spacing). `line` must not contain newlines. Measures whole prefixes with `widthStyled` — the same
+/// width the renderer's caret uses — so kerning and tracking never accumulate into
+/// drift, and always returns a codepoint boundary. The column is found by binary
+/// search over prefix widths (O(log n) measurements per hit-test), which assumes they
+/// grow with each character — true unless tracking or kerning is negative enough to
+/// cancel a glyph's advance. Past that the result is still a boundary, but not
+/// necessarily the nearest one.
+/// Midpoint rule as in `columnAtX`. Without a measure it uses the same fallback
+/// estimate as `columnAtX`, snapped to a codepoint boundary.
+pub fn columnAtXStyled(measure: ?TextMeasure, line: []const u8, font_size: f32, style: TextMeasure.MeasureStyle, local_x: f32) usize {
+    if (local_x <= 0 or line.len == 0) return 0;
+    const m = measure orelse {
+        const c = columnAtX(null, line, font_size, local_x);
+        return if (c >= line.len) line.len else prevBoundary(line, c + 1);
+    };
+    const w_end = m.widthStyled(line, font_size, style);
+    if (local_x >= w_end) return line.len;
+    // Invariant: width(line[0..lo]) <= local_x < width(line[0..hi]); lo, hi are boundaries.
+    var lo: usize = 0;
+    var w_lo: f32 = 0;
+    var hi: usize = line.len;
+    var w_hi: f32 = w_end;
+    while (true) {
+        const next = nextBoundary(line, lo);
+        if (next >= hi) break;
+        var mid = prevBoundary(line, lo + (hi - lo) / 2 + 1);
+        if (mid <= lo) mid = next;
+        const w = m.widthStyled(line[0..mid], font_size, style);
+        if (w <= local_x) {
+            lo = mid;
+            w_lo = w;
+        } else {
+            hi = mid;
+            w_hi = w;
+        }
+    }
+    return if (local_x < (w_lo + w_hi) / 2.0) lo else hi;
+}
+
 // ── Shared text-editing helpers (TextInput / TextArea) ────────────────────────
 // cursor positions are BYTE indices into a UTF-8 buffer; edits must move/cut whole
 // codepoints (a CJK char is 3 bytes — byte-stepping would corrupt it).
@@ -3002,4 +3042,59 @@ test "ctx.onScroll / onScrollH wire scroll handlers on a raw-builder node, like 
     _ = router.route(.{ .name = "scroll_h", .id = "n", .node_id = id, .scroll_delta = -3.0 });
     try testing.expectApproxEqAbs(@as(f32, 2.0), Spy.v_delta, 0.0001);
     try testing.expectApproxEqAbs(@as(f32, -3.0), Spy.h_delta, 0.0001);
+}
+
+test "columnAtXStyled: mono hit-test lands on the right column far into a long line" {
+    const m = @import("testkit.zig").measureStub();
+    const line = "x" ** 200;
+    // Mono advance is 12px; the old un-styled columnAtX reads the same x with 10px
+    // per char and is off by 20% — 33 columns by column 166.
+    const x: f32 = 166 * 12 + 1;
+    try testing.expectEqual(@as(usize, 166), columnAtXStyled(m, line, 16, .{ .role = .mono }, x));
+    try testing.expect(columnAtX(m, line, 16, x) != 166);
+    // Midpoint rule: just before / after the middle of glyph 166.
+    try testing.expectEqual(@as(usize, 166), columnAtXStyled(m, line, 16, .{ .role = .mono }, 166 * 12 + 5.9));
+    try testing.expectEqual(@as(usize, 167), columnAtXStyled(m, line, 16, .{ .role = .mono }, 166 * 12 + 6.1));
+    // Ends.
+    try testing.expectEqual(@as(usize, 0), columnAtXStyled(m, line, 16, .{ .role = .mono }, -5));
+    try testing.expectEqual(@as(usize, 200), columnAtXStyled(m, line, 16, .{ .role = .mono }, 1e6));
+    // Letter spacing is part of the advance.
+    try testing.expectEqual(@as(usize, 50), columnAtXStyled(m, line, 16, .{ .role = .mono, .letter_spacing = 2 }, 50 * 14 + 1));
+}
+
+test "columnAtXStyled measures prefixes (kerning) and returns codepoint boundaries" {
+    const m = @import("testkit.zig").measureStub();
+    // "AVAV…": each A|V pair kerns −3px. Prefix widths: A=10, AV=17, AVA=27, AVAV=34.
+    const line = "AV" ** 40;
+    // Column 60 starts at 30 pairs * 17 = 510px. Summing single chars would put it at 600.
+    try testing.expectEqual(@as(usize, 60), columnAtXStyled(m, line, 16, .{}, 511));
+    try testing.expect(columnAtX(m, line, 16, 511) != 60);
+    // Multibyte: "日" is 3 bytes; never return an index inside it.
+    const cjk = "a日b日c";
+    try testing.expectEqual(@as(usize, 1), columnAtXStyled(m, cjk, 16, .{}, 12));
+    try testing.expectEqual(@as(usize, 4), columnAtXStyled(m, cjk, 16, .{}, 16));
+    try testing.expectEqual(@as(usize, 5), columnAtXStyled(m, cjk, 16, .{}, 26));
+    var x: f32 = 0;
+    while (x < 60) : (x += 0.5) {
+        const c = columnAtXStyled(m, cjk, 16, .{}, x);
+        try testing.expect(c == cjk.len or (cjk[c] & 0xC0) != 0x80);
+    }
+    // No measure: the fallback estimate, still snapped to a boundary.
+    const c0 = columnAtXStyled(null, cjk, 16, .{}, 2 * 8);
+    try testing.expect(c0 == cjk.len or (cjk[c0] & 0xC0) != 0x80);
+}
+
+test "widthStyled without a styled hook falls back to the default-face width" {
+    var dummy: u8 = 0;
+    const m = TextMeasure{ .ctx = @ptrCast(&dummy), .measureFn = dummyMeasure };
+    try testing.expectEqual(m.width("abcd", 16), m.widthRole("abcd", 16, .mono));
+    try testing.expectEqual(m.width("abcd", 16), m.widthStyled("abcd", 16, .{ .role = .bold, .letter_spacing = 3 }));
+}
+
+test "verticalStyled without a styled hook is verticalWith" {
+    const m = @import("testkit.zig").measureStub();
+    const a = m.verticalWith(16, 40, 2, 1.25);
+    const b = m.verticalStyled(16, 40, 2, 1.25, .mono);
+    try testing.expectEqual(a.baseline, b.baseline);
+    try testing.expectEqual(a.line_height, b.line_height);
 }

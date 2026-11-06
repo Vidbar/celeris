@@ -936,6 +936,43 @@ band or underline over text asks for the geometry instead of hardcoding px:
   line.
 - `fw.builder.verticalFallback` / `verticalFallbackWith` — the same computation
   without a measure handle.
+- `TextMeasure.verticalStyled(size, box_h, lines, f, role)` — the geometry of a
+  role's own face (a `fontMono` / `fontBold` node).
+
+**Measuring text drawn with a role or letter spacing.** `TextMeasure.width` measures
+the default face with no tracking. For text a node draws with `b.fontMono`,
+`b.fontBold`, `b.fontRole` or `b.letterSpacing`, measure with the same style, or the
+caret, the clicked column and the selection band drift further with every character:
+
+```zig
+const m = ctx.builder.measure orelse return;
+const style: fw.builder.TextMeasure.MeasureStyle = .{ .role = .mono, .letter_spacing = 0 };
+const caret_x = m.widthStyled(line[0..cursor], font_size, style); // == the next glyph's x
+const mono_w  = m.widthRole(line, font_size, .mono);               // role only
+const col = fw.component.columnAtXStyled(m, line, font_size, style, click_x);
+```
+
+- `widthStyled(prefix, size, style)` equals the renderer's pen x for the next
+  glyph: same face (`fontIndexForRole`, with its fallbacks) and same tracking. The
+  glyph itself is drawn snapped to the physical pixel, so on screen it can sit up
+  to half a physical pixel from that x.
+- `columnAtXStyled` takes one line (no newlines). It measures whole prefixes, so
+  kerning and tracking never add up to drift, and it always returns a UTF-8
+  codepoint boundary. It binary-searches the prefix widths (O(log n) measurements
+  per hit-test), assuming they grow with each character; a letter spacing negative
+  enough to cancel a glyph's advance breaks that, and the column is then a boundary
+  but not necessarily the nearest. `columnAtX` is unchanged (default face, per-byte
+  sum) and is what `TextInput`/`TextArea` still use.
+- A `TextMeasure` built without `measureStyledFn` (a custom stub) falls back to
+  `measureFn` and **ignores the style**. The engine's handle always has it.
+
+**Testing without a window.** `fw.testkit.measureStub()` returns a deterministic,
+role-aware `TextMeasure`: 10px per character for `.default`, 11 for `.bold`, 12 for
+`.mono`/`.mono_bold`, plus `letter_spacing` per character, measured per codepoint, and
+a −3px kern on the pair "AV" in the proportional roles so code that sums single
+characters instead of measuring prefixes fails here as it would on a real font.
+Install it with `b.measure = fw.testkit.measureStub();`. The advances are exposed as
+`fw.testkit.MeasureStub.default_advance` etc.
 
 **C hosts.** `celeris_get_caret_metrics` and `celeris_get_char_index_at` measure at
 the default line height. For text whose node has a `line_height` style, call

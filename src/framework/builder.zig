@@ -75,9 +75,45 @@ pub const TextMeasure = struct {
     /// The last argument is the line-height multiplier (`text.LINE_HEIGHT_FACTOR`
     /// for the default).
     verticalFn: ?*const fn (*anyopaque, font_size: f32, box_height: f32, num_lines: usize, line_height_factor: f32) text_mod.VerticalLayout = null,
+    /// Width with a font role and letter spacing — the same face and tracking the
+    /// renderer draws a `b.fontMono` / `b.fontBold` / `b.letterSpacing` node with.
+    /// Optional: when null, `widthStyled` falls back to `measureFn`, which **ignores
+    /// the style** (default face, no tracking).
+    measureStyledFn: ?*const fn (*anyopaque, text: []const u8, font_size: f32, style: MeasureStyle) f32 = null,
+    /// `verticalFn` for a role's face (its own ascent/descent). Optional: when null,
+    /// `verticalStyled` falls back to the default face's geometry.
+    verticalStyledFn: ?*const fn (*anyopaque, font_size: f32, box_height: f32, num_lines: usize, line_height_factor: f32, role: FontRole) text_mod.VerticalLayout = null,
 
+    /// How a run is drawn, for measuring it the same way. Mirror the node's
+    /// `fontRole` and `letterSpacing` styles.
+    pub const MeasureStyle = struct {
+        role: FontRole = .default,
+        letter_spacing: f32 = 0,
+    };
+
+    /// Width at the default face. Text drawn with another role or with letter
+    /// spacing must use `widthStyled`, or carets and hit-tests drift.
     pub fn width(self: TextMeasure, text: []const u8, font_size: f32) f32 {
         return self.measureFn(self.ctx, text, font_size);
+    }
+
+    /// Width of `text` drawn with `style`. For a prefix of a line it equals the
+    /// renderer's pen x for the next glyph (kerning and tracking included); the glyph
+    /// is drawn snapped to the physical pixel, within half a physical px of it.
+    pub fn widthStyled(self: TextMeasure, text: []const u8, font_size: f32, style: MeasureStyle) f32 {
+        if (self.measureStyledFn) |f| return f(self.ctx, text, font_size, style);
+        return self.measureFn(self.ctx, text, font_size);
+    }
+
+    /// Shorthand for `widthStyled` with just a role.
+    pub fn widthRole(self: TextMeasure, text: []const u8, font_size: f32, role: FontRole) f32 {
+        return self.widthStyled(text, font_size, .{ .role = role });
+    }
+
+    /// `verticalWith` for text drawn with `role`.
+    pub fn verticalStyled(self: TextMeasure, font_size: f32, box_height: f32, num_lines: usize, line_height_factor: f32, role: FontRole) text_mod.VerticalLayout {
+        if (self.verticalStyledFn) |f| return f(self.ctx, font_size, box_height, num_lines, line_height_factor, role);
+        return self.verticalWith(font_size, box_height, num_lines, line_height_factor);
     }
 
     /// Where the baseline, the ink and the caret band land inside a `box_height`-tall
