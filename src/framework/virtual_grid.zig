@@ -60,15 +60,6 @@ const LEFT_SPACER_KEY: u64 = std.math.maxInt(u64) - 2;
 const RIGHT_SPACER_KEY: u64 = std.math.maxInt(u64) - 3;
 
 // Key codes (match core/events / the platform layer's virtual-key mapping).
-const KEY_LEFT: u32 = 0x25;
-const KEY_UP: u32 = 0x26;
-const KEY_RIGHT: u32 = 0x27;
-const KEY_DOWN: u32 = 0x28;
-const KEY_TAB: u32 = 0x09;
-const KEY_HOME: u32 = 0x24;
-const KEY_END: u32 = 0x23;
-const KEY_PAGEUP: u32 = 0x21;
-const KEY_PAGEDOWN: u32 = 0x22;
 
 pub fn VirtualGrid(comptime Datum: type) type {
     return struct {
@@ -326,30 +317,30 @@ pub fn VirtualGrid(comptime Datum: type) type {
             const max_r = self.row_count - 1;
             const max_c = self.col_count - 1;
 
-            switch (ev.key_code) {
-                KEY_LEFT => f.col = if (f.col == 0) 0 else f.col - 1,
-                KEY_RIGHT => f.col = @min(max_c, f.col + 1),
-                KEY_UP => f.row = if (f.row == 0) 0 else f.row - 1,
-                KEY_DOWN => f.row = @min(max_r, f.row + 1),
-                KEY_HOME => if (ev.ctrl) {
+            switch (events.Key.fromCode(ev.key_code) orelse return) {
+                .left => f.col = if (f.col == 0) 0 else f.col - 1,
+                .right => f.col = @min(max_c, f.col + 1),
+                .up => f.row = if (f.row == 0) 0 else f.row - 1,
+                .down => f.row = @min(max_r, f.row + 1),
+                .home => if (ev.ctrl) {
                     f = .{ .row = 0, .col = 0 };
                 } else {
                     f.col = 0;
                 },
-                KEY_END => if (ev.ctrl) {
+                .end => if (ev.ctrl) {
                     f = .{ .row = max_r, .col = max_c };
                 } else {
                     f.col = max_c;
                 },
-                KEY_PAGEUP => {
+                .page_up => {
                     const step = @max(1, self.visibleRows());
                     f.row = if (f.row < step) 0 else f.row - step;
                 },
-                KEY_PAGEDOWN => {
+                .page_down => {
                     const step = @max(1, self.visibleRows());
                     f.row = @min(max_r, f.row + step);
                 },
-                KEY_TAB => {
+                .tab => {
                     if (ev.shift) {
                         if (f.col == 0) {
                             if (f.row > 0) {
@@ -808,22 +799,22 @@ test "VirtualGrid keyboard navigation moves the lifted selection and scrolls int
     const vg = try mountVG(&env, p);
 
     // Arrow Down then Right → focus (1,1).
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = KEY_DOWN });
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = KEY_RIGHT });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = events.Key.down.code() });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = events.Key.right.code() });
     try testing.expectEqual(CellCoord{ .row = 1, .col = 1 }, sel.peek().focus);
     try testing.expectEqual(sel.peek().anchor, sel.peek().focus); // collapsed
 
     // PageDown jumps ~visibleRows and scrolls the focused cell into view.
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = KEY_PAGEDOWN });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = events.Key.page_down.code() });
     try testing.expectEqual(@as(usize, 1 + 20), sel.peek().focus.row); // visibleRows = 400/20
     try testing.expect(vg.rowScrollSig().peek() > 0); // scrolled down to reveal it
 
     // Ctrl+End → last cell.
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = KEY_END, .ctrl = true });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = events.Key.end.code(), .ctrl = true });
     try testing.expectEqual(CellCoord{ .row = 9_999, .col = 199 }, sel.peek().focus);
 
     // Ctrl+Home → back to origin.
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = KEY_HOME, .ctrl = true });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = events.Key.home.code(), .ctrl = true });
     try testing.expectEqual(CellCoord{ .row = 0, .col = 0 }, sel.peek().focus);
     try testing.expectApproxEqAbs(@as(f32, 0), vg.rowScrollSig().peek(), 0.001);
 }

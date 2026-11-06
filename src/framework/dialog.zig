@@ -27,7 +27,6 @@ const theme_mod = @import("theme.zig");
 const BuildContext = component.BuildContext;
 const EdgeInsets = component.EdgeInsets;
 
-const KEY_ESCAPE: u32 = 27;
 const PANEL_W: f32 = 360;
 const Z_OVERLAY: f32 = 200; // above menus/dropdowns (z 100)
 
@@ -113,7 +112,7 @@ pub const Dialog = struct {
     /// (the pushed scope), so key_down routes here.
     fn onKey(self: *Dialog, ev: events.Event) void {
         if (!std.mem.eql(u8, ev.name, "key_down")) return;
-        if (ev.key_code == KEY_ESCAPE and self.dismissable) self.close();
+        if (events.Key.fromCode(ev.key_code) == .escape and self.dismissable) self.close();
     }
 
     pub fn build(self: *Dialog, ctx: *BuildContext) !void {
@@ -408,7 +407,7 @@ test "Dialog: Escape closes and fires on_close; a backdrop click also dismisses"
     try testing.expect(dlg.isOpen());
 
     // Escape on the panel closes + fires on_close.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dlg.panel_id, .key_code = KEY_ESCAPE });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dlg.panel_id, .key_code = events.Key.escape.code() });
     try testing.expect(!open.peek());
     try testing.expectEqual(@as(u32, 1), Sink.closes);
 
@@ -447,7 +446,7 @@ test "Dialog: dismissable=false ignores backdrop click and Escape" {
 
     _ = router.route(.{ .name = "click", .id = "", .node_id = dlg.backdrop_id });
     try testing.expect(open.peek()); // still open
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dlg.panel_id, .key_code = KEY_ESCAPE });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dlg.panel_id, .key_code = events.Key.escape.code() });
     try testing.expect(open.peek()); // still open
 }
 
@@ -501,7 +500,7 @@ test "Dialog: opening pushes a focus scope on the panel; closing pops it (once)"
 
     // Escape (via close) after reopening pops exactly once more.
     open.set(true);
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dlg.panel_id, .key_code = KEY_ESCAPE });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dlg.panel_id, .key_code = events.Key.escape.code() });
     try testing.expectEqual(@as(u32, 2), FS.pushes);
     try testing.expectEqual(@as(u32, 2), FS.pops);
 }

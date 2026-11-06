@@ -107,9 +107,9 @@ pub const RadioGroup = struct {
         const n = self.options.len;
         if (n == 0) return;
         const cur = self.selected.peek();
-        const next = switch (ev.key_code) {
-            38, 37 => if (cur == 0) 0 else cur - 1, // ↑ / ←
-            40, 39 => @min(cur + 1, n - 1), // ↓ / →
+        const next = switch (events.Key.fromCode(ev.key_code) orelse return) {
+            .up, .left => if (cur == 0) 0 else cur - 1, // ↑ / ←
+            .down, .right => @min(cur + 1, n - 1), // ↓ / →
             else => return,
         };
         if (next != cur) {
@@ -336,12 +336,12 @@ test "RadioGroup arrow keys move the selection, clamped at the ends" {
     // The focusable node is the inner column (first child of the anchor's root).
     const col = registry.getNode(root).?.first_child;
 
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = col, .key_code = 40 }); // ↓
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = col, .key_code = events.Key.down.code() }); // ↓
     try testing.expectEqual(@as(usize, 1), grp.selected.peek());
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = col, .key_code = 40 }); // ↓
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = col, .key_code = 40 }); // ↓ (clamped)
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = col, .key_code = events.Key.down.code() }); // ↓
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = col, .key_code = events.Key.down.code() }); // ↓ (clamped)
     try testing.expectEqual(@as(usize, 2), grp.selected.peek());
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = col, .key_code = 38 }); // ↑
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = col, .key_code = events.Key.up.code() }); // ↑
     try testing.expectEqual(@as(usize, 1), grp.selected.peek());
 }
 

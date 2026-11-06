@@ -85,9 +85,9 @@ pub const Tabs = struct {
         const n = self.items.len;
         if (n == 0) return;
         const cur = self.activeSig().peek();
-        const next = switch (ev.key_code) {
-            37 => if (cur == 0) n - 1 else cur - 1, // ←
-            39 => (cur + 1) % n, // →
+        const next = switch (events.Key.fromCode(ev.key_code) orelse return) {
+            .left => if (cur == 0) n - 1 else cur - 1, // ←
+            .right => (cur + 1) % n, // →
             else => return,
         };
         if (next != cur) self.activeSig().set(next);
@@ -282,11 +282,11 @@ test "Tabs arrow keys on a focused header button cycle the active tab with wrap"
     try testing.expect(env.store.getModifier(btn0, .focusable) != null);
 
     // → advances; → again wraps back to 0; ← wraps to the last.
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = btn0, .key_code = 39 });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = btn0, .key_code = events.Key.right.code() });
     try testing.expectEqual(@as(usize, 1), active.peek());
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = btn0, .key_code = 39 });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = btn0, .key_code = events.Key.right.code() });
     try testing.expectEqual(@as(usize, 0), active.peek());
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = btn0, .key_code = 37 });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = btn0, .key_code = events.Key.left.code() });
     try testing.expectEqual(@as(usize, 1), active.peek());
 }
 

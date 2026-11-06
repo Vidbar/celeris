@@ -63,6 +63,97 @@ pub const Event = struct {
     /// Registry id of the target node (0 = none/global). The live path fills this
     /// from `CelerisEvent.node_id`; it drives per-node handler routing.
     node_id: u32 = 0,
+
+    /// The named key for a `key_down`/`key_up` event, or null for any other
+    /// event (on clicks `key_code` carries the click count, on `char_input` the
+    /// codepoint) or when `key_code` is 0. Codes without a name come back as
+    /// non-exhaustive `Key` values, so `switch` needs an `else` arm.
+    pub fn key(self: Event) ?Key {
+        if (!std.mem.eql(u8, self.name, "key_down") and !std.mem.eql(u8, self.name, "key_up")) return null;
+        return Key.fromCode(self.key_code);
+    }
+};
+
+/// Names for `Event.key_code` on key events. The values are the Windows
+/// virtual-key codes the engine already uses on every platform (Linux translates
+/// keysyms to them), so this only names what `key_code` carries — it does not
+/// change the encoding or the C ABI. Non-exhaustive: unnamed codes stay
+/// representable.
+pub const Key = enum(u32) {
+    backspace = 0x08,
+    tab = 0x09,
+    enter = 0x0D,
+    escape = 0x1B,
+    space = 0x20,
+    page_up = 0x21,
+    page_down = 0x22,
+    end = 0x23,
+    home = 0x24,
+    left = 0x25,
+    up = 0x26,
+    right = 0x27,
+    down = 0x28,
+    insert = 0x2D,
+    delete = 0x2E,
+    @"0" = 0x30,
+    @"1" = 0x31,
+    @"2" = 0x32,
+    @"3" = 0x33,
+    @"4" = 0x34,
+    @"5" = 0x35,
+    @"6" = 0x36,
+    @"7" = 0x37,
+    @"8" = 0x38,
+    @"9" = 0x39,
+    a = 0x41,
+    b = 0x42,
+    c = 0x43,
+    d = 0x44,
+    e = 0x45,
+    f = 0x46,
+    g = 0x47,
+    h = 0x48,
+    i = 0x49,
+    j = 0x4A,
+    k = 0x4B,
+    l = 0x4C,
+    m = 0x4D,
+    n = 0x4E,
+    o = 0x4F,
+    p = 0x50,
+    q = 0x51,
+    r = 0x52,
+    s = 0x53,
+    t = 0x54,
+    u = 0x55,
+    v = 0x56,
+    w = 0x57,
+    x = 0x58,
+    y = 0x59,
+    z = 0x5A,
+    f1 = 0x70,
+    f2 = 0x71,
+    f3 = 0x72,
+    f4 = 0x73,
+    f5 = 0x74,
+    f6 = 0x75,
+    f7 = 0x76,
+    f8 = 0x77,
+    f9 = 0x78,
+    f10 = 0x79,
+    f11 = 0x7A,
+    f12 = 0x7B,
+    _,
+
+    /// Null for 0 (no key / unmapped on the platform side).
+    pub fn fromCode(raw: u32) ?Key {
+        if (raw == 0) return null;
+        return @enumFromInt(raw);
+    }
+
+    pub fn code(self: Key) u32 {
+        return @intFromEnum(self);
+    }
 };
 
 /// A per-node typed event handler. Replaces the string action-id + separate
@@ -802,4 +893,24 @@ test "EventRouter — route() survives a handler that clears+regrows node_handle
     try std.testing.expectEqual(@as(usize, 1), invoked);
     try std.testing.expectEqual(@as(u32, 1), Rebuilder.fired);
     try std.testing.expectEqual(@as(usize, 500), router.node_handlers.items.len);
+}
+
+test "Event.key names key events and ignores overloaded key_code uses" {
+    const t = std.testing;
+    try t.expectEqual(@as(?Key, .left), (Event{ .name = "key_down", .id = "", .key_code = 0x25 }).key());
+    try t.expectEqual(@as(?Key, .home), (Event{ .name = "key_up", .id = "", .key_code = 0x24 }).key());
+    try t.expect((Event{ .name = "key_down", .id = "", .key_code = 'C', .ctrl = true }).key() == .c);
+    try t.expectEqual(@as(?Key, .f12), (Event{ .name = "key_down", .id = "", .key_code = 0x7B }).key());
+    // Unmapped / no key.
+    try t.expectEqual(@as(?Key, null), (Event{ .name = "key_down", .id = "", .key_code = 0 }).key());
+    // Unnamed codes survive as non-exhaustive values.
+    try t.expectEqual(@as(u32, 0xBA), (Event{ .name = "key_down", .id = "", .key_code = 0xBA }).key().?.code());
+    // key_code is a click count on clicks and a codepoint on char_input — not a key.
+    try t.expectEqual(@as(?Key, null), (Event{ .name = "double_click", .id = "", .key_code = 2 }).key());
+    try t.expectEqual(@as(?Key, null), (Event{ .name = "char_input", .id = "", .key_code = 'a' }).key());
+    // fromCode/code round-trip across every named key.
+    inline for (@typeInfo(Key).@"enum".fields) |f| {
+        const k: Key = @enumFromInt(f.value);
+        try t.expectEqual(k, Key.fromCode(k.code()).?);
+    }
 }

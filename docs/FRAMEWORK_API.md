@@ -553,6 +553,30 @@ These are load-bearing behaviours; downstream apps (node editors, canvases) rely
 - **Release goes where the press went (implicit pointer capture).** On release the engine emits the global `mouse_up` (no node, for drag-follow handlers), then a node-targeted `mouse_up` to every clickable node that received the `mouse_down` — even if the pointer is now elsewhere — and only then the `click` to the node under the pointer. A node removed by a rebuild between press and release gets its `mouse_up` at removal time. So `on_press` / `on_mouse_up` state (`Button.pressed`) can't get stuck, including when the click handler re-mounts the button. `Button`/`IconButton` also drop `pressed` on `mouse_leave`.
 - **Hover survives rebuilds.** If a rebuild removes the hovered node (e.g. a `Button` whose click rebuilds its parent is re-created), that node receives its `mouse_leave` **at removal time** — a removed node is never hovered — so hover-driven state (`Button.hovered`) resets even if the pointer leaves before the next frame or the re-mounted widget is no longer under it. After the next frame is baked, hover is re-evaluated at the last pointer position: a replacement still under the pointer gets `mouse_enter`, and its own `mouse_leave` later. Note that such a `mouse_leave` handler can run *during* a rebuild; keep hover handlers to state writes (the `on_hover` signal-setter pattern).
 
+### Keys (`fw.events.Key`, `ev.key()`)
+
+Keyboard events carry their key in `ev.key_code`, using the Windows virtual-key numbering on every platform (Linux translates xkb keysyms to it). Don't compare against numbers: `ev.key()` returns a named `fw.events.Key`, or `null` when the event isn't a `key_down`/`key_up` or the platform reported no key.
+
+```zig
+fn onKey(self: *Editor, ev: fw.events.Event) void {
+    const key = ev.key() orelse return;
+    switch (key) {
+        .left => self.moveCaret(-1, ev.shift),
+        .right => self.moveCaret(1, ev.shift),
+        .home, .end => self.toLineEdge(key == .end, ev.shift),
+        .z => if (ev.ctrl) self.undo(),
+        .f5 => self.run(),
+        else => {},
+    }
+}
+```
+
+- **Named keys:** `left right up down home end page_up page_down`, `backspace delete enter tab escape space insert`, `a`–`z`, `@"0"`–`@"9"`, `f1`–`f12`. Letters are named once, without case; read Shift from `ev.shift`.
+- **Modifiers are unchanged:** `ev.shift` / `ev.ctrl` / `ev.alt`.
+- **The enum is non-exhaustive:** a code without a name still comes back as a `Key` (`key.code()` gives the number), so a `switch` needs an `else` arm. `Key.fromCode(u32)` converts a raw code (`0` → `null`), and `Key.x.code()` goes the other way (e.g. to build an `Accelerator` or a synthetic test event).
+- **Not for text.** Typed text arrives as `char_input` with the UTF-8 in `ev.text`. On `char_input` `key_code` holds a codepoint, and on clicks it holds the click count, which is why `ev.key()` returns `null` there.
+- C hosts keep using the raw `key_code`; the numbering and `CELERIS_ABI_VERSION` are unchanged.
+
 ### Escape hatch: raw action-ids + EventRouter
 
 For a bare interactive `Box` built directly with the `UIBuilder` (no widget), you can assign a string `action_id` and respond through the `EventRouter`. Prefer typed handlers above; this exists for low-level/interop cases. The context pointer comes **before** the handler.

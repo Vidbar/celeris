@@ -73,9 +73,9 @@ pub const Slider = struct {
     fn onKey(self: *Slider, ev: events.Event) void {
         if (self.disabled) return;
         const step: f32 = if (ev.shift) 0.10 else 0.01;
-        const delta: f32 = switch (ev.key_code) {
-            37 => -step, // ←
-            39 => step, // →
+        const delta: f32 = switch (events.Key.fromCode(ev.key_code) orelse return) {
+            .left => -step, // ←
+            .right => step, // →
             else => return,
         };
         self.value.set(std.math.clamp(self.value.peek() + delta, 0, 1));
@@ -281,13 +281,13 @@ test "Slider arrow keys step the value 1% (10% with Shift), clamped" {
 
     const sld = try mountSlider(&registry, &store, &router, &mounts, .{ .initial_value = 0.5 });
 
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = sld.root_id, .key_code = 39 }); // →
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = sld.root_id, .key_code = events.Key.right.code() }); // →
     try testing.expectApproxEqAbs(@as(f32, 0.51), sld.value.peek(), 0.0001);
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = sld.root_id, .key_code = 37, .shift = true }); // Shift+←
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = sld.root_id, .key_code = events.Key.left.code(), .shift = true }); // Shift+←
     try testing.expectApproxEqAbs(@as(f32, 0.41), sld.value.peek(), 0.0001);
     // Clamp at 0.
     var i: usize = 0;
-    while (i < 60) : (i += 1) _ = router.route(.{ .name = "key_down", .id = "", .node_id = sld.root_id, .key_code = 37 });
+    while (i < 60) : (i += 1) _ = router.route(.{ .name = "key_down", .id = "", .node_id = sld.root_id, .key_code = events.Key.left.code() });
     try testing.expectApproxEqAbs(@as(f32, 0.0), sld.value.peek(), 0.0001);
 }
 

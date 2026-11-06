@@ -350,22 +350,22 @@ pub const TreeView = struct {
             break :blk null;
         };
 
-        switch (ev.key_code) {
-            38 => { // ↑
+        switch (events.Key.fromCode(ev.key_code) orelse return) {
+            .up => { // ↑
                 const i = cur orelse {
                     sel.set(rows[0].node.id);
                     return;
                 };
                 if (i > 0) sel.set(rows[i - 1].node.id);
             },
-            40 => { // ↓
+            .down => { // ↓
                 const i = cur orelse {
                     sel.set(rows[0].node.id);
                     return;
                 };
                 if (i + 1 < rows.len) sel.set(rows[i + 1].node.id);
             },
-            39 => { // → expand, or descend into the first child
+            .right => { // → expand, or descend into the first child
                 const id = sel.peek() orelse {
                     sel.set(rows[0].node.id);
                     return;
@@ -379,7 +379,7 @@ pub const TreeView = struct {
                     sel.set(node.children.items[0].id);
                 }
             },
-            37 => { // ← collapse, or step out to the parent
+            .left => { // ← collapse, or step out to the parent
                 const id = sel.peek() orelse {
                     sel.set(rows[0].node.id);
                     return;
@@ -392,7 +392,7 @@ pub const TreeView = struct {
                     sel.set(pid);
                 }
             },
-            13 => { // Enter — explicit activation: always toggles a branch
+            .enter => { // Enter — explicit activation: always toggles a branch
                 const id = sel.peek() orelse return;
                 const node = findNode(list, id) orelse return;
                 self.toggleNode(node);
@@ -1248,18 +1248,18 @@ test "TreeView keyboard: ↓ moves selection across visible rows and clamps at t
     try testing.expectEqual(@as(usize, 3), tv.row_map.items.len);
 
     // ↓ from no selection picks the first row.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 40 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.down.code() });
     try testing.expectEqual(@as(?usize, 1), tv.selectedNode());
     // Two more ↓ walk to the last row.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 40 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.down.code() });
     try testing.expectEqual(@as(?usize, 2), tv.selectedNode());
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 40 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.down.code() });
     try testing.expectEqual(@as(?usize, 3), tv.selectedNode());
     // An extra ↓ clamps (stays on the last row).
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 40 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.down.code() });
     try testing.expectEqual(@as(?usize, 3), tv.selectedNode());
     // ↑ walks back up.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 38 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.up.code() });
     try testing.expectEqual(@as(?usize, 2), tv.selectedNode());
 }
 
@@ -1301,20 +1301,20 @@ test "TreeView keyboard: → expands then descends, ← steps to parent then col
 
     // Select the branch, then → expands it (row_map grows to 3).
     tv.selSig().set(1);
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 39 }); // →
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.right.code() }); // →
     try testing.expectEqual(@as(usize, 3), tv.row_map.items.len);
     try testing.expectEqual(@as(?usize, 1), tv.selectedNode()); // still on the branch
 
     // → again descends into the first child.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 39 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.right.code() });
     try testing.expectEqual(@as(?usize, 2), tv.selectedNode());
 
     // ← from a leaf steps out to the parent branch.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37 }); // ←
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code() }); // ←
     try testing.expectEqual(@as(?usize, 1), tv.selectedNode());
 
     // ← on the expanded branch collapses it (row_map back to 1).
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code() });
     try testing.expectEqual(@as(usize, 1), tv.row_map.items.len);
     try testing.expectEqual(@as(?usize, 1), tv.selectedNode());
 }
@@ -1354,9 +1354,9 @@ test "TreeView keyboard: navigation writes the caller-owned selection signal" {
     const id = tv.root_id;
 
     // ↓ selects the first row → the caller's signal is written.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 40 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.down.code() });
     try testing.expectEqual(@as(?usize, 1), selected.peek());
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 40 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.down.code() });
     try testing.expectEqual(@as(?usize, 2), selected.peek());
 }
 
@@ -1458,12 +1458,12 @@ test "TreeView ensure-visible: keyboard ↓ past the viewport scrolls the shared
 
     // First few ↓ stay within the window (offset unchanged at 0).
     var d: usize = 0;
-    while (d < 4) : (d += 1) _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 40 });
+    while (d < 4) : (d += 1) _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.down.code() });
     try testing.expectApproxEqAbs(@as(f32, 0.0), scroll_offset.peek(), 0.001);
 
     // Continuing down eventually pushes the selection below the window → the offset
     // goes negative to follow it.
-    while (d < 10) : (d += 1) _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 40 });
+    while (d < 10) : (d += 1) _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.down.code() });
     try testing.expect(scroll_offset.peek() < 0);
 }
 
@@ -1615,7 +1615,7 @@ test "TreeView virtualized: keyboard ↓ past the window materializes the select
 
     // ↓ twenty times: selection lands on flat row 19 (far below the initial window).
     var d: usize = 0;
-    while (d < 20) : (d += 1) _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 40 });
+    while (d < 20) : (d += 1) _ = router.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.down.code() });
     try testing.expectEqual(@as(?usize, 19), tv.selectedNode());
 
     // Ensure-visible scrolled the shared offset, the window rebuilt around row 19,

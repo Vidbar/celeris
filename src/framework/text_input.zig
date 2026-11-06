@@ -282,17 +282,17 @@ pub const TextInput = struct {
             if (a > len) self.sel_anchor = len;
         }
 
-        // Ctrl shortcuts (VK: A=65, C=67, V=86, X=88, Z=90, Y=89).
+        // Ctrl shortcuts: A / C / V / X / Z / Y.
         if (ev.ctrl and std.mem.eql(u8, ev.name, "key_down")) {
-            switch (kc) {
-                65 => { // select all
+            switch (events.Key.fromCode(ev.key_code) orelse return) {
+                .a => { // select all
                     self.sel_anchor = 0;
                     self.cursor_pos = len;
                     self.bumpRev();
                 },
-                67 => self.clipboardCopy(),
-                86 => component.clipboardPaste(self, false),
-                88 => { // cut (disabled in password mode — would leak via delete-to-clipboard)
+                .c => self.clipboardCopy(),
+                .v => component.clipboardPaste(self, false),
+                .x => { // cut (disabled in password mode — would leak via delete-to-clipboard)
                     if (self.is_password) return;
                     self.clipboardCopy();
                     if (self.selRange()) |r| {
@@ -302,8 +302,8 @@ pub const TextInput = struct {
                     }
                     self.bumpRev();
                 },
-                90 => if (ev.shift) component.editRedo(self) else component.editUndo(self), // Ctrl+Z / Ctrl+Shift+Z
-                89 => component.editRedo(self), // Ctrl+Y
+                .z => if (ev.shift) component.editRedo(self) else component.editUndo(self), // Ctrl+Z / Ctrl+Shift+Z
+                .y => component.editRedo(self), // Ctrl+Y
                 else => {},
             }
             return;
@@ -325,8 +325,8 @@ pub const TextInput = struct {
                 self.bumpRev();
             }
         } else if (std.mem.eql(u8, ev.name, "key_down")) {
-            switch (kc) {
-                8 => { // backspace — delete the selection, else the codepoint before the cursor
+            switch (events.Key.fromCode(ev.key_code) orelse return) {
+                .backspace => { // backspace — delete the selection, else the codepoint before the cursor
                     if (self.selRange()) |r| {
                         component.applyEdit(self, r.start, r.end - r.start, "", false);
                     } else if (self.cursor_pos > 0) {
@@ -335,11 +335,11 @@ pub const TextInput = struct {
                     }
                     self.bumpRev();
                 },
-                37 => self.moveCursor(self.prevBoundary(self.cursor_pos), ev.shift, .left), // left (1 codepoint)
-                39 => self.moveCursor(self.nextBoundary(self.cursor_pos), ev.shift, .right), // right (1 codepoint)
-                36 => self.moveCursor(0, ev.shift, .left), // Home
-                35 => self.moveCursor(len, ev.shift, .right), // End
-                13 => {
+                .left => self.moveCursor(self.prevBoundary(self.cursor_pos), ev.shift, .left), // left (1 codepoint)
+                .right => self.moveCursor(self.nextBoundary(self.cursor_pos), ev.shift, .right), // right (1 codepoint)
+                .home => self.moveCursor(0, ev.shift, .left), // Home
+                .end => self.moveCursor(len, ev.shift, .right), // End
+                .enter => {
                     if (self.on_submit) |h| h.call(h.ptr, .{ .name = "submit", .id = "", .node_id = self.root_id });
                 },
                 else => {},
@@ -598,7 +598,7 @@ test "TextInput typing updates content and caret; focus toggles caret visibility
     try testing.expectApproxEqAbs(@as(f32, 1.0), env.store.getStyle(input.caret_node, .opacity).?.number, 0.001);
 
     // Backspace removes one char.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 8 });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.backspace.code() });
     try testing.expectEqualStrings("H", env.store.getTextContent(input.text_node).?);
 
     // Tick toggles caret; blur hides it.
@@ -659,18 +659,18 @@ test "TextInput UTF-8: char_input text, backspace and arrows step whole codepoin
     try testing.expectEqual(@as(usize, 3), input.cursor_pos); // 1 + 2 bytes
 
     // Backspace removes the whole 'é' codepoint (2 bytes), not one byte.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 8 });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.backspace.code() });
     try testing.expectEqualStrings("a", env.store.getTextContent(input.text_node).?);
     try testing.expectEqual(@as(usize, 1), input.cursor_pos);
 
     // Build "a日本" and walk the cursor by codepoint.
     env.route(.{ .name = "text_commit", .id = "", .node_id = id, .text = "\u{65E5}\u{672C}" }); // 日本
     try testing.expectEqual(@as(usize, 7), input.cursor_pos); // 1 + 3 + 3
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37 }); // left → before 本
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code() }); // left → before 本
     try testing.expectEqual(@as(usize, 4), input.cursor_pos);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37 }); // left → before 日
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code() }); // left → before 日
     try testing.expectEqual(@as(usize, 1), input.cursor_pos);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 39 }); // right → after 日
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.right.code() }); // right → after 日
     try testing.expectEqual(@as(usize, 4), input.cursor_pos);
 }
 
@@ -740,11 +740,11 @@ test "TextInput Ctrl+C copies the buffer; Ctrl+V pastes at the cursor" {
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 105 }); // 'i'
 
     // Ctrl+C copies the whole buffer (VK_C = 67).
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 67, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.c.code(), .ctrl = true });
     try testing.expectEqualStrings("Hi", ts.stub_clip_buf[0..ts.stub_clip_len]);
 
     // Ctrl+V (VK_V = 86) pastes at the cursor (end) → "HiHi".
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 86, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.v.code(), .ctrl = true });
     try testing.expectEqualStrings("HiHi", env.store.getTextContent(input.text_node).?);
     try testing.expectEqual(@as(usize, 4), input.cursor_pos);
 }
@@ -764,7 +764,7 @@ test "TextInput: a stale out-of-range selection is clamped on edit instead of pa
     input.sel_anchor = 10;
     input.cursor_pos = 0;
 
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 8 }); // backspace
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.backspace.code() }); // backspace
 
     // No panic; the selection is clamped to the buffer and removed cleanly.
     try testing.expectEqualStrings("", env.store.getTextContent(input.text_node).?);
@@ -806,9 +806,9 @@ test "TextInput selection: select-all highlights+copies; typing replaces; shift-
     env.route(.{ .name = "focus", .id = "", .node_id = id });
 
     // Ctrl+A selects all → highlight spans the 5 chars (5×10px) and copy gets it.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 65, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.a.code(), .ctrl = true });
     try testing.expectApproxEqAbs(@as(f32, 50.0), env.store.getLayout(input.sel_node, .width).?.dimension.value, 0.001);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 67, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.c.code(), .ctrl = true });
     try testing.expectEqualStrings("Hello", ts.stub_clip_buf[0..ts.stub_clip_len]);
 
     // Typing replaces the whole selection → "Z", cursor at 1, highlight gone.
@@ -820,11 +820,11 @@ test "TextInput selection: select-all highlights+copies; typing replaces; shift-
     // Type "ab" → "Zab", cursor 3. Shift+Left twice selects "ab"; backspace deletes it.
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 97 }); // 'a'
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 98 }); // 'b'
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37, .shift = true }); // shift+Left
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37, .shift = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code(), .shift = true }); // shift+Left
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code(), .shift = true });
     try testing.expectEqual(@as(usize, 1), input.cursor_pos);
     try testing.expect(input.selRange() != null);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 8 }); // backspace deletes selection
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.backspace.code() }); // backspace deletes selection
     try testing.expectEqualStrings("Z", env.store.getTextContent(input.text_node).?);
     try testing.expectEqual(@as(usize, 1), input.cursor_pos);
 }
@@ -838,7 +838,7 @@ test "TextInput: the UIA SetValue sequence (focus, Ctrl+A, text_commit) replaces
     const id = input.root_id;
 
     env.route(.{ .name = "focus", .id = "", .node_id = id });
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 65, .ctrl = true }); // Ctrl+A
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.a.code(), .ctrl = true }); // Ctrl+A
     env.route(.{ .name = "text_commit", .id = "", .node_id = id, .text = "new" });
 
     try testing.expectEqualStrings("new", env.store.getTextContent(input.text_node).?);
@@ -846,8 +846,8 @@ test "TextInput: the UIA SetValue sequence (focus, Ctrl+A, text_commit) replaces
     try testing.expectEqual(@as(usize, 3), input.cursor_pos);
 
     // Clearing: select-all then Backspace (an empty commit is a no-op) empties it.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 65, .ctrl = true });
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 8 }); // Backspace
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.a.code(), .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.backspace.code() }); // Backspace
     try testing.expectEqualStrings("", input.text_buffer.items);
 }
 
@@ -868,7 +868,7 @@ test "TextInput on_submit fires on Enter with the root node id (typed handler)" 
     const input = try mount(&env, .{ .on_submit = events.Handler{ .ptr = null, .call = Sink.onSubmit } });
     const id = input.root_id;
     env.route(.{ .name = "focus", .id = "", .node_id = id });
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 13 }); // Enter
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.enter.code() }); // Enter
     try testing.expectEqual(@as(u32, 1), Sink.submits);
     try testing.expectEqual(id, Sink.last_node);
 }
@@ -902,11 +902,11 @@ test "TextInput on_change fires on text mutations only, carrying the new buffer 
     try testing.expectEqualStrings("Hi", Sink.last_buf[0..Sink.last_len]);
 
     // Moving the caret (left arrow) is not a text mutation — no fire.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37 }); // left
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code() }); // left
     try testing.expectEqual(@as(u32, 2), Sink.calls);
 
     // Backspace deletes and fires with the reduced text.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 8 }); // backspace (cursor at 1 → deletes 'H')
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.backspace.code() }); // backspace (cursor at 1 → deletes 'H')
     try testing.expectEqual(@as(u32, 3), Sink.calls);
     try testing.expectEqualStrings("i", Sink.last_buf[0..Sink.last_len]);
 }
@@ -923,23 +923,23 @@ test "TextInput undo/redo coalesces word-wise; a new edit truncates the redo bra
     try testing.expectEqualStrings("this world", env.store.getTextContent(input.text_node).?);
 
     // Undo peels off whole words/separators, not single letters.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true }); // Ctrl+Z
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true }); // Ctrl+Z
     try testing.expectEqualStrings("this ", env.store.getTextContent(input.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true });
     try testing.expectEqualStrings("this", env.store.getTextContent(input.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true });
     try testing.expectEqualStrings("", env.store.getTextContent(input.text_node).?);
 
     // Redo re-applies in order.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 89, .ctrl = true }); // Ctrl+Y
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.y.code(), .ctrl = true }); // Ctrl+Y
     try testing.expectEqualStrings("this", env.store.getTextContent(input.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 89, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.y.code(), .ctrl = true });
     try testing.expectEqualStrings("this ", env.store.getTextContent(input.text_node).?);
 
     // A new edit here truncates the pending redo ("world"): Ctrl+Y after it is a no-op.
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 'x' });
     try testing.expectEqualStrings("this x", env.store.getTextContent(input.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 89, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.y.code(), .ctrl = true });
     try testing.expectEqualStrings("this x", env.store.getTextContent(input.text_node).?);
 }
 
@@ -952,25 +952,25 @@ test "TextInput undo/redo: type-over-selection, paste and IME commit are single 
     env.route(.{ .name = "focus", .id = "", .node_id = id });
 
     // Ctrl+A then type 'X' replaces the whole selection in one step.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 65, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.a.code(), .ctrl = true });
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 'X' });
     try testing.expectEqualStrings("X", env.store.getTextContent(input.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true }); // undo → whole "Hello" back
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true }); // undo → whole "Hello" back
     try testing.expectEqualStrings("Hello", env.store.getTextContent(input.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 89, .ctrl = true }); // redo → "X"
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.y.code(), .ctrl = true }); // redo → "X"
     try testing.expectEqualStrings("X", env.store.getTextContent(input.text_node).?);
 
     // Paste is one step (cursor at 1 after 'X').
     _ = ts.stubClipSet(undefined, "YZ");
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 86, .ctrl = true }); // Ctrl+V
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.v.code(), .ctrl = true }); // Ctrl+V
     try testing.expectEqualStrings("XYZ", env.store.getTextContent(input.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true });
     try testing.expectEqualStrings("X", env.store.getTextContent(input.text_node).?);
 
     // An IME commit is one undoable step too.
     env.route(.{ .name = "text_commit", .id = "", .node_id = id, .text = "\u{65E5}" }); // 日
     try testing.expectEqualStrings("X\u{65E5}", env.store.getTextContent(input.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true });
     try testing.expectEqualStrings("X", env.store.getTextContent(input.text_node).?);
 }
 
@@ -1012,16 +1012,16 @@ test "TextInput password masks the buffer with bullets and never copies" {
     // Ctrl+A + Ctrl+C must not leak the secret to the clipboard.
     ts.stub_clip_len = 0;
     env.route(.{ .name = "focus", .id = "", .node_id = id });
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 65, .ctrl = true }); // select all
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 67, .ctrl = true }); // Ctrl+C
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.a.code(), .ctrl = true }); // select all
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.c.code(), .ctrl = true }); // Ctrl+C
     try testing.expectEqual(@as(usize, 0), ts.stub_clip_len);
     // Ctrl+X is disabled too: the buffer is untouched.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 88, .ctrl = true }); // Ctrl+X
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.x.code(), .ctrl = true }); // Ctrl+X
     try testing.expectEqualStrings("abc", input.text_buffer.items);
     try testing.expectEqual(@as(usize, 0), ts.stub_clip_len);
 
     // A new codepoint extends the mask by exactly one bullet.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 39 }); // right → collapse selection to end
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.right.code() }); // right → collapse selection to end
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 'd' });
     try testing.expectEqualStrings("\u{2022}\u{2022}\u{2022}\u{2022}", env.store.getTextContent(input.text_node).?);
     try testing.expectEqualStrings("abcd", input.text_buffer.items);

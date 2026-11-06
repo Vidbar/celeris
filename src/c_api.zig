@@ -2110,13 +2110,13 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
         // -Dprofiling, so normal builds pay nothing and F12 reaches the app. The
         // first press also arms recording, so it works even without CELERIS_TRACE.
         if (comptime prof.enabled) {
-            if (event.event_type == .key_down and event.key_code == 0x7B) { // VK_F12
+            if (event.event_type == .key_down and event.key_code == fw_events.Key.f12.code()) {
                 prof.enable(engineIo());
                 prof.flush("celeris_trace.json") catch |e| log.warn("F12 trace flush failed: {}\n", .{e});
                 return;
             }
         }
-        if (event.event_type == .key_down and event.key_code == 0x09) { // VK_TAB
+        if (event.event_type == .key_down and event.key_code == fw_events.Key.tab.code()) {
             var list = std.array_list.Managed(reg.NodeId).init(engine.gpa.allocator());
             defer list.deinit();
             // With a focus scope active, Tab traverses only the top scope's
@@ -2152,7 +2152,7 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
         // Enter/Space on a focused clickable node synthesizes a click through
         // the same dispatch path as the mouse (decision: done once in the engine,
         // not per widget). Text-editing targets are exempt — there they type.
-        if (event.event_type == .key_down and (event.key_code == 0x0D or event.key_code == 0x20)) {
+        if (event.event_type == .key_down and (event.key_code == fw_events.Key.enter.code() or event.key_code == fw_events.Key.space.code())) {
             if (engine.focused_node) |focused| {
                 if (clickSynthTarget(&engine.store, &engine.registry, focused)) |c| {
                     events_mod.dispatchEvent(makeEventCtx(engine), focused, .click, .clickable_capture, .clickable, c.x, c.y) catch {};

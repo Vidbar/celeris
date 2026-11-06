@@ -239,17 +239,17 @@ pub const TextArea = struct {
             if (a > len) self.sel_anchor = len;
         }
 
-        // Ctrl shortcuts (VK: A=65, C=67, V=86, X=88, Z=90, Y=89).
+        // Ctrl shortcuts: A / C / V / X / Z / Y.
         if (ev.ctrl and std.mem.eql(u8, ev.name, "key_down")) {
-            switch (kc) {
-                65 => { // select all
+            switch (events.Key.fromCode(ev.key_code) orelse return) {
+                .a => { // select all
                     self.sel_anchor = 0;
                     self.cursor_pos = len;
                     self.bumpRev();
                 },
-                67 => component.clipboardCopySelection(self),
-                86 => component.clipboardPaste(self, true),
-                88 => { // cut
+                .c => component.clipboardCopySelection(self),
+                .v => component.clipboardPaste(self, true),
+                .x => { // cut
                     component.clipboardCopySelection(self);
                     if (self.selRange()) |r| {
                         component.applyEdit(self, r.start, r.end - r.start, "", false);
@@ -258,8 +258,8 @@ pub const TextArea = struct {
                     }
                     self.bumpRev();
                 },
-                90 => if (ev.shift) component.editRedo(self) else component.editUndo(self), // Ctrl+Z / Ctrl+Shift+Z
-                89 => component.editRedo(self), // Ctrl+Y
+                .z => if (ev.shift) component.editRedo(self) else component.editUndo(self), // Ctrl+Z / Ctrl+Shift+Z
+                .y => component.editRedo(self), // Ctrl+Y
                 else => {},
             }
             return;
@@ -279,19 +279,19 @@ pub const TextArea = struct {
                 self.bumpRev();
             }
         } else if (std.mem.eql(u8, ev.name, "key_down")) {
-            if (kc == 13 and !ev.shift) {
+            if (events.Key.fromCode(ev.key_code) == .enter and !ev.shift) {
                 if (self.on_submit) |h| {
                     h.call(h.ptr, .{ .name = "submit", .id = "", .node_id = self.root_id });
                     return;
                 }
             }
-            self.handleKey(kc, ev.shift);
+            if (events.Key.fromCode(ev.key_code)) |k| self.handleKey(k, ev.shift);
         }
     }
 
-    fn handleKey(self: *TextArea, kc: i64, shift: bool) void {
-        switch (kc) {
-            8 => { // backspace — delete the selection, else the codepoint before the cursor
+    fn handleKey(self: *TextArea, key: events.Key, shift: bool) void {
+        switch (key) {
+            .backspace => { // backspace — delete the selection, else the codepoint before the cursor
                 if (self.selRange()) |r| {
                     component.applyEdit(self, r.start, r.end - r.start, "", false);
                 } else if (self.cursor_pos > 0) {
@@ -300,19 +300,19 @@ pub const TextArea = struct {
                 }
                 self.bumpRev();
             },
-            13 => { // enter — replaces any selection with a newline
+            .enter => { // enter — replaces any selection with a newline
                 const r = self.selRange();
                 const at = if (r) |rr| rr.start else self.cursor_pos;
                 const rl = if (r) |rr| rr.end - rr.start else 0;
                 component.applyEdit(self, at, rl, "\n", false);
                 self.bumpRev();
             },
-            37 => self.applyMove(self.prevBoundary(self.cursor_pos), shift, .left), // left
-            39 => self.applyMove(self.nextBoundary(self.cursor_pos), shift, .right), // right
-            36 => self.applyMove(lineStartOf(self.text_buffer.items, self.cursor_pos), shift, .left), // Home
-            35 => self.applyMove(lineEndIndex(self.text_buffer.items, lineColAt(self.text_buffer.items, self.cursor_pos).line), shift, .right), // End
-            38 => self.applyMove(self.lineTarget(-1), shift, .vertical), // up
-            40 => self.applyMove(self.lineTarget(1), shift, .vertical), // down
+            .left => self.applyMove(self.prevBoundary(self.cursor_pos), shift, .left), // left
+            .right => self.applyMove(self.nextBoundary(self.cursor_pos), shift, .right), // right
+            .home => self.applyMove(lineStartOf(self.text_buffer.items, self.cursor_pos), shift, .left), // Home
+            .end => self.applyMove(lineEndIndex(self.text_buffer.items, lineColAt(self.text_buffer.items, self.cursor_pos).line), shift, .right), // End
+            .up => self.applyMove(self.lineTarget(-1), shift, .vertical), // up
+            .down => self.applyMove(self.lineTarget(1), shift, .vertical), // down
             else => {},
         }
     }
@@ -703,7 +703,7 @@ test "TextArea typing, Enter, and vertical caret navigation" {
     try testing.expect(ta.focused.peek());
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 97 }); // 'a'
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 98 }); // 'b'
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 13 }); // Enter
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.enter.code() }); // Enter
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 99 }); // 'c'
     env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = 100 }); // 'd'
     try testing.expectEqualStrings("ab\ncd", env.store.getTextContent(ta.text_node).?);
@@ -714,12 +714,12 @@ test "TextArea typing, Enter, and vertical caret navigation" {
     try testing.expectApproxEqAbs(PAD + 2 * ta.charW(), env.store.getLayout(ta.caret_node, .left).?.dimension.value, 0.001);
 
     // Arrow up preserves column (2) → lands at index 2 on line 0.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 38 });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.up.code() });
     try testing.expectEqual(@as(usize, 2), ta.cursor_pos);
     try testing.expectApproxEqAbs(@as(f32, PAD), env.store.getLayout(ta.caret_node, .top).?.dimension.value, 0.001);
 
     // Backspace removes the 'b'.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 8 });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.backspace.code() });
     try testing.expectEqualStrings("a\ncd", env.store.getTextContent(ta.text_node).?);
 
     // Tick toggles the caret; blur hides it.
@@ -766,10 +766,10 @@ test "TextArea IME + UTF-8: preedit, commit, and codepoint-aware backspace/arrow
     try testing.expectEqual(@as(usize, 6), ta.cursor_pos);
 
     // Left steps one codepoint (3 bytes), backspace removes a whole codepoint.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37 });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code() });
     try testing.expectEqual(@as(usize, 3), ta.cursor_pos);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 39 }); // back to end
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 8 }); // delete 本
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.right.code() }); // back to end
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.backspace.code() }); // delete 本
     try testing.expectEqualStrings("\u{65E5}", env.store.getTextContent(ta.text_node).?);
     try testing.expectEqual(@as(usize, 3), ta.cursor_pos);
 
@@ -825,12 +825,12 @@ test "TextArea on_submit fires on plain Enter (typed handler); shift+Enter inser
     const id = ta.root_id;
     env.route(.{ .name = "focus", .id = "", .node_id = id });
 
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 13 }); // Enter → submit
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.enter.code() }); // Enter → submit
     try testing.expectEqual(@as(u32, 1), Sink.submits);
     try testing.expectEqual(id, Sink.last_node);
     try testing.expectEqual(@as(usize, 0), ta.text_buffer.items.len); // no newline inserted
 
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 13, .shift = true }); // shift+Enter
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.enter.code(), .shift = true }); // shift+Enter
     try testing.expectEqual(@as(u32, 1), Sink.submits); // unchanged
     try testing.expectEqualStrings("\n", ta.text_buffer.items);
 }
@@ -862,14 +862,14 @@ test "TextArea on_change fires on mutations (incl. undo/redo) but not on caret m
     try testing.expectEqualStrings("ab", Sink.last_buf[0..Sink.last_len]);
 
     // Home (caret move) does not fire.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 36 }); // Home
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.home.code() }); // Home
     try testing.expectEqual(@as(u32, 2), Sink.calls);
 
     // Undo fires with the reduced buffer; redo fires with it restored.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true }); // Ctrl+Z (undo "ab" coalesced)
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true }); // Ctrl+Z (undo "ab" coalesced)
     try testing.expectEqual(@as(u32, 3), Sink.calls);
     try testing.expectEqualStrings("", Sink.last_buf[0..Sink.last_len]);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 89, .ctrl = true }); // Ctrl+Y (redo)
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.y.code(), .ctrl = true }); // Ctrl+Y (redo)
     try testing.expectEqual(@as(u32, 4), Sink.calls);
     try testing.expectEqualStrings("ab", Sink.last_buf[0..Sink.last_len]);
 }
@@ -884,19 +884,19 @@ test "TextArea undo/redo: multi-line paste is one step; typing coalesces per wor
 
     // Paste a multi-line string in one step.
     _ = ts.stubClipSet(undefined, "a\nb");
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 86, .ctrl = true }); // Ctrl+V
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.v.code(), .ctrl = true }); // Ctrl+V
     try testing.expectEqualStrings("a\nb", env.store.getTextContent(ta.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true }); // undo → whole paste gone
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true }); // undo → whole paste gone
     try testing.expectEqualStrings("", env.store.getTextContent(ta.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 89, .ctrl = true }); // redo
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.y.code(), .ctrl = true }); // redo
     try testing.expectEqualStrings("a\nb", env.store.getTextContent(ta.text_node).?);
 
     // Type " cd": the space is its own step, "cd" coalesces.
     for (" cd") |ch| env.route(.{ .name = "char_input", .id = "", .node_id = id, .key_code = ch });
     try testing.expectEqualStrings("a\nb cd", env.store.getTextContent(ta.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true }); // undo "cd"
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true }); // undo "cd"
     try testing.expectEqualStrings("a\nb ", env.store.getTextContent(ta.text_node).?);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 90, .ctrl = true }); // undo " "
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.z.code(), .ctrl = true }); // undo " "
     try testing.expectEqualStrings("a\nb", env.store.getTextContent(ta.text_node).?);
 }
 
@@ -931,8 +931,8 @@ test "TextArea selection: shift+arrows extend, typing replaces, backspace delete
     env.route(.{ .name = "focus", .id = "", .node_id = id });
 
     // Cursor at end (4). Shift+Left twice selects "cd".
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37, .shift = true });
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 37, .shift = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code(), .shift = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.left.code(), .shift = true });
     try testing.expectEqual(@as(usize, 2), ta.cursor_pos);
     try testing.expect(ta.selRange() != null);
 
@@ -943,9 +943,9 @@ test "TextArea selection: shift+arrows extend, typing replaces, backspace delete
     try testing.expect(ta.selRange() == null);
 
     // Shift+Home selects back to the line start; backspace deletes the whole range.
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 36, .shift = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.home.code(), .shift = true });
     try testing.expectEqual(@as(usize, 0), ta.cursor_pos);
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 8 });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.backspace.code() });
     try testing.expectEqualStrings("", env.store.getTextContent(ta.text_node).?);
 }
 
@@ -980,7 +980,7 @@ test "TextArea multi-line highlight: 3 rects with correct bounds; cut collapses 
     try testing.expectApproxEqAbs(PAD + 2 * LINE_H, env.store.getLayout(ta.sel_last, .top).?.dimension.value, 0.001);
 
     // Ctrl+X cuts the range "b\ncde\nf" → buffer "ag", caret at the range start (1).
-    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = 88, .ctrl = true });
+    env.route(.{ .name = "key_down", .id = "", .node_id = id, .key_code = events.Key.x.code(), .ctrl = true });
     try testing.expectEqualStrings("b\ncde\nf", ts.stub_clip_buf[0..ts.stub_clip_len]);
     try testing.expectEqualStrings("ag", env.store.getTextContent(ta.text_node).?);
     try testing.expectEqual(@as(usize, 1), ta.cursor_pos);

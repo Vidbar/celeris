@@ -34,13 +34,6 @@ fn themeOr(token: theme_mod.Color, fallback: theme_mod.Color) theme_mod.Color {
     return if (token.a == 0) fallback else token;
 }
 
-const KEY_ENTER: u32 = 13;
-const KEY_ESCAPE: u32 = 27;
-const KEY_LEFT: u32 = 37;
-const KEY_UP: u32 = 38;
-const KEY_RIGHT: u32 = 39;
-const KEY_DOWN: u32 = 40;
-
 const ROW_H: f32 = 28;
 const SEP_H: f32 = 9; // 1px line + 4px margin top/bottom
 const PANEL_W: f32 = 200;
@@ -475,12 +468,12 @@ pub const Menu = struct {
         if (!std.mem.eql(u8, ev.name, "key_down")) return;
         if (!self.is_open.peek()) return;
         const m = self.activeMenu();
-        switch (ev.key_code) {
-            KEY_UP => m.moveHighlight(-1),
-            KEY_DOWN => m.moveHighlight(1),
-            KEY_ENTER => m.activateHighlighted(),
-            KEY_ESCAPE => self.rootMenu().close(),
-            KEY_RIGHT => {
+        switch (events.Key.fromCode(ev.key_code) orelse return) {
+            .up => m.moveHighlight(-1),
+            .down => m.moveHighlight(1),
+            .enter => m.activateHighlighted(),
+            .escape => self.rootMenu().close(),
+            .right => {
                 const hi = m.highlighted.peek();
                 if (hi >= 0 and hi < @as(i32, @intCast(m.items.items.len))) {
                     const it = m.items.items[@intCast(hi)];
@@ -490,7 +483,7 @@ pub const Menu = struct {
                     }
                 }
             },
-            KEY_LEFT => {
+            .left => {
                 if (m.parent_menu) |p| {
                     m.close();
                     p.open_sub = null;
@@ -1475,21 +1468,21 @@ test "Menu: key_down on the panel drives nav — ↓↓ Enter selects, Escape cl
 
     m.popup(10, 10, .pointer);
     // ↓ ↓ → highlight lands on Copy (index 1); Enter activates it.
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = KEY_DOWN });
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = KEY_DOWN });
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = KEY_ENTER });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.down.code() });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.down.code() });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.enter.code() });
     try testing.expectEqual(@as(u32, 1), Probe.calls);
     try testing.expectEqualStrings("copy", Probe.last[0..Probe.last_len]);
     try testing.expect(!m.isOpen());
 
     // Escape closes without selecting.
     m.popup(10, 10, .pointer);
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = KEY_ESCAPE });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.escape.code() });
     try testing.expect(!m.isOpen());
     try testing.expectEqual(@as(u32, 1), Probe.calls);
 
     // Keys on a closed menu are ignored.
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = KEY_ENTER });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.enter.code() });
     try testing.expectEqual(@as(u32, 1), Probe.calls);
 }
 
@@ -1536,7 +1529,7 @@ test "Menu: popup pushes a focus scope on the panel; close pops it (once)" {
 
     // Escape (key path) also pops exactly once.
     m.popup(5, 5, .pointer);
-    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = KEY_ESCAPE });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.escape.code() });
     try testing.expectEqual(@as(u32, 2), FS.pushes);
     try testing.expectEqual(@as(u32, 2), FS.pops);
 }
@@ -1580,25 +1573,25 @@ test "Menu: →/← open and close the highlighted submenu; Enter inside selects
     }.hit;
 
     // ↓ ↓ highlights "Recent"; → opens it with its first item highlighted.
-    key(&env.router, root.panel_id, KEY_DOWN);
-    key(&env.router, root.panel_id, KEY_DOWN);
+    key(&env.router, root.panel_id, events.Key.down.code());
+    key(&env.router, root.panel_id, events.Key.down.code());
     try testing.expectEqual(@as(i32, 1), root.highlighted.peek());
-    key(&env.router, root.panel_id, KEY_RIGHT);
+    key(&env.router, root.panel_id, events.Key.right.code());
     try testing.expect(sub.isOpen());
     try testing.expectEqual(@as(i32, 0), sub.highlighted.peek());
 
     // ← closes the submenu; keyboard control returns to the root.
-    key(&env.router, root.panel_id, KEY_LEFT);
+    key(&env.router, root.panel_id, events.Key.left.code());
     try testing.expect(!sub.isOpen());
     try testing.expect(root.isOpen());
 
     // Enter on the highlighted submenu row also opens it; ↓ Enter selects b.txt
     // through the chain (keys still arrive at the ROOT panel — focus is trapped
     // there — and are delegated to the deepest open submenu).
-    key(&env.router, root.panel_id, KEY_ENTER);
+    key(&env.router, root.panel_id, events.Key.enter.code());
     try testing.expect(sub.isOpen());
-    key(&env.router, root.panel_id, KEY_DOWN);
-    key(&env.router, root.panel_id, KEY_ENTER);
+    key(&env.router, root.panel_id, events.Key.down.code());
+    key(&env.router, root.panel_id, events.Key.enter.code());
     try testing.expectEqual(@as(u32, 1), Probe.calls);
     try testing.expectEqualStrings("recent_b", Probe.last[0..Probe.last_len]);
     try testing.expect(!root.isOpen());

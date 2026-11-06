@@ -91,9 +91,9 @@ pub const Dropdown = struct {
     /// the engine's click synthesis → they toggle via onTriggerClick.
     fn onKey(self: *Dropdown, ev: events.Event) void {
         if (self.disabled) return;
-        switch (ev.key_code) {
-            27 => self.is_open.set(false), // Escape
-            38, 40 => { // ↑ / ↓
+        switch (events.Key.fromCode(ev.key_code) orelse return) {
+            .escape => self.is_open.set(false), // Escape
+            .up, .down => { // ↑ / ↓
                 if (!self.is_open.peek()) {
                     self.is_open.set(true);
                     return;
@@ -101,7 +101,7 @@ pub const Dropdown = struct {
                 const n = self.options.len;
                 if (n == 0) return;
                 const cur = self.selected.peek();
-                const next = if (ev.key_code == 38)
+                const next = if (events.Key.fromCode(ev.key_code) == .up)
                     (if (cur == 0) 0 else cur - 1)
                 else
                     @min(cur + 1, n - 1);
@@ -371,19 +371,19 @@ test "Dropdown arrows open then move the selection; Escape closes" {
     const dd = try mountDropdown(&registry, &store, &router, &mounts, .{ .options = &OPTS });
 
     // ↓ on the closed trigger opens without moving the selection.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = 40 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.down.code() });
     try testing.expect(dd.is_open.peek());
     try testing.expectEqual(@as(usize, 0), dd.selected.peek());
 
     // ↓↓ move down (clamped at the end); ↑ moves back up.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = 40 });
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = 40 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.down.code() });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.down.code() });
     try testing.expectEqual(@as(usize, 2), dd.selected.peek());
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = 38 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.up.code() });
     try testing.expectEqual(@as(usize, 1), dd.selected.peek());
 
     // Escape closes, keeping the selection.
-    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = 27 });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.escape.code() });
     try testing.expect(!dd.is_open.peek());
     try testing.expectEqual(@as(usize, 1), dd.selected.peek());
 }

@@ -18,6 +18,7 @@ const std = @import("std");
 const log = @import("../core/log.zig");
 const platform = @import("platform.zig");
 const xdg_portal = @import("xdg_portal.zig");
+const keysym = @import("keysym.zig");
 
 const c = @cImport({
     @cInclude("wayland-client.h");
@@ -549,18 +550,31 @@ const pointer_listener = c.wl_pointer_listener{
 /// Maps an xkb keysym to the Windows-VK-style code the widgets expect for
 /// key_down (so backspace/arrows/enter/tab behave identically on every OS).
 fn vkFromSym(sym: c.xkb_keysym_t) u32 {
-    return switch (sym) {
-        c.XKB_KEY_BackSpace => 8,
-        c.XKB_KEY_Tab => 9,
-        c.XKB_KEY_Return, c.XKB_KEY_KP_Enter => 13,
-        c.XKB_KEY_Escape => 27,
-        c.XKB_KEY_Left => 37,
-        c.XKB_KEY_Up => 38,
-        c.XKB_KEY_Right => 39,
-        c.XKB_KEY_Down => 40,
-        c.XKB_KEY_Delete => 46,
-        else => 0,
-    };
+    return keysym.toVk(@intCast(sym));
+}
+
+// keysym.zig hard-codes the X11 keysym numbers so its tests run on every OS;
+// make sure they agree with the xkbcommon headers we actually build against.
+comptime {
+    for (.{
+        .{ keysym.BackSpace, c.XKB_KEY_BackSpace },       .{ keysym.Tab, c.XKB_KEY_Tab },
+        .{ keysym.ISO_Left_Tab, c.XKB_KEY_ISO_Left_Tab }, .{ keysym.Return, c.XKB_KEY_Return },
+        .{ keysym.Escape, c.XKB_KEY_Escape },             .{ keysym.Home, c.XKB_KEY_Home },
+        .{ keysym.Left, c.XKB_KEY_Left },                 .{ keysym.Up, c.XKB_KEY_Up },
+        .{ keysym.Right, c.XKB_KEY_Right },               .{ keysym.Down, c.XKB_KEY_Down },
+        .{ keysym.Page_Up, c.XKB_KEY_Page_Up },           .{ keysym.Page_Down, c.XKB_KEY_Page_Down },
+        .{ keysym.End, c.XKB_KEY_End },                   .{ keysym.Insert, c.XKB_KEY_Insert },
+        .{ keysym.Delete, c.XKB_KEY_Delete },             .{ keysym.KP_Enter, c.XKB_KEY_KP_Enter },
+        .{ keysym.KP_Home, c.XKB_KEY_KP_Home },           .{ keysym.KP_Left, c.XKB_KEY_KP_Left },
+        .{ keysym.KP_Up, c.XKB_KEY_KP_Up },               .{ keysym.KP_Right, c.XKB_KEY_KP_Right },
+        .{ keysym.KP_Down, c.XKB_KEY_KP_Down },           .{ keysym.KP_Page_Up, c.XKB_KEY_KP_Page_Up },
+        .{ keysym.KP_Page_Down, c.XKB_KEY_KP_Page_Down }, .{ keysym.KP_End, c.XKB_KEY_KP_End },
+        .{ keysym.KP_Insert, c.XKB_KEY_KP_Insert },       .{ keysym.KP_Delete, c.XKB_KEY_KP_Delete },
+        .{ keysym.F1, c.XKB_KEY_F1 },                     .{ keysym.F12, c.XKB_KEY_F12 },
+        .{ keysym.space, c.XKB_KEY_space },
+    }) |pair| {
+        if (pair[0] != pair[1]) @compileError("keysym.zig constant disagrees with xkbcommon");
+    }
 }
 
 fn kKeymap(data: ?*anyopaque, kb: ?*c.wl_keyboard, format: u32, fd: i32, size: u32) callconv(.c) void {

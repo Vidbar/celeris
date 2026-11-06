@@ -9,6 +9,30 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.1.6 — 2026-11-06
+
+### Added
+
+- **`fw.events.Key` and `ev.key()`** — named keys for `key_down`/`key_up`
+  (`if (ev.key() == .left)`), so widgets don't need key-code numbers. It names
+  the virtual-key codes `key_code` already carried: navigation, editing keys,
+  `a`–`z`, `0`–`9` and `f1`–`f12`. The enum is non-exhaustive, `Key.fromCode` /
+  `key.code()` convert both ways, and `ev.key()` is `null` on non-key events
+  (on clicks `key_code` is the click count, on `char_input` a codepoint).
+  Modifiers stay in `ev.shift` / `ev.ctrl` / `ev.alt`. Every built-in widget now
+  uses it; no widget compares `key_code` against a literal any more.
+
+### Fixed
+
+- **Linux: most keys arrived as `key_code` 0** — only Backspace, Tab, Enter,
+  Escape, the arrows and Delete were translated. Home, End, Page Up/Down,
+  Insert, Space, letters, digits, F1–F12 and the keypad navigation keys now map
+  to the same codes as on Windows. That fixes Home/End in `TextInput`/`TextArea`,
+  Home/End/Page Up/Page Down in `VirtualGrid`, Ctrl+A/C/V/X/Z/Y in the text
+  widgets, accelerators, and Shift+Tab (`ISO_Left_Tab`) on Linux.
+
+No BREAKING changes; `key_code` numbering and `CELERIS_ABI_VERSION` unchanged (6).
+
 ## 0.1.5 — 2026-11-06
 
 ### Fixed
