@@ -339,7 +339,7 @@ Large follow-ups needing dedicated design, real hardware, or OS services to veri
   is `font_size × multiplier` (default 1.55, overridable per node with
   `line_height`), not ascent + descent + line gap of the face. Switching the default
   would move every text box in every app; the per-node multiplier already gives
-  control. See `docs/plans/2026-11-05-text-line-height.md`.
+  control.
 - **Font family per node/component** (Monaco's `fontFamily`). Faces are process-wide
   roles (`primary`/`bold`/`mono`/`mono_bold`, `setAppFonts` before the first window)
   because the atlas is built at engine init and caches glyphs by font index. A
