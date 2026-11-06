@@ -284,6 +284,7 @@ pub const UIA_ListControlTypeId: i32 = 50008;
 pub const UIA_MenuItemControlTypeId: i32 = 50011;
 pub const UIA_RadioButtonControlTypeId: i32 = 50013;
 pub const UIA_SliderControlTypeId: i32 = 50015;
+pub const UIA_ScrollBarControlTypeId: i32 = 50014;
 pub const UIA_TabControlTypeId: i32 = 50018;
 pub const UIA_TabItemControlTypeId: i32 = 50019;
 pub const UIA_TextControlTypeId: i32 = 50020;
@@ -434,6 +435,7 @@ pub fn ariaRoleToControlType(role: []const u8) i32 {
         .{ .role = "img", .ct = UIA_ImageControlTypeId },
         .{ .role = "text", .ct = UIA_TextControlTypeId },
         .{ .role = "slider", .ct = UIA_SliderControlTypeId },
+        .{ .role = "scrollbar", .ct = UIA_ScrollBarControlTypeId },
         .{ .role = "menuitem", .ct = UIA_MenuItemControlTypeId },
         .{ .role = "tab", .ct = UIA_TabControlTypeId },
         .{ .role = "tabitem", .ct = UIA_TabItemControlTypeId },

@@ -21,6 +21,16 @@
 //! writes; it never rewrites `offset` on its own when the sizes change — the owner
 //! of the content re-clamps (it knows when its content shrank).
 //!
+//! **Sizing.** The bar is `thickness` across and grows along its axis to fill
+//! its mount anchor, so the anchor needs a *definite* length or the track hugs
+//! the thumb and collapses a bit more every frame (silently). Either mount it
+//! as a direct child of a row (vertical bar) / column (horizontal bar) beside
+//! the view, so the cross-axis stretch gives it its length — or mount it with
+//! `.fill = true` inside a holder whose length is definite via `grow`/px.
+//! Avoid a `%` length on that holder: under a hugging parent it resolves to 0.
+//!
+//! The thumb uses the default arrow cursor, as native scrollbars do.
+//!
 //! The thumb's position is a render-only `scroll_offset_{x,y}` on the track, so
 //! scrolling never triggers a layout solve. Drag-follow uses the engine's global
 //! mouse_move/up (they carry no node id), registered in `build()` against the
@@ -78,9 +88,12 @@ pub const Scrollbar = struct {
     // Props (set from mountOwned's init_props; re-applied on rebuild).
     /// Caller-owned scroll offset (px, `<= 0`; 0 = start, `-(content - viewport)`
     /// = end). Read to place the thumb, written on drag / track click / wheel.
-    /// Omit to use the internal one (only useful in isolation).
+    /// Omitting it falls back to an internal offset nobody else can read —
+    /// pass one in any real use.
     offset: ?*signals.Signal(f32) = null,
-    /// Caller-owned total content length along the axis (px).
+    /// Caller-owned total content length along the axis (px). Required in
+    /// practice: without it (and `viewport_size`) both sizes are 0, the thumb
+    /// is hidden and the bar never scrolls.
     content_size: ?*signals.Signal(f32) = null,
     /// Caller-owned visible length along the axis (px). Also the page step.
     viewport_size: ?*signals.Signal(f32) = null,

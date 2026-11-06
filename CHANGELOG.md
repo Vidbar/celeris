@@ -9,6 +9,30 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Added
+
+- **`fw.scrollbar.Scrollbar`** — a standalone scrollbar for views that draw only
+  their visible slice (where `ScrollView` can't help). Driven by caller-owned
+  `offset` / `content_size` / `viewport_size` signals (`offset` uses the same
+  `<= 0` px convention as `ScrollView.offset`, so one signal can be shared).
+  Proportional thumb with a minimum length, drag with global follow, track click
+  pages one viewport, wheel over the bar, hover/pressed colours, vertical and
+  horizontal. Exposed to UI Automation as a ScrollBar control.
+- **Theme:** `scrollbar_thumb_hover` and `scrollbar_thumb_active` (set in the dark,
+  light and seed themes; a theme that leaves them unset falls back to
+  `scrollbar_thumb`).
+
+### Changed
+
+- **`ScrollView` uses `Scrollbar`** instead of its private bar. Same API and
+  channel width; the bar now also pages on a track click, scrolls on the wheel
+  over the bar, and shows hover/pressed colours. With a very long content (20px
+  minimum thumb) the thumb now ends flush with the track instead of overrunning
+  it. The thumb uses the default arrow cursor (was a pointer hand), as native
+  scrollbars do.
+
 ## 0.1.3 — 2026-11-05
 
 `CELERIS_ABI_VERSION` 6 (additive).

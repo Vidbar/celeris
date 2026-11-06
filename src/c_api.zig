@@ -4470,9 +4470,10 @@ test "hover: palette row clicked (shell rebuild), pointer to canvas: row unhover
     // Pointer onto the first row's Button.
     const row_root = blk: {
         for (engine.registry.nodes.items) |n| {
-            // A Button root sits directly under its mount anchor (the ScrollView's
-            // scrollbar thumb is hoverable too, but its parent is the track).
-            if (n.alive and engine.store.getModifier(n.id, .hoverable) != null and n.geometry.width > 0 and mounts.get(n.parent) != null) break :blk n.id;
+            // By role, not "first hoverable": the ScrollView's scrollbar thumb is
+            // hoverable too.
+            const is_button = if (engine.store.getModifier(n.id, .role)) |r| r == .string and std.mem.eql(u8, r.string, "button") else false;
+            if (n.alive and is_button and engine.store.getModifier(n.id, .hoverable) != null and n.geometry.width > 0) break :blk n.id;
         }
         return error.NoRow;
     };

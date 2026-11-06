@@ -110,8 +110,10 @@ pub const ScrollView = struct {
         self.scroll_offset = signals.Signal(f32).init(allocator, 0);
         self.viewport_h_sig = signals.Signal(f32).init(allocator, 0);
         self.content_h_sig = signals.Signal(f32).init(allocator, 0);
-        self.bar_content_sig = signals.Signal(f32).init(allocator, 0);
-        self.bar_viewport_sig = signals.Signal(f32).init(allocator, 0);
+        // Seeded from the props (the instance has them before onMount), so the
+        // first build never has to write these signals.
+        self.bar_content_sig = signals.Signal(f32).init(allocator, self.content_height);
+        self.bar_viewport_sig = signals.Signal(f32).init(allocator, self.viewport_height);
         self.scope = signals.Scope.init(allocator);
     }
 
@@ -156,7 +158,7 @@ pub const ScrollView = struct {
     }
 
     /// The mounted scrollbar (null while the content fits).
-    pub fn bar(self: *ScrollView) ?*scrollbar_mod.Scrollbar {
+    fn bar(self: *ScrollView) ?*scrollbar_mod.Scrollbar {
         const mounts = self.mounts orelse return null;
         if (self.bar_anchor == reg.NULL_NODE) return null;
         const rec = mounts.get(self.bar_anchor) orelse return null;
@@ -249,7 +251,9 @@ pub const ScrollView = struct {
         self.router = ctx.router;
         self.mounts = ctx.mounts;
         self.theme = ctx.builder.theme;
-        // Props may have changed the fallbacks (content_height / viewport_height).
+        // Only writes when a rebuild changed the content_height / viewport_height
+        // fallbacks (syncBarSizes skips equal values) — the bar then re-renders
+        // against nodes that are still alive, before Body rebuilds them.
         self.syncBarSizes();
 
         // Outer row: viewport + scrollbar side-by-side.
