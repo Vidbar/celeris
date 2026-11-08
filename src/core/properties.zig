@@ -197,6 +197,19 @@ pub const ModifierKey = enum {
     /// Escape followed by Tab, still traverses (within the active focus
     /// scope) — no keyboard trap (WCAG 2.1.2). Value: `.number = 1`.
     captures_tab,
+    /// Suppresses the keyboard focus ring (the `:focus-visible` outline) on
+    /// THIS node — the equivalent of CSS `outline: none` on `:focus-visible`,
+    /// WPF `FocusVisualStyle="{x:Null}"`, Qt `Qt::WA_MacShowFocusRect=false`.
+    /// For widgets that show focus their own way (a code editor's caret, a
+    /// grid's active cell). Purely visual: focus, Tab order, key routing,
+    /// `focus_highlight_mode` and UIA focus events are unchanged. Not
+    /// inherited — focusable descendants still get their ring. With
+    /// `virtual_focus_target`: set on the focused container it hides the ring
+    /// on the redirected target too (the container owns its focus
+    /// presentation); set on a target, only that target loses it.
+    /// Value: `.number = 1` (0 turns it back off). A widget using it MUST
+    /// draw its own visible focus indicator (WCAG 2.4.7).
+    no_focus_ring,
 };
 
 const layout_count = @typeInfo(LayoutKey).@"enum".fields.len;

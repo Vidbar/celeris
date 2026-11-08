@@ -120,6 +120,8 @@ const Grid = struct {
             .viewport_height = 560,
             .overdraw = 6,
             .selected = &self.selected,
+            // drawCell paints the active cell, so that is the focus indicator.
+            .focus_ring = false,
             .col_scroll = &self.col_scroll,
             .row_scroll = &self.row_scroll,
         });

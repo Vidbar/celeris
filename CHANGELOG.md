@@ -9,6 +9,30 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Added
+
+- **`UIBuilder.noFocusRing(id)`** (modifier `no_focus_ring`, also settable through the
+  C-ABI as `celeris_node_add_modifier(…, "no_focus_ring", "1")`) — the equivalent of
+  CSS `outline: none` / WPF `FocusVisualStyle="{x:Null}"`: the node never paints the
+  keyboard focus ring, while focus, Tab order, key routing and UIA focus events stay
+  exactly the same. Not inherited. With `virtual_focus_target`, setting it on the
+  focused container also hides the ring on the redirected target. Widgets that use it
+  must draw their own focus indicator (caret, active cell). `"0"` turns it back off.
+- **`VirtualGrid.focus_ring`** (default `true`) — set it to `false` when your cell
+  `render` callback paints the active cell, so the focus ring no longer outlines the
+  whole viewport. The grid itself never paints the active cell, so the default keeps
+  the ring.
+
+### Fixed
+
+- `VirtualGrid`: moving the active cell with the keyboard now re-runs `render` for the
+  visible cells. Before, a highlight painted from `.selected` stayed on the first cell
+  and only moved when the grid scrolled to a new range.
+
+No BREAKING changes. `CELERIS_ABI_VERSION` unchanged (6).
+
 ## 0.1.9 — 2026-11-08
 
 ### Added

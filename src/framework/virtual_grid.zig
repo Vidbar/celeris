@@ -95,9 +95,15 @@ pub fn VirtualGrid(comptime Datum: type) type {
         /// doesn't flash blank before the next range rebuild.
         overdraw: u32 = 4,
 
-        /// Lifted selection (caller-owned). The grid reads it to paint a
-        /// highlight and writes a collapsed range on a navigation keypress.
+        /// Lifted selection (caller-owned). The grid writes a collapsed range
+        /// on a navigation keypress; it does NOT paint it — your `render`
+        /// callback reads it to highlight the active cell.
         selected: ?*signals.Signal(CellRange) = null,
+        /// Draw the keyboard focus ring around the whole viewport while the
+        /// grid is focused. Set `false` only when your `render` callback paints
+        /// the active cell (from `selected`) — that highlight then becomes the
+        /// grid's only focus indicator (WCAG 2.4.7). See `UIBuilder.noFocusRing`.
+        focus_ring: bool = true,
         /// Lifted data-revision (the `VirtualList` pattern): after mutating the
         /// source or the column widths, `.set(rev+1)` re-materializes and
         /// rebuilds the column prefix sum without a parent rebuild.
@@ -405,6 +411,10 @@ pub fn VirtualGrid(comptime Datum: type) type {
             _ = self.col_start_sig.get(); // subscribe: horizontal window shifts
             _ = self.shape_sig.get(); // subscribe: viewport resized (fill)
             if (self.data_rev) |rv| _ = rv.get(); // subscribe: data / widths change
+            // subscribe: active cell moved. `render` paints the active cell from
+            // `.selected` (usually via `peek`, which doesn't subscribe), so
+            // without this the highlight sticks to wherever it first was.
+            if (self.selected) |s| _ = s.get();
             if (self.body_node == reg.NULL_NODE) return;
 
             var b = builder_mod.UIBuilder.init(registry, self.store.?);
@@ -548,6 +558,9 @@ pub fn VirtualGrid(comptime Datum: type) type {
             // Tab/Shift+Tab move the active cell (onKey); Ctrl+Tab or
             // Escape→Tab leave the grid — see ModifierKey.captures_tab.
             try b.capturesTab(viewport);
+            // Written on every build (0 or 1), never only set: a reused
+            // viewport node must not keep a stale flag when the prop flips back.
+            try b.store.setModifier(viewport, .no_focus_ring, .{ .number = if (self.focus_ring) 0 else 1 });
 
             if (!self.bound) {
                 self.row_start_sig = try self.scope.createComputed(usize, self, computeRowStart);
@@ -669,6 +682,7 @@ const Props = struct {
     fill: bool = false,
     overdraw: u32 = 4,
     selected: ?*signals.Signal(CellRange) = null,
+    focus_ring: bool = true,
     data_rev: ?*signals.Signal(u32) = null,
 };
 
@@ -807,6 +821,26 @@ test "VirtualGrid opts its viewport into captures_tab; Tab/Shift+Tab move the ac
     try testing.expectEqual(CellCoord{ .row = 0, .col = 0 }, sel.peek().focus);
 }
 
+test "VirtualGrid keeps the focus ring by default; focus_ring = false opts the viewport out" {
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var src = Src{};
+    const vg = try mountVG(&env, baseProps(&src));
+    try testing.expect(!vg.store.?.modifierFlag(vg.viewport_node, .no_focus_ring));
+
+    var env2 = TestEnv.init(testing.allocator);
+    defer env2.deinit();
+    env2.wire();
+    var p = baseProps(&src);
+    p.focus_ring = false;
+    const vg2 = try mountVG(&env2, p);
+    try testing.expect(vg2.store.?.modifierFlag(vg2.viewport_node, .no_focus_ring));
+    // Opting out of the ring changes nothing else: still focusable, still captures Tab.
+    try testing.expect(vg2.store.?.getModifier(vg2.viewport_node, .focusable) != null);
+    try testing.expect(vg2.store.?.modifierFlag(vg2.viewport_node, .captures_tab));
+}
+
 test "VirtualGrid keyboard navigation moves the lifted selection and scrolls into view" {
     var sel = signals.Signal(CellRange).init(testing.allocator, .{});
     defer sel.deinit();
@@ -838,6 +872,28 @@ test "VirtualGrid keyboard navigation moves the lifted selection and scrolls int
     _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = events.Key.home.code(), .ctrl = true });
     try testing.expectEqual(CellCoord{ .row = 0, .col = 0 }, sel.peek().focus);
     try testing.expectApproxEqAbs(@as(f32, 0), vg.rowScrollSig().peek(), 0.001);
+}
+
+test "VirtualGrid re-renders visible cells when the active cell moves (render paints it from .selected)" {
+    // `render` is documented as the place that paints the active cell, reading
+    // `.selected`. If the grid doesn't re-run it on a selection change, the
+    // highlight sticks to the first cell — and with `focus_ring = false` the
+    // grid then shows no focus indicator at all (WCAG 2.4.7).
+    var sel = signals.Signal(CellRange).init(testing.allocator, .{});
+    defer sel.deinit();
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var src = Src{};
+    var p = baseProps(&src);
+    p.selected = &sel;
+    const vg = try mountVG(&env, p);
+
+    const before = src.draws;
+    try testing.expect(before > 0);
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = events.Key.right.code() });
+    try testing.expectEqual(CellCoord{ .row = 0, .col = 1 }, sel.peek().focus);
+    try testing.expect(src.draws > before);
 }
 
 test "VirtualGrid data_rev bump rebuilds the column prefix sum and re-materializes" {

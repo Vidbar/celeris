@@ -242,8 +242,8 @@ pub const UIBuilder = struct {
         try self.store.setModifier(id, .label, .{ .string = owned });
     }
 
-    /// Create an Image node with a source path/URL.
-    /// Self-closing — no close() call required.
+    /// Create an Image node from a local file path (decoded with stb_image;
+    /// URLs are not supported). Self-closing — no close() call required.
     pub fn image(self: *UIBuilder, src: []const u8) !NodeId {
         const id = try self.openNode(.image);
         const owned = try self.store.stringAllocator().dupe(u8, src);
@@ -876,6 +876,13 @@ pub const UIBuilder = struct {
     /// `ModifierKey.captures_tab`.
     pub fn capturesTab(self: *UIBuilder, id: NodeId) !void {
         try self.store.setModifier(id, .captures_tab, .{ .number = 1 });
+    }
+
+    /// Node keeps focus, keyboard routing and accessibility but never paints
+    /// the keyboard focus ring — for widgets that draw their own focus
+    /// indicator (caret, active cell). See `ModifierKey.no_focus_ring`.
+    pub fn noFocusRing(self: *UIBuilder, id: NodeId) !void {
+        try self.store.setModifier(id, .no_focus_ring, .{ .number = 1 });
     }
 
     pub fn nodeId(self: *UIBuilder, id: NodeId, label: []const u8) !void {

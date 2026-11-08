@@ -438,6 +438,10 @@ try ctx.mountOwned(VG, .{
   Home / End, Ctrl+Home / Ctrl+End, PageUp / PageDown move the focused cell,
   scroll it into view, and write a *collapsed* `CellRange` to `.selected`. The
   viewport captures Tab (`capturesTab`); Ctrl+Tab or Escape then Tab leave it. The
+  grid does not paint the active cell — your `render` callback reads `.selected` and
+  highlights it. The focused viewport shows the focus ring by default; once your cells
+  paint the active cell, pass `.focus_ring = false` so that highlight is the only
+  focus indicator. The
   grid defines no selection-change events and never *extends* a range — an app
   that wants Shift+Arrow range-select does that in its own key handler.
 - **Everything else composes**:
@@ -1073,6 +1077,20 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
 - `const node = try b.openBox()` — open a container node.
 - `b.close()` — close the last opened container.
 - `const text = try b.addText("Text")` — add a static text node (use `ctx.dynText` for reactive text).
+- `const img = try b.image("assets/logo.png")` — add an image node. Self-closing (no
+  `close()`). The source is a **local file path** (relative paths resolve against the
+  process's working directory), decoded with stb_image (PNG, JPEG, BMP, GIF's first
+  frame, TGA and more). URLs are not supported. The image stretches to the
+  node's box, so give it a `width` / `height`; `b.opacity` fades it. A file that fails
+  to load draws nothing, with no error.
+- `try b.rootAt(node)` … `b.close()` — rebuilds only `node`'s children: the `open*` calls
+  that follow are matched against its current children (reused or deleted) instead of
+  building a whole tree. This is what re-running one component's `build` uses; widgets
+  call it to refresh a panel without touching the rest of the window (`Dialog` does
+  this for its body). Most code never needs it.
+- `const id = try b.openNode(.box)` — the general form behind `openBox` (also `.text`,
+  `.image`, `.path`); `openNodeKeyed(type, key)` adds a reconciliation key so the node
+  keeps its identity when siblings are reordered or inserted.
 - `const p = try b.path(verts)` — add a stroked vector-path node (`verts: []const fw.PathVertex`).
   Self-closing. Each `PathVertex` is `{ x, y, c1x, c1y, c2x, c2y, move, close }`:
   `c1 == previous point` and `c2 == (x, y)` (or all four zero) → straight line,
@@ -1089,6 +1107,24 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
 - `try b.justifyContent(node, .center)` / `try b.alignItems(node, .center)`
 - `try b.width(node, 100, .percent)` / `try b.height(node, 50, .px)`
 - `try b.flexGrow(node, 1)` / `try b.gap(node, 16)`
+- `try b.flexShrink(node, 1)` — lets the node give up space when the row/column
+  overflows. **The default is 0 (Yoga-style), not CSS's 1:** nothing shrinks unless you
+  ask, which is what lets scroll containers and virtualized lists overflow on purpose.
+  Set it on a child that should get narrower, e.g. a text label next to fixed icons. `try b.flexBasis(node, 200, .px)` — its
+  starting main-axis size before grow/shrink (`.px` or `.percent`).
+- `try b.flexWrap(node, true)` — lets a row or column break onto more lines, but only
+  once its children no longer fit; while they fit it stays one line.
+- `try b.minWidth(node, 120, .px)` / `maxWidth` / `minHeight` / `maxHeight` — clamp the
+  node's size; grow and shrink never take it past them (`.px` or `.percent` of the
+  parent).
+- `try b.positionAbsolute(node, left, top)` — takes the node out of the flex flow and
+  places it at `left` / `top` px from its parent's origin. The parent keeps no room for
+  it; combine with `zIndex` to draw it above siblings.
+- `try b.scrollOffsetY(node, -150)` / `scrollOffsetX` — shifts all of the node's
+  children by that many px (negative moves them up / left, i.e. scrolls down / right).
+  Render-only: no layout solve, so it is cheap to animate. Pair it with
+  `overflowHidden(node)` to clip what moves out. `ScrollView`, `VirtualList` and
+  `VirtualGrid` drive it for you.
 
 **Styling:**
 - `try b.background(node, r, g, b)`
@@ -1101,8 +1137,27 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
   r, g, b, a)`.
 - `try b.padding(node, top, right, bottom, left)` / `try b.margin(node, top, right, bottom, left)`
 - per side: `try b.paddingLeft(node, 14)` (also `paddingTop`/`paddingRight`/`paddingBottom`,
-  and the matching `marginLeft`/…) — for the one-edge case, where the four-value form
-  reads as noise
+  and `marginTop`/`marginRight`/`marginBottom`/`marginLeft`) — for the one-edge case,
+  where the four-value form reads as noise. Margins and padding are px only.
+- `try b.backgroundAlpha(node, r, g, b, 0.5)` — background with an opacity (0–1); the
+  plain `background` is opaque. `borderColorAlpha` and `textColorAlpha` are the same for
+  the border and text color.
+- `try b.shadowSpread(node, -4)` — sets only the shadow's spread, for a shadow set with
+  the loose `b.shadow(…)` form; `boxShadow` already takes `.spread`.
+- `try b.linearGradient(node, r1, g1, b1, a1, r2, g2, b2, a2, vertical)` — fills the
+  background from the first color to the second: left → right, or top → bottom when
+  `vertical` is true. It replaces the node's background (the first color *is* the
+  background), so call it instead of `background`, not with it.
+- `try b.radialGradient(node, r1, g1, b1, a1, r2, g2, b2, a2)` — first color at the
+  center, second at the edge; the edge is the longer half-side, so on a non-square box
+  the shorter sides never reach the second color.
+- `try b.borderTop(node, 2)` / `borderRight` / `borderBottom` / `borderLeft` — border width
+  for one edge (px), overriding the uniform `borderWidth` on that edge, so a single
+  bottom rule is `borderBottom(node, 1)` plus a `borderColor`. **Paint only:** unlike
+  `borderWidth`, they don't push the content inward; add padding if text would touch
+  the line.
+- `try b.borderStyle(node, .dashed)` — dashed border (`.solid` is the default). Dashes
+  only render on boxes without `radius`; a rounded box always draws a solid border.
 
 **Text styling:**
 - `try b.textColor(text_node, 255, 255, 255)`
@@ -1111,6 +1166,49 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
 - `try b.lineHeight(text_node, 1.4)` — line-height multiplier; see
   [Text line height and metrics](#text-line-height-and-metrics-line_height-fwtext)
 - `try b.fontBold(text_node, true)` / `try b.fontMono(text_node, true)` — face role
+- `try b.textAlign(text_node, .center)` — `.left` (default), `.center` or `.right` within
+  the text node's own box. The box must be wider than the text for this to show, so
+  give it a `width` (or let it stretch in a column).
+
+**Pointer input and stacking:**
+
+These attach raw string action ids that you handle through the `EventRouter` (see
+[Escape hatch: raw action-ids + EventRouter](#escape-hatch-raw-action-ids--eventrouter)).
+Typed handlers on `boxNode` (`on_click`, `on_right_click`, `on_hover`, …) set the same
+modifiers for you; prefer them. Delivery follows the
+[Pointer event delivery rules](#pointer-event-delivery-rules).
+
+- `try b.rightClickable(node, "action")` — the node receives `right_click`. It fires when
+  the right button goes **down**, not on release, and bubbles through right-clickable
+  ancestors like `click` does.
+- `try b.hoverable(node, "action")` — the node receives `mouse_enter` / `mouse_leave`. Hover
+  goes to the **nearest hoverable ancestor-or-self** of the node under the pointer, so
+  moving between children of one hoverable box sends nothing; only one node is hovered at
+  a time.
+- `try b.tooltip(node, "text")` — a tooltip shown after a hover dwell, rendered by the
+  app's `TooltipHost`. Same as the `.tooltip` box prop, but usable on a node that already
+  exists. It also makes the node hoverable with an id of its own, **replacing** any
+  `hoverable` action id set before it; to keep your own hover handler, call `hoverable`
+  after `tooltip`.
+- `try b.pointerEventsNone(node)` — hit-testing skips this node, so a click, hover or
+  wheel over it goes to whatever is below it (a sibling underneath, or its parent). It
+  is still drawn and still focusable. **Unlike CSS `pointer-events: none`, it is not
+  inherited:** its children stay hittable; set it on each child that should let events
+  through.
+- `try b.noDrag(node)` — stops a press from bubbling past this node, so an ancestor's
+  handler (typically a custom title bar's drag region) never sees it. The node itself
+  and anything inside it still get the event. The CSS equivalent is `app-region: no-drag`.
+- `try b.zIndex(node, z)` — draw and hit-test order. Higher `z` is drawn on top and gets
+  the pointer first; equal `z` keeps tree order (later siblings on top). **Children
+  inherit their parent's `z`** unless they set their own, and the comparison is global
+  across the window, not per parent (there are no CSS stacking contexts): a child with
+  `z = 5` inside a `z = 100` panel is drawn *below* an unrelated `z = 10` node.
+- `const panel = try b.openOverlay(z)` … `b.close()` — opens a box that floats above the
+  app at `z`, positioned with `left` / `top` in the coordinates of the container the
+  overlay host was mounted into (window coordinates for a `runApp` singleton). It also
+  takes its parent (the host's anchor box) out of the layout flow, so use it only in a
+  component that renders nothing but overlays, like `TooltipHost` and `ToastHost` do;
+  any other content in that component would leave the layout with it.
 
 **Accessibility (a11y / UIA):**
 
@@ -1140,6 +1238,39 @@ these primitives when building your own widget or an escape-hatch layout.
   its `key_down` handler instead of moving focus (code editors, grids). Ctrl+Tab, or
   Escape then Tab, still move focus (within the active focus scope), so keyboard
   users are never trapped. Handle Tab on `key_down`: Linux sends no `char_input` for it.
+- **Focus ring.** The focused node gets a 2px ring in the theme's `focus_ring` color,
+  drawn just outside its bounds and following its `radius` — only when focus came from
+  the keyboard, UIA or code (CSS `:focus-visible`); a mouse click focuses without a ring.
+  `try b.noFocusRing(node)` turns the ring off for that node (CSS `outline: none`, WPF
+  `FocusVisualStyle="{x:Null}"`) for widgets that show focus their own way, like an
+  editor's caret or a grid's active cell. Focus, Tab order, key routing and UIA focus
+  events are unchanged. It is not inherited: a focusable child still gets its ring. A
+  widget that turns the ring off must draw its own visible focus indicator (WCAG 2.4.7).
+- **Roving highlight (`virtual_focus_target`).** A list-like widget that moves a
+  highlight with the arrow keys can keep real focus on its container (so it keeps
+  receiving keys) and point the ring and screen readers at the highlighted row instead
+  — ARIA's `aria-activedescendant`. There is no builder helper; write the modifier on
+  the focusable container whenever the highlight moves:
+  `try b.store.setModifier(container, .virtual_focus_target, .{ .number = @floatFromInt(row) })`.
+  The ring then paints around `row`, and UIA raises its focus-changed event for `row`.
+  Use `.{ .number = -1 }` for "nothing highlighted" (there is no way to remove a single
+  modifier); the ring then falls back to the container. A target that no longer exists
+  or has zero size also falls back. `Menu` works this way.
+- **Focus scopes (`b.focus_scope`).** An overlay that should trap Tab — a dialog, a
+  popup menu — copies `b.focus_scope` (a `?FocusScopeHooks`; `null` in tests and
+  headless runs) during `build`. When it opens it calls `fs.push(panel, origin)`: Tab
+  then cycles only inside `panel`, and focus moves to its first focusable node. Pass
+  `.keyboard` as `origin` when a key opened it and `.pointer` for a click, so the
+  ring shows only when it should. On close, `fs.pop()` restores the focus held before
+  the push, if that node still exists and can take focus. Scopes nest up to 8 deep;
+  `push` returns `false` past that or when `panel` no longer exists, and a push must
+  be matched by exactly one pop, including when the widget unmounts while open.
+  `Dialog` and `Menu` already do this.
+- `try b.nodeId(node, "name")` — attaches a string tag to the node. It is **not** the UIA
+  `AutomationId` (UIA reports the numeric node id) and the engine does not look nodes
+  up by it, except for the reserved `"debug_text"`: a text node tagged with it when the
+  run loop starts gets its content overwritten every frame with the window size, so
+  don't use that name for anything else. It is what the `.id` box prop sets.
 - State flags surfaced to the a11y tree (a screen reader hears "checked"/"expanded"/
   "disabled"): `try b.setChecked(node, bool)`, `try b.setExpanded(node, bool)`,
   `try b.setDisabled(node, bool)`. Selection is reflected through `.checked`, which the

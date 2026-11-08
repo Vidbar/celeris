@@ -3645,6 +3645,23 @@ const CapturesTabFixture = struct {
     }
 };
 
+test "no_focus_ring (via C-ABI string) leaves focus, Tab traversal and key routing unchanged" {
+    var f: CapturesTabFixture = .{};
+    try f.setUp(false);
+    defer f.tearDown();
+    // Same key + value parsing `celeris_node_add_modifier` runs.
+    const key = prop_parse.parseKey(props.ModifierKey, "no_focus_ring") orelse return error.KeyNotParsed;
+    try f.engine.store.setModifier(f.a, key, try prop_parse.parseModifier(&f.engine.store, key, "1"));
+    try std.testing.expect(f.engine.store.modifierFlag(f.a, .no_focus_ring));
+    const tab = fw_events.Key.tab.code();
+    f.key(tab, false, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.b), f.engine.focused_node);
+    f.key(tab, true, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
+    try std.testing.expectEqual(events_mod.FocusHighlightMode.keyboard, f.engine.focus_highlight_mode);
+    try std.testing.expectEqual(@as(u32, 0), f.seen.tabs);
+}
+
 test "captures_tab absent: Tab/Shift+Tab move focus and never reach the node" {
     var f: CapturesTabFixture = .{};
     try f.setUp(false);

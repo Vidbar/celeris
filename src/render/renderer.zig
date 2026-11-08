@@ -469,7 +469,15 @@ fn bakeNodeRecursive(
                 }
             }
         }
-        if (effective == node_id and ctx.focus_highlight_mode == .keyboard and ctx.store.getModifier(fid, .focusable) != null) {
+        // `.no_focus_ring` (outline:none) on the focus holder or on the
+        // painted target suppresses ONLY this primitive — focus itself is
+        // untouched (see ModifierKey.no_focus_ring). Checked last so the
+        // lookups run only for the one node that would get the ring.
+        if (effective == node_id and ctx.focus_highlight_mode == .keyboard and
+            ctx.store.getModifier(fid, .focusable) != null and
+            !ctx.store.modifierFlag(fid, .no_focus_ring) and
+            !ctx.store.modifierFlag(effective, .no_focus_ring))
+        {
             const rw = focus_ring_width;
             var ring = RectPrimitive{
                 .x = g.x - rw,
@@ -1003,6 +1011,97 @@ test "Focus ring only paints in .keyboard highlight mode, never .pointer" {
         try std.testing.expectEqual(@as(usize, 3), prims.items.len);
         try std.testing.expect(hasRing(prims.items));
     }
+}
+
+/// Test helper: bakes `registry` with `focused` in `.keyboard` mode and
+/// returns how many focus-ring primitives were emitted around `target`.
+fn countRingsAround(registry: *reg.UIRegistry, store: *props.PropertyStore, focused: reg.NodeId, target: reg.NodeId) !usize {
+    var prims = std.array_list.Managed(RectPrimitive).init(std.testing.allocator);
+    defer prims.deinit();
+    var images = std.array_list.Managed(ImagePrimitive).init(std.testing.allocator);
+    defer images.deinit();
+    var paths = std.array_list.Managed(PathSegPrim).init(std.testing.allocator);
+    defer paths.deinit();
+    var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
+    defer hits.deinit();
+    try bakeRegistry(registry, store, &prims, &images, &paths, &hits, focused, null, .keyboard, std.testing.allocator);
+    const tg = registry.getNode(target).?.geometry;
+    var n: usize = 0;
+    for (prims.items) |p| {
+        if (p.color_a == 0.0 and p.border_color_a > 0.0 and p.border_top == focus_ring_width and
+            p.x == tg.x - focus_ring_width and p.width == tg.width + 2 * focus_ring_width) n += 1;
+    }
+    return n;
+}
+
+test ".no_focus_ring: keyboard-focused node gets no ring; without it the ring is drawn; not inherited" {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const root = try registry.createNode(.box);
+    const editor = try registry.createNode(.box);
+    const inner = try registry.createNode(.box); // focusable child of the opted-out node
+    registry.appendChild(root, editor);
+    registry.appendChild(editor, inner);
+
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    inline for (.{ root, editor, inner }) |id| try store.registerNode(id);
+    const sa = store.stringAllocator();
+    try store.setModifier(editor, .focusable, .{ .string = try sa.dupe(u8, "e") });
+    try store.setModifier(inner, .focusable, .{ .string = try sa.dupe(u8, "i") });
+    try store.setLayout(editor, .width, .{ .dimension = .{ .value = 200, .unit = .px } });
+    try store.setLayout(editor, .height, .{ .dimension = .{ .value = 100, .unit = .px } });
+    try store.setLayout(inner, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(inner, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
+    var engine = layout.LayoutEngine.init(&registry, &store, null);
+    engine.solve(root, 0, 0, 800, 600);
+
+    // Baseline: ring drawn as today.
+    try std.testing.expectEqual(@as(usize, 1), try countRingsAround(&registry, &store, editor, editor));
+
+    // Opt out: no ring, and the node's own rects are untouched.
+    try store.setModifier(editor, .no_focus_ring, .{ .number = 1 });
+    try std.testing.expectEqual(@as(usize, 0), try countRingsAround(&registry, &store, editor, editor));
+
+    // Not inherited: a focusable descendant still shows its ring.
+    try std.testing.expectEqual(@as(usize, 1), try countRingsAround(&registry, &store, inner, inner));
+
+    // Value 0 turns it back off (there is no per-modifier unset API).
+    try store.setModifier(editor, .no_focus_ring, .{ .number = 0 });
+    try std.testing.expectEqual(@as(usize, 1), try countRingsAround(&registry, &store, editor, editor));
+}
+
+test ".no_focus_ring with .virtual_focus_target: container opt-out hides the redirected ring; target opt-out hides only its own" {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const root = try registry.createNode(.box);
+    const container = try registry.createNode(.box);
+    const row = try registry.createNode(.box);
+    registry.appendChild(root, container);
+    registry.appendChild(container, row);
+
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    inline for (.{ root, container, row }) |id| try store.registerNode(id);
+    try store.setModifier(container, .focusable, .{ .string = try store.stringAllocator().dupe(u8, "c") });
+    try store.setLayout(container, .width, .{ .dimension = .{ .value = 200, .unit = .px } });
+    try store.setLayout(container, .height, .{ .dimension = .{ .value = 100, .unit = .px } });
+    try store.setLayout(row, .width, .{ .dimension = .{ .value = 60, .unit = .px } });
+    try store.setLayout(row, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
+    try store.setModifier(container, .virtual_focus_target, .{ .number = @floatFromInt(row) });
+    var engine = layout.LayoutEngine.init(&registry, &store, null);
+    engine.solve(root, 0, 0, 800, 600);
+
+    try std.testing.expectEqual(@as(usize, 1), try countRingsAround(&registry, &store, container, row));
+
+    try store.setModifier(row, .no_focus_ring, .{ .number = 1 });
+    try std.testing.expectEqual(@as(usize, 0), try countRingsAround(&registry, &store, container, row));
+    try std.testing.expectEqual(@as(usize, 0), try countRingsAround(&registry, &store, container, container));
+
+    try store.setModifier(row, .no_focus_ring, .{ .number = 0 });
+    try store.setModifier(container, .no_focus_ring, .{ .number = 1 });
+    try std.testing.expectEqual(@as(usize, 0), try countRingsAround(&registry, &store, container, row));
+    try std.testing.expectEqual(@as(usize, 0), try countRingsAround(&registry, &store, container, container));
 }
 
 test ".virtual_focus_target redirects the ring to a live descendant (roving/aria-activedescendant)" {
