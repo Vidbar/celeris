@@ -9,6 +9,7 @@ const platform_mod = @import("platform/platform.zig");
 const wgpu_mod = @import("render/wgpu_backend.zig");
 const text_mod = @import("render/text.zig");
 const font_discovery = @import("platform/font_discovery.zig");
+const keysym_mod = @import("platform/keysym.zig");
 const animation_mod = @import("core/animation.zig");
 const signals_mod = @import("core/signals.zig");
 const a11y = @import("core/accessibility.zig");
@@ -431,6 +432,10 @@ pub const EngineState = struct {
     /// subtree (focus trap for overlays/dialogs); pop restores the previous focus.
     focus_scopes: [MAX_FOCUS_SCOPES]FocusScope = undefined,
     focus_scope_len: usize = 0,
+    /// Set by an Escape key_down while a `captures_tab` node is focused: the
+    /// next Tab traverses focus instead of reaching the node. Cleared by any
+    /// other key_down and by every focus move (`moveFocus`).
+    tab_escape_armed: bool = false,
     /// Last-seen maximized state, to fire the maximize-change hook only on a
     /// transition (drag-to-restore un-maximizes via the OS, not through our button).
     last_maximized: bool = false,
@@ -1385,6 +1390,8 @@ fn moveFocus(engine: *EngineState, new_focus: ?reg.NodeId, origin: events_mod.Fo
         .restore, .removed => {},
     }
     const mode_changed = old_mode != engine.focus_highlight_mode;
+    // Any focus move disarms the Escape→Tab exit (see `captures_tab`).
+    engine.tab_escape_armed = false;
 
     const old_focus = engine.focused_node;
     if (old_focus == new_focus) {
@@ -1680,6 +1687,18 @@ fn imeActiveForNode(engine: *EngineState, node: ?reg.NodeId) bool {
         if (cur == .string and std.mem.eql(u8, cur.string, "text")) return true;
     }
     return false;
+}
+
+/// A key_down for a modifier pressed on its own: VK_SHIFT/VK_CONTROL/VK_MENU
+/// (0x10-0x12), their L/R variants (0xA0-0xA5) and the Windows keys
+/// (0x5B/0x5C). Linux maps the modifier keysyms onto 0x10-0x12/0x5B
+/// (`keysym.toVk`); code 0 is an unmapped key, NOT a modifier. Win32 Alt
+/// arrives as WM_SYSKEYDOWN and never reaches here today; kept for parity.
+fn isModifierOnlyKey(code: u32) bool {
+    return switch (code) {
+        0x10...0x12, 0x5B, 0x5C, 0xA0...0xA5 => true,
+        else => false,
+    };
 }
 
 /// Whether a keyboard activation (Enter/Space) on the focused node should
@@ -2129,7 +2148,25 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
                 return;
             }
         }
-        if (event.event_type == .key_down and event.key_code == fw_events.Key.tab.code()) {
+        // A focused `captures_tab` node (code editor, multi-line input, grid)
+        // takes plain Tab/Shift+Tab as key_down. Ctrl+Tab, or Escape then
+        // Tab, still traverse — no keyboard trap (within the active focus
+        // scope, like plain Tab). Escape arms the exit without being consumed;
+        // any other key_down disarms it, except a bare modifier press — so
+        // Escape, Shift, Tab still leaves backwards.
+        const tab_captured = blk: {
+            if (event.event_type != .key_down) break :blk false;
+            if (isModifierOnlyKey(event.key_code)) break :blk false;
+            const focused_captures = if (engine.focused_node) |f|
+                engine.store.modifierFlag(f, .captures_tab)
+            else
+                false;
+            const is_tab = event.key_code == fw_events.Key.tab.code();
+            const escaped = engine.tab_escape_armed;
+            engine.tab_escape_armed = focused_captures and event.key_code == fw_events.Key.escape.code();
+            break :blk is_tab and focused_captures and !event.ctrl_held and !escaped;
+        };
+        if (!tab_captured and event.event_type == .key_down and event.key_code == fw_events.Key.tab.code()) {
             var list = std.array_list.Managed(reg.NodeId).init(engine.gpa.allocator());
             defer list.deinit();
             // With a focus scope active, Tab traverses only the top scope's
@@ -3557,6 +3594,149 @@ test "ScrollAxes: native dx wins; Shift converts vertical to horizontal" {
     axes = scrollAxes(-1.0, 2.0, true);
     try std.testing.expectEqual(@as(f32, -1.0), axes.dy);
     try std.testing.expectEqual(@as(f32, 2.0), axes.dx);
+}
+
+// Two focusables A, B under a root; records the key_downs A's handler sees.
+const CapturesTabFixture = struct {
+    const Seen = struct {
+        tabs: u32 = 0,
+        last_shift: bool = false,
+        fn call(p: ?*anyopaque, ev: fw_events.Event) void {
+            const self: *@This() = @ptrCast(@alignCast(p.?));
+            if (ev.key_code == fw_events.Key.tab.code()) {
+                self.tabs += 1;
+                self.last_shift = ev.shift;
+            }
+        }
+    };
+    engine: EngineState = undefined,
+    router: fw_events.EventRouter = undefined,
+    seen: Seen = .{},
+    a: reg.NodeId = 0,
+    b: reg.NodeId = 0,
+
+    fn setUp(self: *CapturesTabFixture, captures: bool) !void {
+        self.engine.init(true, .{});
+        const sa = self.engine.store.stringAllocator();
+        const root = try self.engine.registry.createNode(.box);
+        try self.engine.store.registerNode(root);
+        self.engine.registry.getNode(root).?.geometry = .{ .x = 0, .y = 0, .width = 500, .height = 500 };
+        inline for (.{ &self.a, &self.b }, 0..) |id, i| {
+            id.* = try self.engine.registry.createNode(.box);
+            try self.engine.store.registerNode(id.*);
+            self.engine.registry.appendChild(root, id.*);
+            try self.engine.store.setModifier(id.*, .focusable, .{ .string = try sa.dupe(u8, "f") });
+            self.engine.registry.getNode(id.*).?.geometry = .{ .x = 10, .y = 10 + 30 * i, .width = 50, .height = 20 };
+        }
+        if (captures) try self.engine.store.setModifier(self.a, .captures_tab, .{ .number = 1 });
+        self.router = fw_events.EventRouter.init(std.testing.allocator);
+        try self.router.onNode(self.a, .key_down, .{ .ptr = &self.seen, .call = Seen.call });
+        mods_test_router = &self.router;
+        self.engine.event_callback = modsTestForward;
+        moveFocus(&self.engine, self.a, .programmatic);
+    }
+    fn tearDown(self: *CapturesTabFixture) void {
+        mods_test_router = null;
+        self.router.deinit();
+        self.engine.deinit();
+    }
+    fn key(self: *CapturesTabFixture, code: u32, shift: bool, ctrl: bool) void {
+        handleOSInput(&self.engine, .{ .event_type = .key_down, .key_code = code, .shift_held = shift, .ctrl_held = ctrl });
+    }
+};
+
+test "captures_tab absent: Tab/Shift+Tab move focus and never reach the node" {
+    var f: CapturesTabFixture = .{};
+    try f.setUp(false);
+    defer f.tearDown();
+    const tab = fw_events.Key.tab.code();
+    f.key(tab, false, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.b), f.engine.focused_node);
+    f.key(tab, true, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 0), f.seen.tabs);
+}
+
+test "captures_tab: Tab and Shift+Tab reach the focused node's key_down; focus stays" {
+    var f: CapturesTabFixture = .{};
+    try f.setUp(true);
+    defer f.tearDown();
+    const tab = fw_events.Key.tab.code();
+    f.key(tab, false, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 1), f.seen.tabs);
+    try std.testing.expect(!f.seen.last_shift);
+    f.key(tab, true, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 2), f.seen.tabs);
+    try std.testing.expect(f.seen.last_shift);
+}
+
+test "captures_tab: Ctrl+Tab still traverses focus" {
+    var f: CapturesTabFixture = .{};
+    try f.setUp(true);
+    defer f.tearDown();
+    f.key(fw_events.Key.tab.code(), false, true);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.b), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 0), f.seen.tabs);
+}
+
+test "captures_tab: Escape then Tab leaves; another key in between disarms the exit" {
+    var f: CapturesTabFixture = .{};
+    try f.setUp(true);
+    defer f.tearDown();
+    const tab = fw_events.Key.tab.code();
+    const esc = fw_events.Key.escape.code();
+    // Escape, other key, Tab → captured again.
+    f.key(esc, false, false);
+    f.key('A', false, false);
+    f.key(tab, false, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 1), f.seen.tabs);
+    // Escape, Tab → focus moves out.
+    f.key(esc, false, false);
+    f.key(tab, false, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.b), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 1), f.seen.tabs);
+    try std.testing.expect(!f.engine.tab_escape_armed);
+}
+
+test "captures_tab: Escape, then a bare Shift key_down, then Shift+Tab still leaves backwards" {
+    var f: CapturesTabFixture = .{};
+    try f.setUp(true);
+    defer f.tearDown();
+    // Focus starts on A; Shift+Tab from the first node wraps to B.
+    f.key(fw_events.Key.escape.code(), false, false);
+    // Win32 sends VK_SHIFT; Linux maps Shift_L through keysym.toVk to the same code.
+    f.key(fw_events.Key.shift.code(), true, false);
+    f.key(keysym_mod.toVk(keysym_mod.Shift_R), true, false);
+    f.key(fw_events.Key.tab.code(), true, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.b), f.engine.focused_node); // wraps A → B
+    try std.testing.expectEqual(@as(u32, 0), f.seen.tabs);
+}
+
+test "captures_tab: an unmapped key (code 0, e.g. Linux ';') disarms Escape like any other key" {
+    var f: CapturesTabFixture = .{};
+    try f.setUp(true);
+    defer f.tearDown();
+    f.key(fw_events.Key.escape.code(), false, false);
+    f.key(0, false, false);
+    f.key(fw_events.Key.tab.code(), false, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 1), f.seen.tabs);
+}
+
+test "captures_tab: a focus move disarms a pending Escape" {
+    var f: CapturesTabFixture = .{};
+    try f.setUp(true);
+    defer f.tearDown();
+    f.key(fw_events.Key.escape.code(), false, false);
+    try std.testing.expect(f.engine.tab_escape_armed);
+    moveFocus(&f.engine, f.b, .programmatic);
+    moveFocus(&f.engine, f.a, .programmatic);
+    f.key(fw_events.Key.tab.code(), false, false);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 1), f.seen.tabs);
 }
 
 test "Window mouse_leave clears the hovered node" {

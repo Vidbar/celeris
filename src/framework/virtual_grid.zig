@@ -545,6 +545,9 @@ pub fn VirtualGrid(comptime Datum: type) type {
             });
             self.viewport_node = viewport;
             try b.overflowHidden(viewport);
+            // Tab/Shift+Tab move the active cell (onKey); Ctrl+Tab or
+            // Escape→Tab leave the grid — see ModifierKey.captures_tab.
+            try b.capturesTab(viewport);
 
             if (!self.bound) {
                 self.row_start_sig = try self.scope.createComputed(usize, self, computeRowStart);
@@ -784,6 +787,24 @@ test "VirtualGrid horizontal scroll translates each row strip (scroll_offset_x)"
         checked += 1;
     }
     try testing.expect(checked == 28);
+}
+
+test "VirtualGrid opts its viewport into captures_tab; Tab/Shift+Tab move the active cell" {
+    var sel = signals.Signal(CellRange).init(testing.allocator, .{});
+    defer sel.deinit();
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var src = Src{};
+    var p = baseProps(&src);
+    p.selected = &sel;
+    const vg = try mountVG(&env, p);
+
+    try testing.expect(vg.store.?.modifierFlag(vg.viewport_node, .captures_tab));
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = events.Key.tab.code() });
+    try testing.expectEqual(CellCoord{ .row = 0, .col = 1 }, sel.peek().focus);
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = vg.viewport_node, .key_code = events.Key.tab.code(), .shift = true });
+    try testing.expectEqual(CellCoord{ .row = 0, .col = 0 }, sel.peek().focus);
 }
 
 test "VirtualGrid keyboard navigation moves the lifted selection and scrolls into view" {

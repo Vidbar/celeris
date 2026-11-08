@@ -190,6 +190,13 @@ pub const ModifierKey = enum {
     /// Absent (or the value doesn't resolve to a live node) → no redirect, the
     /// ring paints on the real focused node as usual.
     virtual_focus_target,
+    /// When THIS node holds focus, a plain Tab / Shift+Tab key_down is
+    /// delivered to it instead of moving focus (opt-in for widgets that
+    /// handle Tab themselves — VirtualGrid today; code editors later). Handle
+    /// it on key_down: Linux never sends a char_input for Tab. Ctrl+Tab, or
+    /// Escape followed by Tab, still traverses (within the active focus
+    /// scope) — no keyboard trap (WCAG 2.1.2). Value: `.number = 1`.
+    captures_tab,
 };
 
 const layout_count = @typeInfo(LayoutKey).@"enum".fields.len;

@@ -37,6 +37,14 @@ pub const KP_Delete: u32 = 0xff9f;
 pub const F1: u32 = 0xffbe;
 pub const F12: u32 = 0xffc9;
 pub const space: u32 = 0x20;
+pub const Shift_L: u32 = 0xffe1;
+pub const Shift_R: u32 = 0xffe2;
+pub const Control_L: u32 = 0xffe3;
+pub const Control_R: u32 = 0xffe4;
+pub const Alt_L: u32 = 0xffe9;
+pub const Alt_R: u32 = 0xffea;
+pub const Super_L: u32 = 0xffeb;
+pub const Super_R: u32 = 0xffec;
 
 /// Engine key code for an XKB keysym; 0 when the key has no mapping.
 pub fn toVk(sym: u32) u32 {
@@ -46,6 +54,11 @@ pub fn toVk(sym: u32) u32 {
         Return, KP_Enter => .enter,
         Escape => .escape,
         space => .space,
+        // Bare modifier presses fold onto the generic VKs Win32 sends.
+        Shift_L, Shift_R => .shift,
+        Control_L, Control_R => .ctrl,
+        Alt_L, Alt_R => .alt,
+        Super_L, Super_R => .meta,
         Home, KP_Home => .home,
         End, KP_End => .end,
         Page_Up, KP_Page_Up => .page_up,
@@ -93,6 +106,16 @@ test "keysym editing keys, letters, digits and F-keys" {
         .{ .sym = F1 + 4, .key = .f5 },
     };
     for (cases) |cs| try std.testing.expectEqual(@as(?Key, cs.key), Key.fromCode(toVk(cs.sym)));
-    try std.testing.expectEqual(@as(u32, 0), toVk(0xffe1)); // Shift_L: unmapped
     try std.testing.expectEqual(@as(u32, 0), toVk('!'));
+    try std.testing.expectEqual(@as(u32, 0), toVk(';'));
+}
+
+test "keysym modifiers fold onto the generic Win32 VKs" {
+    const cases = [_]struct { sym: u32, code: u32 }{
+        .{ .sym = Shift_L, .code = 0x10 },   .{ .sym = Shift_R, .code = 0x10 },
+        .{ .sym = Control_L, .code = 0x11 }, .{ .sym = Control_R, .code = 0x11 },
+        .{ .sym = Alt_L, .code = 0x12 },     .{ .sym = Alt_R, .code = 0x12 },
+        .{ .sym = Super_L, .code = 0x5B },   .{ .sym = Super_R, .code = 0x5B },
+    };
+    for (cases) |cs| try std.testing.expectEqual(cs.code, toVk(cs.sym));
 }

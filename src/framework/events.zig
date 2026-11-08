@@ -83,6 +83,11 @@ pub const Key = enum(u32) {
     backspace = 0x08,
     tab = 0x09,
     enter = 0x0D,
+    // Modifier keys pressed on their own (Win32 sends the generic VKs in
+    // WM_KEYDOWN; Linux maps L/R keysyms onto the same codes).
+    shift = 0x10,
+    ctrl = 0x11,
+    alt = 0x12,
     escape = 0x1B,
     space = 0x20,
     page_up = 0x21,
@@ -131,6 +136,7 @@ pub const Key = enum(u32) {
     x = 0x58,
     y = 0x59,
     z = 0x5A,
+    meta = 0x5B, // Windows / Super key (VK_LWIN)
     f1 = 0x70,
     f2 = 0x71,
     f3 = 0x72,

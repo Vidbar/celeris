@@ -871,6 +871,13 @@ pub const UIBuilder = struct {
         try self.store.setModifier(id, .no_drag, .{ .number = 1 });
     }
 
+    /// Focused node receives Tab/Shift+Tab as key_down instead of the engine
+    /// moving focus; Ctrl+Tab or Escape→Tab still leave — see
+    /// `ModifierKey.captures_tab`.
+    pub fn capturesTab(self: *UIBuilder, id: NodeId) !void {
+        try self.store.setModifier(id, .captures_tab, .{ .number = 1 });
+    }
+
     pub fn nodeId(self: *UIBuilder, id: NodeId, label: []const u8) !void {
         const owned = try self.store.stringAllocator().dupe(u8, label);
         try self.store.setModifier(id, .id, .{ .string = owned });

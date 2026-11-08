@@ -571,7 +571,11 @@ comptime {
         .{ keysym.KP_Page_Down, c.XKB_KEY_KP_Page_Down }, .{ keysym.KP_End, c.XKB_KEY_KP_End },
         .{ keysym.KP_Insert, c.XKB_KEY_KP_Insert },       .{ keysym.KP_Delete, c.XKB_KEY_KP_Delete },
         .{ keysym.F1, c.XKB_KEY_F1 },                     .{ keysym.F12, c.XKB_KEY_F12 },
-        .{ keysym.space, c.XKB_KEY_space },
+        .{ keysym.space, c.XKB_KEY_space },               .{ keysym.Shift_L, c.XKB_KEY_Shift_L },
+        .{ keysym.Shift_R, c.XKB_KEY_Shift_R },           .{ keysym.Control_L, c.XKB_KEY_Control_L },
+        .{ keysym.Control_R, c.XKB_KEY_Control_R },       .{ keysym.Alt_L, c.XKB_KEY_Alt_L },
+        .{ keysym.Alt_R, c.XKB_KEY_Alt_R },               .{ keysym.Super_L, c.XKB_KEY_Super_L },
+        .{ keysym.Super_R, c.XKB_KEY_Super_R },
     }) |pair| {
         if (pair[0] != pair[1]) @compileError("keysym.zig constant disagrees with xkbcommon");
     }
