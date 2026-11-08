@@ -11,7 +11,7 @@ Any other language can use the C header directly.
 
 ## Status
 
-**0.1.9 — early, usable, pre-1.0.** The retained-mode core (**no virtual DOM**:
+**0.1.10 — early, usable, pre-1.0.** The retained-mode core (**no virtual DOM**:
 granular dirty-tracking, keyed reconciliation, fine-grained signals) and the
 reactive framework on top of it are feature-complete for desktop apps and covered
 by a ~470-test suite. Windows is the primary platform; Linux (Wayland) is
@@ -91,7 +91,7 @@ supported yet. The API is pre-1.0 and may change between minor versions.
 Add the dependency to `build.zig.zon`:
 
 ```bash
-zig fetch --save=celeris https://github.com/Vidbar/celeris/archive/refs/tags/v0.1.9.tar.gz
+zig fetch --save=celeris https://github.com/Vidbar/celeris/archive/refs/tags/v0.1.10.tar.gz
 ```
 
 A complete `build.zig`:

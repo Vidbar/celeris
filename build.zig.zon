@@ -1,6 +1,6 @@
 .{
     .name = .celeris,
-    .version = "0.1.9",
+    .version = "0.1.10",
 
     // Regenerated when the package was renamed to .celeris (2026-06-12).
     .fingerprint = 0x577c6c4922f6851, // Changing this has security and trust implications.
