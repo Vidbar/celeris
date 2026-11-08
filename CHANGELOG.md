@@ -9,6 +9,31 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.1.9 — 2026-11-08
+
+### Added
+
+- **`UIBuilder.capturesTab(id)`** (modifier `captures_tab`, also settable through the
+  C-ABI as `celeris_node_add_modifier(…, "captures_tab", "1")`) — while that node is
+  focused, plain Tab / Shift+Tab are delivered to its `key_down` handler instead of
+  moving focus, so editors and grids can use Tab. Ctrl+Tab, or Escape then Tab, still
+  move focus (within the active focus scope); a bare modifier press between Escape
+  and Tab keeps that exit open, any other key closes it. Without the modifier, Tab
+  behaves exactly as before.
+- **`Key.shift` / `ctrl` / `alt` / `meta`** — names for the key codes of a modifier
+  pressed on its own (0x10 / 0x11 / 0x12 / 0x5B).
+
+### Changed
+
+- `VirtualGrid` captures Tab: Tab / Shift+Tab now move the focused cell (the handling
+  existed but the engine consumed Tab first). Use Ctrl+Tab or Escape then Tab to
+  leave the grid.
+- Linux: a `key_down` for Shift, Control, Alt or Super pressed alone now carries the
+  same code as on Windows (0x10 / 0x11 / 0x12 / 0x5B) instead of 0. Code 0 now means
+  only "unmapped key".
+
+No BREAKING changes. `CELERIS_ABI_VERSION` unchanged (6).
+
 ## 0.1.8 — 2026-11-06
 
 ### Added

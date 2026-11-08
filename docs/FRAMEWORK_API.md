@@ -437,6 +437,7 @@ try ctx.mountOwned(VG, .{
 - **Owned behaviour is keyboard cell navigation only**: arrows, Tab / Shift+Tab,
   Home / End, Ctrl+Home / Ctrl+End, PageUp / PageDown move the focused cell,
   scroll it into view, and write a *collapsed* `CellRange` to `.selected`. The
+  viewport captures Tab (`capturesTab`); Ctrl+Tab or Escape then Tab leave it. The
   grid defines no selection-change events and never *extends* a range — an app
   that wants Shift+Arrow range-select does that in its own key handler.
 - **Everything else composes**:
@@ -1135,6 +1136,10 @@ these primitives when building your own widget or an escape-hatch layout.
   the first text found in the subtree.
 - `try b.focusable(node, action_id)` — makes the node keyboard-focusable and routes
   focus actions through `action_id`.
+- `try b.capturesTab(node)` — while the node is focused, plain Tab / Shift+Tab reach
+  its `key_down` handler instead of moving focus (code editors, grids). Ctrl+Tab, or
+  Escape then Tab, still move focus (within the active focus scope), so keyboard
+  users are never trapped. Handle Tab on `key_down`: Linux sends no `char_input` for it.
 - State flags surfaced to the a11y tree (a screen reader hears "checked"/"expanded"/
   "disabled"): `try b.setChecked(node, bool)`, `try b.setExpanded(node, bool)`,
   `try b.setDisabled(node, bool)`. Selection is reflected through `.checked`, which the
