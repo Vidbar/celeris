@@ -697,6 +697,25 @@ pub const UIBuilder = struct {
         try self.store.setStyle(id, .line_height, .{ .number = factor });
     }
 
+    /// Lays a text node out on one line at its natural width, whatever width is
+    /// available: it never soft-wraps, is never shrunk (flex-shrink) or stretched
+    /// (cross-axis) below that width, and overflows a narrower parent — clip or
+    /// scroll it there. Hard `\n` breaks still start new lines. A declared
+    /// `min-width` (e.g. `0`) replaces that floor and a `max-width` caps the box;
+    /// either way the line itself still never wraps — it overflows its own box
+    /// towards the end, whatever the `text_align`. The standard
+    /// single-line text mode: CSS `white-space: nowrap`, Compose
+    /// `Text(softWrap = false)`, Flutter `Text(softWrap: false)`. For code
+    /// editors and labels inside narrow or horizontally scrolled containers.
+    pub fn noWrap(self: *UIBuilder, id: NodeId) !void {
+        try self.textWrap(id, false);
+    }
+
+    /// Soft wrapping on (`true`, the default) or off (`false`; see `noWrap`).
+    pub fn textWrap(self: *UIBuilder, id: NodeId, wrap: bool) !void {
+        try self.store.setStyle(id, .text_wrap, .{ .boolean = wrap });
+    }
+
     /// Horizontal alignment of a text node within its box (left / center / right).
     pub fn textAlign(self: *UIBuilder, id: NodeId, alignment: enum { left, center, right }) !void {
         const kw: Keyword = switch (alignment) {

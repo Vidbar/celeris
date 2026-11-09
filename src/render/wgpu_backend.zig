@@ -1151,10 +1151,15 @@ pub const WgpuBackend = struct {
                     self.atlas.ensureShaped(layout, content); // shapes once; no-op afterwards
                     for (layout.lines.items) |line| {
                         var t_x: f32 = g.x;
+                        // A line wider than its box (no-wrap text with min-width:0
+                        // or max-width) overflows towards the END, as in CSS: the
+                        // alignment slack never goes negative, so the start of the
+                        // text stays inside the box.
+                        const slack = @max(g.width - line.width, 0);
                         if (text_align == .center) {
-                            t_x += (g.width - line.width) / 2.0;
+                            t_x += slack / 2.0;
                         } else if (text_align == .right) {
-                            t_x += (g.width - line.width);
+                            t_x += slack;
                         }
                         const glyphs = layout.shaped.items[line.glyph_start .. line.glyph_start + line.glyph_count];
                         Draw.run(self, t_verts, glyphs, physical_size, t_x, current_y, icon_baseline_y, next_clip, c_arr);

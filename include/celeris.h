@@ -250,6 +250,8 @@ int32_t celeris_node_remove(int32_t engine_id, uint32_t node_id);
 /* String-keyed properties. Keys are the property names (`-` or `_` both work):
  *   style:    background, color, radius, opacity, font_size, text_align,
  *             letter_spacing, line_height (unitless multiplier, e.g. "1.4"),
+ *             text_wrap ("false" = one line at natural width, overflowing a
+ *             narrower parent; hard newlines still break),
  *             border_width, border_color, shadow_color, shadow_blur, …
  *   layout:   width, height, padding_*, margin_*, flex_direction, flex_grow,
  *             justify_content, align_items, gap, position, left, top, …

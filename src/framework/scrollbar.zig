@@ -26,8 +26,15 @@
 //! track measures 0 and no thumb shows (the thumb is out of flow, so the track
 //! can't hug it and creep smaller frame by frame). Either mount it
 //! as a direct child of a row (vertical bar) / column (horizontal bar) beside
-//! the view, so the cross-axis stretch gives it its length — or mount it with
-//! `.fill = true` inside a holder whose length is definite via `grow`/px.
+//! the view, so the cross-axis stretch gives it its length — or mount it inside
+//! a holder whose length is definite via `grow`/px, passing `.fill = true` in
+//! the `mountOwned` props. `fill` is not a `Scrollbar` field: it is one of
+//! `mountOwned`'s reserved props (with `key` and `hug`), which `mountOwned`
+//! consumes itself; `fill` sizes the mount anchor to fill its parent:
+//!
+//! ```zig
+//! try ctx.mountOwned(fw.scrollbar.Scrollbar, .{ .fill = true, .offset = &self.scroll_y, … });
+//! ```
 //! Avoid a `%` length on that holder: under a hugging parent it resolves to 0.
 //!
 //! The thumb uses the default arrow cursor, as native scrollbars do.

@@ -62,6 +62,7 @@ pub fn styleKind(key: props.StyleKey) Kind {
         .background, .color, .border_color, .shadow_color, .gradient_color2 => .color,
         .opacity, .font_role, .letter_spacing, .line_height, .border_style, .gradient_type, .z_index => .number,
         .text_align => .keyword,
+        .text_wrap => .boolean,
         .radius, .font_size, .border_width, .border_top, .border_right, .border_bottom, .border_left => .px,
         .shadow_blur, .shadow_offset_x, .shadow_offset_y, .shadow_spread => .px,
     };
@@ -312,6 +313,10 @@ test "the key decides the type: opacity is a number, radius a px dimension" {
     try testing.expectEqual(@as(f32, 1), (try parseStyle(&store, .opacity, "1")).number);
     try testing.expectApproxEqAbs(@as(f32, 1.2), (try parseStyle(&store, .line_height, "1.2")).number, 0.0001);
     try testing.expectEqual(props.StyleKey.line_height, parseKey(props.StyleKey, "line-height").?);
+    // text-wrap: the C-ABI spelling of UIBuilder.noWrap / textWrap.
+    try testing.expectEqual(props.StyleKey.text_wrap, parseKey(props.StyleKey, "text-wrap").?);
+    try testing.expectEqual(false, (try parseStyle(&store, .text_wrap, "false")).boolean);
+    try testing.expectEqual(true, (try parseStyle(&store, .text_wrap, "1")).boolean);
     const r = (try parseStyle(&store, .radius, "1")).dimension;
     try testing.expectEqual(@as(f32, 1), r.value);
     try testing.expectEqual(props.DimUnit.px, r.unit);

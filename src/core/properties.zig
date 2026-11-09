@@ -121,6 +121,12 @@ pub const StyleKey = enum {
     /// slot is `font_size × line_height`. Unset = `text.LINE_HEIGHT_FACTOR` (1.55).
     /// Changes the measured height, so it invalidates layout like `font_size`.
     line_height,
+    /// Soft wrapping of a text node (`.boolean`). Unset/true = wrap at the
+    /// available width (default). false = CSS `white-space: nowrap`, Compose
+    /// `softWrap = false`, Flutter `softWrap: false`: laid out at its natural
+    /// width (hard `\n` breaks still apply), never shrunk or stretched below it,
+    /// overflowing a narrower parent. Affects shaping, so it relayouts.
+    text_wrap,
     text_align,
     border_width,
     border_color,
@@ -338,7 +344,7 @@ pub const PropertyStore = struct {
         // Styles that shape text (see setStyle). Dropping one of them changes the
         // measured text, so the cached layout must be rebuilt — otherwise a reused
         // node that loses e.g. `line_height` keeps drawing at the old factor.
-        const shaping_keys = [_]StyleKey{ .font_size, .font_role, .letter_spacing, .line_height };
+        const shaping_keys = [_]StyleKey{ .font_size, .font_role, .letter_spacing, .line_height, .text_wrap };
         var had_shaping_style = false;
         for (shaping_keys) |k| {
             if (entry.style[@intFromEnum(k)] != null) had_shaping_style = true;
@@ -496,7 +502,7 @@ pub const PropertyStore = struct {
                 // font_size changes the measured text size, so it must invalidate
                 // layout (and ancestors), not just paint — otherwise the cached
                 // text dimensions go stale. Other style keys are paint-only.
-                if (key == .font_size or key == .font_role or key == .letter_spacing or key == .line_height) {
+                if (key == .font_size or key == .font_role or key == .letter_spacing or key == .line_height or key == .text_wrap) {
                     r.global_layout_dirty = true;
                     r.global_render_dirty = true;
                     if (r.getNode(node_id)) |n| n.text_dirty = true; // font size changes shaping

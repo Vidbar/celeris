@@ -9,6 +9,29 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Added
+
+- **`UIBuilder.noWrap(id)` / `UIBuilder.textWrap(id, bool)`** (style `text_wrap`,
+  also `text-wrap` through the style parser) — single-line text, the equivalent of
+  CSS `white-space: nowrap`, Compose `Text(softWrap = false)` and Flutter
+  `Text(softWrap: false)`. The node is shaped at its natural width whatever width
+  it is offered; hard `\n` breaks still apply. It is never shrunk by `flex-shrink`
+  nor narrowed by cross-axis stretch below that width (a no-wrap text's automatic
+  minimum size is its line), so it overflows a narrower parent instead of
+  wrapping. A declared `min-width` (e.g. `0`) replaces that minimum, as in CSS.
+- `text.NO_WRAP` — the explicit "no soft wrap" `max_width` for
+  `FontAtlas.measureTextMultiline` (0 keeps meaning the same for C-ABI callers).
+
+### Fixed
+
+- Center/right-aligned text whose line is wider than its box now overflows
+  towards the end (as in CSS), instead of starting left of the box.
+
+- `Scrollbar` module doc: `.fill = true` is `mountOwned`'s reserved prop, not a
+  `Scrollbar` field; the doc now says so and shows the call.
+
 ## 0.1.10 — 2026-11-08
 
 ### Added

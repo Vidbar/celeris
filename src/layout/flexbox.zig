@@ -416,7 +416,7 @@ pub const LayoutEngine = struct {
                 self.measureChildrenPass(node_id);
             }
             self.placeChildren(node_id);
-        } else if (node.node_type == .text and node.geometry.width < node.layout_w) {
+        } else if (node.node_type == .text and node.geometry.width < node.layout_w and !self.isNoWrap(node_id)) {
             // Flex SHRANK this text node's main axis AFTER it was shaped: the measure
             // pass wraps each child against the full available width, but a `flex-grow`
             // /`flex-shrink` sibling (the label in a property row) then leaves it a
@@ -430,6 +430,9 @@ pub const LayoutEngine = struct {
             // last glyph. Width only, not height: geometry is untouched here
             // (updateTextLayout rewrites the cached wrapping in place), so the line the
             // parent already sized still holds.
+            //
+            // A no-wrap node never gets here: its lines don't depend on its width,
+            // and overwriting `last_avail_w` would miss the measure cache every solve.
             node.last_avail_w = node.geometry.width;
             node.layout_dirty = true;
             _ = self.updateTextLayout(node_id);
@@ -680,7 +683,9 @@ pub const LayoutEngine = struct {
                         // Floor at min-width/min-height (else 0) — items freeze there.
                         const min_main = self.getMinDim(cid, if (is_row) .min_width else .min_height, main_avail) orelse 0;
                         var target = cur - (w / sum_w) * deficit;
-                        const floor = @max(min_main, 0);
+                        // A no-wrap text item can't shrink below its one-line width.
+                        const auto_min = if (is_row) self.intrinsicMinWidth(cid) else 0;
+                        const floor = @max(@max(min_main, auto_min), 0);
                         if (target <= floor) {
                             target = floor;
                             frozen[gi] = true;
@@ -827,6 +832,9 @@ pub const LayoutEngine = struct {
                                 var target = align_cross - m_left - m_right;
                                 if (self.getMaxDim(cid, .max_width, cross_avail)) |mx| target = @min(target, mx);
                                 if (self.getMinDim(cid, .min_width, cross_avail)) |mn| target = @max(target, mn);
+                                // Stretch may widen a no-wrap text box, never narrow
+                                // it below its line (it overflows the column instead).
+                                target = @max(target, self.intrinsicMinWidth(cid));
                                 if (target > 0 and child.geometry.width != target) {
                                     child.geometry.width = target;
                                     child.measured_gen = self.gen; // resized → force re-place
@@ -1011,7 +1019,7 @@ pub const LayoutEngine = struct {
                 // available-height change leaves `last_shaped_w` untouched, so the
                 // (expensive, HarfBuzz) shaping is skipped — this is what makes the
                 // measure pass run twice per solve nearly free.
-                const max_w = if (node.last_avail_w > 0) node.last_avail_w - pad_left - pad_right else 0;
+                const max_w = self.wrapWidth(node_id, node.last_avail_w, pad_left + pad_right);
                 const alloc = self.registry.allocator;
                 if (node.text_dirty or node.text_layout == null or max_w != node.last_shaped_w) {
                     const content_changed = node.text_dirty;
@@ -1110,6 +1118,43 @@ pub const LayoutEngine = struct {
             if (v == .number) return text_mod.sanitizeLineHeight(v.number);
         }
         return text_mod.LINE_HEIGHT_FACTOR;
+    }
+
+    /// True for a text node with `text_wrap = false` (`UIBuilder.noWrap`).
+    fn isNoWrap(self: *const LayoutEngine, node_id: reg.NodeId) bool {
+        if (self.store.getStyle(node_id, .text_wrap)) |v| {
+            if (v == .boolean) return !v.boolean;
+        }
+        return false;
+    }
+
+    /// The soft-wrap width a text node is shaped at. `text.NO_WRAP` (+inf) when the
+    /// node is no-wrap or its available width is unknown/unbounded (never measured,
+    /// or offered `floatMax` by a hugging parent), and also when no positive inner
+    /// width is left (a box squeezed to 0, a collapsed panel). Wrapping there would
+    /// shape one glyph per line: a hug parent would balloon in height, and a text
+    /// shrunk in `place` (which keeps its height) would paint a column of glyphs
+    /// over its siblings. One overflowing line is the lesser evil.
+    fn wrapWidth(self: *const LayoutEngine, node_id: reg.NodeId, avail_w: f32, pad_h: f32) f32 {
+        if (self.isNoWrap(node_id)) return text_mod.NO_WRAP;
+        if (avail_w >= std.math.floatMax(f32)) return text_mod.NO_WRAP;
+        const inner = avail_w - pad_h;
+        return if (inner > 0) inner else text_mod.NO_WRAP;
+    }
+
+    /// The width below which flex shrink and cross-axis stretch must not take a
+    /// node, beyond its declared `min-width`. A no-wrap text node without an
+    /// explicit width has min-content == max-content (its one-line natural width,
+    /// recorded in `layout_w` by `measure`) — CSS's automatic minimum size, and
+    /// Compose/Flutter measuring a `softWrap = false` Text at its intrinsic width.
+    fn intrinsicMinWidth(self: *const LayoutEngine, node_id: reg.NodeId) f32 {
+        const node = self.registry.getNode(node_id) orelse return 0;
+        if (node.node_type != .text or !self.isNoWrap(node_id)) return 0;
+        if (self.explicitSize(node_id, .width) != null) return 0;
+        // A declared min-width replaces the automatic minimum (CSS §4.5), so
+        // `min-width: 0` is the opt-out that lets it shrink and overflow-clip.
+        if (self.store.getLayout(node_id, .min_width) != null) return 0;
+        return @max(node.layout_w, 0);
     }
 
     fn fontRole(self: *const LayoutEngine, node_id: reg.NodeId) text_mod.FontRole {
@@ -2476,6 +2521,183 @@ test "Flexbox — a shrunk text flex-child re-wraps at its final width (property
     for (tl.lines.items) |line| {
         try std.testing.expect(line.width <= v.geometry.width + 1.0);
     }
+}
+
+/// A code-like line far wider than the boxes the no-wrap tests put it in.
+const NOWRAP_LONG = "const result = engine.solve(root, 0, 0, viewport_width, viewport_height);";
+
+fn shapedLineCount(n: *const reg.Node) usize {
+    return n.text_layout.?.lines.items.len;
+}
+
+test "Flexbox — noWrap: a text node wider than its row stays one line and keeps its full width" {
+    const ttf = try loadRegressionFont(std.testing.allocator);
+    defer std.testing.allocator.free(ttf);
+    var atlas = try text_mod.FontAtlas.init(std.testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+
+    // Reference: the same text with an unbounded row → its natural one-line size.
+    var natural_w: f32 = 0;
+    var natural_h: f32 = 0;
+    {
+        var registry = reg.UIRegistry.init(std.testing.allocator);
+        defer registry.deinit();
+        var store = props.PropertyStore.init(std.testing.allocator);
+        defer store.deinit();
+        var b = builder.UIBuilder.init(&registry, &store);
+        const root = try b.openBox();
+        try b.width(root, 5000, .px);
+        try b.flexRow(root);
+        const t = try b.addText(NOWRAP_LONG);
+        try b.fontSize(t, 13);
+        b.close();
+        var engine = LayoutEngine.init(&registry, &store, &atlas);
+        engine.solve(root, 0, 0, 5000, 800);
+        const n = registry.getNode(t).?;
+        try std.testing.expectEqual(@as(usize, 1), shapedLineCount(n));
+        natural_w = n.geometry.width;
+        natural_h = n.geometry.height;
+    }
+    try std.testing.expect(natural_w > 200);
+
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    store.setRegistry(&registry); // style edits after a solve must dirty layout
+    var b = builder.UIBuilder.init(&registry, &store);
+    const row = try b.openBox();
+    try b.width(row, 120, .px); // far narrower than the text
+    try b.flexRow(row);
+    const gutter = try b.addText("12");
+    try b.fontSize(gutter, 13);
+    const line = try b.addText(NOWRAP_LONG);
+    try b.fontSize(line, 13);
+    try b.noWrap(line);
+    try b.flexShrink(line, 1); // shrink must not narrow it
+    try b.flexGrow(line, 1);
+    b.close();
+
+    var engine = LayoutEngine.init(&registry, &store, &atlas);
+    engine.solve(row, 0, 0, 120, 800);
+
+    const n = registry.getNode(line).?;
+    try std.testing.expectEqual(@as(usize, 1), shapedLineCount(n));
+    try std.testing.expectApproxEqAbs(natural_w, n.geometry.width, 0.01);
+    try std.testing.expectApproxEqAbs(natural_h, n.geometry.height, 0.01);
+    // It overflows the row rather than being squeezed into it.
+    try std.testing.expect(n.geometry.x + n.geometry.width > 120);
+
+    // Re-solving (incremental, then after a resize) keeps it identical.
+    engine.solve(row, 0, 0, 120, 800);
+    try std.testing.expectEqual(@as(usize, 1), shapedLineCount(n));
+    try b.width(row, 60, .px);
+    engine.solve(row, 0, 0, 60, 800);
+    try std.testing.expectEqual(@as(usize, 1), shapedLineCount(n));
+    try std.testing.expectApproxEqAbs(natural_w, n.geometry.width, 0.01);
+
+    // Turning wrapping back on relayouts and wraps it.
+    try b.textWrap(line, true);
+    engine.solve(row, 0, 0, 60, 800);
+    try std.testing.expect(shapedLineCount(n) > 1);
+    try std.testing.expect(n.geometry.width < natural_w);
+}
+
+test "Flexbox — noWrap: column stretch never narrows it; hard newlines still break; min-width:0 opts out" {
+    const ttf = try loadRegressionFont(std.testing.allocator);
+    defer std.testing.allocator.free(ttf);
+    var atlas = try text_mod.FontAtlas.init(std.testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    var b = builder.UIBuilder.init(&registry, &store);
+    const col = try b.openBox(); // column, default align_items: stretch
+    try b.width(col, 100, .px);
+    const a = try b.addText(NOWRAP_LONG);
+    try b.fontSize(a, 13);
+    try b.noWrap(a);
+    const two = try b.addText("first line of code here\nsecond line of code here");
+    try b.fontSize(two, 13);
+    try b.noWrap(two);
+    const short = try b.addText("ok");
+    try b.fontSize(short, 13);
+    try b.noWrap(short);
+    const row = try b.openBox();
+    try b.width(row, 100, .px);
+    try b.flexRow(row);
+    const gutter = try b.openBox(); // fixed 30px, so the shrunk width (70) != offered (100)
+    try b.width(gutter, 30, .px);
+    try b.height(gutter, 10, .px);
+    b.close();
+    const clipped = try b.addText(NOWRAP_LONG);
+    try b.fontSize(clipped, 13);
+    try b.noWrap(clipped);
+    try b.flexShrink(clipped, 1);
+    try b.minWidth(clipped, 0, .px); // CSS opt-out: may shrink, still one line
+    b.close();
+    b.close();
+
+    var engine = LayoutEngine.init(&registry, &store, &atlas);
+    engine.solve(col, 0, 0, 100, 800);
+
+    const na = registry.getNode(a).?;
+    try std.testing.expectEqual(@as(usize, 1), shapedLineCount(na));
+    try std.testing.expect(na.geometry.width > 100); // kept, not stretched down to 100
+
+    const n2 = registry.getNode(two).?;
+    try std.testing.expectEqual(@as(usize, 2), shapedLineCount(n2));
+    try std.testing.expect(n2.geometry.width > 100);
+
+    // A short no-wrap label still stretches UP to the column like any text box.
+    try std.testing.expectApproxEqAbs(@as(f32, 100), registry.getNode(short).?.geometry.width, 0.01);
+
+    const nc = registry.getNode(clipped).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 70), nc.geometry.width, 0.01);
+    try std.testing.expectEqual(@as(usize, 1), shapedLineCount(nc));
+
+    // Shrunk below its line, a no-wrap node must not churn the measure cache: its
+    // cache key stays the width it was OFFERED (the row's 100), not the width it
+    // was shrunk to (70) — else every later re-measure of the row misses for it.
+    const shaped = nc.last_shaped_w;
+    try std.testing.expectApproxEqAbs(@as(f32, 100), nc.last_avail_w, 0.01);
+    try std.testing.expect(std.math.isInf(shaped)); // shaped unbounded (NO_WRAP)
+}
+
+test "Flexbox — a wrapping text squeezed to width 0 stays one line inside its box height" {
+    const ttf = try loadRegressionFont(std.testing.allocator);
+    defer std.testing.allocator.free(ttf);
+    var atlas = try text_mod.FontAtlas.init(std.testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    var b = builder.UIBuilder.init(&registry, &store);
+    const row = try b.openBox();
+    try b.width(row, 100, .px);
+    try b.flexRow(row);
+    const hog = try b.addText(NOWRAP_LONG); // takes the whole row and more
+    try b.fontSize(hog, 13);
+    try b.noWrap(hog);
+    const squeezed = try b.addText("wrap me please");
+    try b.fontSize(squeezed, 13);
+    try b.flexShrink(squeezed, 1);
+    try b.minWidth(squeezed, 0, .px);
+    b.close();
+
+    var engine = LayoutEngine.init(&registry, &store, &atlas);
+    engine.solve(row, 0, 0, 100, 800);
+
+    const n = registry.getNode(squeezed).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 0), n.geometry.width, 0.01);
+    // One line that fits its (unchanged) box height — not a column of glyphs
+    // painted below a one-line box.
+    try std.testing.expectEqual(@as(usize, 1), shapedLineCount(n));
+    try std.testing.expect(n.text_layout.?.total_height <= n.geometry.height + 0.01);
 }
 
 test "Flexbox — shrink arithmetic: a fixed label + flex value exactly fill the content box (no font)" {

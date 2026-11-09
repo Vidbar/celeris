@@ -16,6 +16,9 @@ pub const ShapedGlyph = @import("shaper.zig").ShapedGlyph;
 /// Prefer `lineHeight(size)` over multiplying by this yourself.
 pub const LINE_HEIGHT_FACTOR: f32 = 1.55;
 
+/// `max_width` that means "no soft wrap" (unbounded): lines break only at `\n`.
+pub const NO_WRAP: f32 = std.math.inf(f32);
+
 /// Height of one line slot at `size` with the default multiplier. The one
 /// conversion from font size to line box: measurement, wrapping, hit-testing, the
 /// caret and the renderer all go through it (or `lineHeightWith`), so none of them
@@ -701,8 +704,10 @@ pub const FontAtlas = struct {
         }
     }
 
-    /// Splits text into lines by '\n' and word-wrapping at `max_width`
-    /// (0 = no wrap). Line widths are measured exactly via HarfBuzz.
+    /// Splits text into lines by '\n' and word-wrapping at `max_width`.
+    /// `NO_WRAP` (or 0, kept for C-ABI callers) = no soft wrap; any positive
+    /// finite width wraps, breaking inside a word when nothing else fits.
+    /// Line widths are measured exactly via HarfBuzz.
     pub fn measureTextMultiline(self: *FontAtlas, text: []const u8, font_size: f32, max_width: f32, allocator: std.mem.Allocator) !TextLayoutInfo {
         return self.measureTextMultilinePref(text, font_size, max_width, 0, 0, LINE_HEIGHT_FACTOR, allocator);
     }
