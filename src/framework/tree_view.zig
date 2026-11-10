@@ -65,6 +65,17 @@ pub const TreeNode = struct {
     children: std.array_list.Managed(TreeNode),
 };
 
+/// Typed callback carrying a tree node id (expand/collapse requests, activation).
+/// `ptr` is the caller's context, passed back verbatim.
+pub const NodeIdHandler = struct {
+    ptr: ?*anyopaque = null,
+    call: *const fn (ptr: ?*anyopaque, node_id: usize) void,
+
+    fn fire(self: NodeIdHandler, node_id: usize) void {
+        self.call(self.ptr, node_id);
+    }
+};
+
 const RowInfo = struct { node_id: usize, row: reg.NodeId, name: reg.NodeId, caret: reg.NodeId = reg.NULL_NODE };
 
 /// One entry of the flattened visible order (a depth-first walk that expands only
@@ -90,7 +101,7 @@ const BOTTOM_SPACER_KEY: u64 = std.math.maxInt(u64) - 1;
 pub const TreeView = struct {
     // Props (set from mountOwned's init_props; re-applied on rebuild).
     /// Caller-owned tree data. The widget reads it (and toggles `expanded` on
-    /// branch clicks) but never allocates or frees nodes.
+    /// branch clicks unless `controlled_expansion`) but never allocates or frees nodes.
     roots: ?*std.array_list.Managed(TreeNode) = null,
     /// External, caller-owned revision signal: bump after swapping/mutating the
     /// tree data structurally — the widget's build re-runs (isolated) and stale
@@ -127,6 +138,21 @@ pub const TreeView = struct {
     caret_expanded: []const u8 = "▾",
     /// Disclosure glyph for a collapsed branch (▸, U+25B8 by default).
     caret_collapsed: []const u8 = "▸",
+    /// Called with the branch id whenever a gesture asks to expand it (caret click,
+    /// row click when `toggle_on_row_click`, →, Enter). Fires in both modes.
+    on_expand: ?NodeIdHandler = null,
+    /// Called with the branch id whenever a gesture asks to collapse it (caret
+    /// click, row click when `toggle_on_row_click`, ←, Enter). Fires in both modes.
+    on_collapse: ?NodeIdHandler = null,
+    /// Controlled expansion: when true the widget never writes `TreeNode.expanded`;
+    /// it only fires `on_expand`/`on_collapse`. The caller updates `roots` (e.g.
+    /// loading a branch's children lazily on first expand) and bumps `data_rev`;
+    /// selection/hover/scroll survive that rebuild like any data swap. False (the
+    /// default) keeps the widget toggling `expanded` itself.
+    controlled_expansion: bool = false,
+    /// Called with the node id on a double click on a row, and on Enter on a leaf
+    /// (Enter on a branch keeps toggling). An IDE opens the file here.
+    on_activate: ?NodeIdHandler = null,
 
     // State (auto-created in onMount; preserved across rebuilds). The internal
     // selection/hover signals are the fallback when the caller passes none.
@@ -373,8 +399,7 @@ pub const TreeView = struct {
                 const node = findNode(list, id) orelse return;
                 if (node.node_type != .branch) return;
                 if (!node.expanded) {
-                    node.expanded = true;
-                    self.rebuildBody();
+                    self.requestExpansion(node, true);
                 } else if (node.children.items.len > 0) {
                     sel.set(node.children.items[0].id);
                 }
@@ -386,8 +411,7 @@ pub const TreeView = struct {
                 };
                 const node = findNode(list, id) orelse return;
                 if (node.node_type == .branch and node.expanded) {
-                    node.expanded = false;
-                    self.rebuildBody();
+                    self.requestExpansion(node, false);
                 } else if (findParentId(list, id)) |pid| {
                     sel.set(pid);
                 }
@@ -395,7 +419,9 @@ pub const TreeView = struct {
             .enter => { // Enter — explicit activation: always toggles a branch
                 const id = sel.peek() orelse return;
                 const node = findNode(list, id) orelse return;
-                self.toggleNode(node);
+                if (node.node_type == .leaf) {
+                    if (self.on_activate) |h| h.fire(id);
+                } else self.toggleNode(node);
             },
             else => {},
         }
@@ -430,6 +456,9 @@ pub const TreeView = struct {
             if (node.node_type == .branch and self.toggle_on_row_click) {
                 self.toggleNode(node);
             }
+        } else if (std.mem.eql(u8, ev.name, "double_click")) {
+            if (on_caret) return; // rapid caret clicks are disclosure, not activation
+            if (self.on_activate) |h| h.fire(id);
         } else if (std.mem.eql(u8, ev.name, "mouse_enter")) {
             const hov = self.hovSig();
             if (hov.peek() == null or hov.peek().? != id) hov.set(id);
@@ -448,12 +477,25 @@ pub const TreeView = struct {
         return .{ .ptr = self, .call = Wrap.call };
     }
 
-    /// Flips a branch's `expanded` and partial-rebuilds the tree body (structural:
-    /// rows appear/disappear). No-op on leaves.
+    /// Requests the opposite expansion state of a branch. No-op on leaves.
     fn toggleNode(self: *TreeView, node: *TreeNode) void {
         if (node.node_type != .branch) return;
-        node.expanded = !node.expanded;
-        self.rebuildBody();
+        self.requestExpansion(node, !node.expanded);
+    }
+
+    /// Single funnel for every expand/collapse gesture: in uncontrolled mode writes
+    /// `expanded` and partial-rebuilds the body, then notifies the caller. In
+    /// `controlled_expansion` mode it only notifies: the caller's handler owns the
+    /// change and bumps `data_rev` (which may re-run build() synchronously), so
+    /// `node` is not touched after the handler returns.
+    fn requestExpansion(self: *TreeView, node: *TreeNode, expand: bool) void {
+        const id = node.id;
+        if (!self.controlled_expansion) {
+            node.expanded = expand;
+            self.rebuildBody();
+        }
+        const h = if (expand) self.on_expand else self.on_collapse;
+        if (h) |handler| handler.fire(id);
     }
 
     pub fn build(self: *TreeView, ctx: *component.BuildContext) !void {
@@ -610,6 +652,7 @@ pub const TreeView = struct {
         if (self.router) |r| {
             const h = self.rowHandler();
             try r.onNode(row, .click, h);
+            try r.onNode(row, .double_click, h);
             try r.onNode(row, .mouse_enter, h);
             try r.onNode(row, .mouse_leave, h);
         }
@@ -1623,4 +1666,309 @@ test "TreeView virtualized: keyboard ↓ past the window materializes the select
     try testing.expect(scroll_offset.peek() < 0);
     try testing.expect(hasRow(tv, 19));
     try testing.expect(!hasRow(tv, 0));
+}
+
+/// Test caller for the expansion/activation handlers. In `lazy` mode it behaves
+/// like an app model owning expansion: it flips `expanded`, loads children the
+/// first time a branch opens, and bumps `data_rev` — all from inside the handler.
+const ExpansionRecorder = struct {
+    expands: std.array_list.Managed(usize),
+    collapses: std.array_list.Managed(usize),
+    activates: std.array_list.Managed(usize),
+    lazy: bool = false,
+    roots: ?*std.array_list.Managed(TreeNode) = null,
+    data_rev: ?*signals.Signal(u32) = null,
+
+    fn init(a: std.mem.Allocator) ExpansionRecorder {
+        return .{
+            .expands = std.array_list.Managed(usize).init(a),
+            .collapses = std.array_list.Managed(usize).init(a),
+            .activates = std.array_list.Managed(usize).init(a),
+        };
+    }
+    fn deinit(self: *ExpansionRecorder) void {
+        self.expands.deinit();
+        self.collapses.deinit();
+        self.activates.deinit();
+    }
+    fn apply(self: *ExpansionRecorder, id: usize, expand: bool) void {
+        if (!self.lazy) return;
+        const list = self.roots.?;
+        const node = TreeView.findNode(list, id).?;
+        node.expanded = expand;
+        if (expand and node.children.items.len == 0) {
+            node.children.append(leaf(list.allocator, id * 10 + 1, "lazy1")) catch unreachable;
+            node.children.append(leaf(list.allocator, id * 10 + 2, "lazy2")) catch unreachable;
+        }
+        self.data_rev.?.set(self.data_rev.?.peek() + 1);
+    }
+    fn onExpand(p: ?*anyopaque, id: usize) void {
+        const self: *ExpansionRecorder = @ptrCast(@alignCast(p.?));
+        self.expands.append(id) catch unreachable;
+        self.apply(id, true);
+    }
+    fn onCollapse(p: ?*anyopaque, id: usize) void {
+        const self: *ExpansionRecorder = @ptrCast(@alignCast(p.?));
+        self.collapses.append(id) catch unreachable;
+        self.apply(id, false);
+    }
+    fn onActivate(p: ?*anyopaque, id: usize) void {
+        const self: *ExpansionRecorder = @ptrCast(@alignCast(p.?));
+        self.activates.append(id) catch unreachable;
+    }
+    fn expandH(self: *ExpansionRecorder) NodeIdHandler {
+        return .{ .ptr = self, .call = onExpand };
+    }
+    fn collapseH(self: *ExpansionRecorder) NodeIdHandler {
+        return .{ .ptr = self, .call = onCollapse };
+    }
+    fn activateH(self: *ExpansionRecorder) NodeIdHandler {
+        return .{ .ptr = self, .call = onActivate };
+    }
+};
+
+fn keyDown(router: *events.EventRouter, root: reg.NodeId, key: events.Key) void {
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = root, .key_code = key.code() });
+}
+
+test "TreeView controlled_expansion: gestures only request; the widget leaves expanded alone" {
+    const a = testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    var router = events.EventRouter.init(a);
+    defer router.deinit();
+
+    var roots = std.array_list.Managed(TreeNode).init(a);
+    defer {
+        for (roots.items) |*n| deinitNode(n);
+        roots.deinit();
+    }
+    try roots.append(branchNode(a, 1, "closed", false));
+    var open_br = branchNode(a, 2, "open", true);
+    try open_br.children.append(leaf(a, 3, "x.zig"));
+    try roots.append(open_br);
+
+    var rec = ExpansionRecorder.init(a);
+    defer rec.deinit();
+    var mounts = component.MountTable.init(a);
+    defer mounts.deinit();
+    registry.addNodeRemovedListener(&mounts, component.MountTable.nodeRemovedListener);
+
+    var b = component.UIBuilder.init(&registry, &store);
+    var ctx = component.BuildContext{ .builder = &b, .router = &router, .mounts = &mounts };
+    _ = try b.openNodeKeyed(.box, null);
+    try ctx.mountOwned(TreeView, .{
+        .roots = &roots,
+        .controlled_expansion = true,
+        .on_expand = rec.expandH(),
+        .on_collapse = rec.collapseH(),
+    });
+    b.close();
+    const anchor = registry.getNode(0).?.first_child;
+    const tv: *TreeView = @ptrCast(@alignCast(mounts.get(anchor).?.component_ptr));
+    try testing.expectEqual(@as(usize, 3), tv.row_map.items.len);
+
+    // Caret click on the collapsed branch → on_expand(1), nothing changes.
+    _ = router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 1).caret });
+    try testing.expectEqualSlices(usize, &.{1}, rec.expands.items);
+    try testing.expect(!roots.items[0].expanded);
+    try testing.expectEqual(@as(usize, 3), tv.row_map.items.len);
+
+    // Caret click on the expanded branch → on_collapse(2).
+    _ = router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 2).caret });
+    try testing.expectEqualSlices(usize, &.{2}, rec.collapses.items);
+    try testing.expect(roots.items[1].expanded);
+
+    // Row click (toggle_on_row_click default) → selects + requests.
+    _ = router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 1).row });
+    try testing.expectEqual(@as(?usize, 1), tv.selectedNode());
+    try testing.expectEqualSlices(usize, &.{ 1, 1 }, rec.expands.items);
+    try testing.expect(!roots.items[0].expanded);
+
+    // → and Enter on the collapsed branch 1 → on_expand(1) twice more.
+    keyDown(&router, tv.root_id, .right);
+    keyDown(&router, tv.root_id, .enter);
+    try testing.expectEqualSlices(usize, &.{ 1, 1, 1, 1 }, rec.expands.items);
+    try testing.expect(!roots.items[0].expanded);
+
+    // ← and Enter on the expanded branch 2 → on_collapse(2) twice more.
+    tv.selSig().set(2);
+    keyDown(&router, tv.root_id, .left);
+    keyDown(&router, tv.root_id, .enter);
+    try testing.expectEqualSlices(usize, &.{ 2, 2, 2 }, rec.collapses.items);
+    try testing.expect(roots.items[1].expanded);
+    try testing.expectEqual(@as(usize, 3), tv.row_map.items.len);
+}
+
+test "TreeView controlled_expansion: caller fills a branch lazily + bumps data_rev; rows appear, selection kept" {
+    const a = testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    var router = events.EventRouter.init(a);
+    defer router.deinit();
+
+    var roots = std.array_list.Managed(TreeNode).init(a);
+    defer {
+        for (roots.items) |*n| deinitNode(n);
+        roots.deinit();
+    }
+    try roots.append(branchNode(a, 1, "lazy_dir", false)); // no children yet
+    try roots.append(leaf(a, 2, "readme"));
+
+    var data_rev = signals.Signal(u32).init(a, 0);
+    defer data_rev.deinit();
+    var rec = ExpansionRecorder.init(a);
+    defer rec.deinit();
+    rec.lazy = true;
+    rec.roots = &roots;
+    rec.data_rev = &data_rev;
+    var mounts = component.MountTable.init(a);
+    defer mounts.deinit();
+    registry.addNodeRemovedListener(&mounts, component.MountTable.nodeRemovedListener);
+
+    var b = component.UIBuilder.init(&registry, &store);
+    var ctx = component.BuildContext{ .builder = &b, .router = &router, .mounts = &mounts };
+    _ = try b.openNodeKeyed(.box, null);
+    try ctx.mountOwned(TreeView, .{
+        .roots = &roots,
+        .data_rev = &data_rev,
+        .controlled_expansion = true,
+        .on_expand = rec.expandH(),
+        .on_collapse = rec.collapseH(),
+    });
+    b.close();
+    const anchor = registry.getNode(0).?.first_child;
+    const tv: *TreeView = @ptrCast(@alignCast(mounts.get(anchor).?.component_ptr));
+    try testing.expectEqual(@as(usize, 2), tv.row_map.items.len);
+
+    // Caret click: the model expands branch 1, loads 2 children, bumps data_rev.
+    _ = router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 1).caret });
+    try testing.expectEqual(@as(usize, 4), tv.row_map.items.len);
+    try testing.expect(hasRow(tv, 11) and hasRow(tv, 12));
+
+    // Select a lazily-loaded child, then collapse the parent: selection survives.
+    _ = router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 12).row });
+    try testing.expectEqual(@as(?usize, 12), tv.selectedNode());
+    _ = router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 1).caret });
+    try testing.expectEqual(@as(usize, 2), tv.row_map.items.len);
+    try testing.expectEqual(@as(?usize, 12), tv.selectedNode()); // id still in roots
+
+    // Re-expand by keyboard: children not reloaded, selection kept and painted.
+    tv.selSig().set(1);
+    keyDown(&router, tv.root_id, .right);
+    try testing.expectEqual(@as(usize, 4), tv.row_map.items.len);
+    try testing.expectEqual(@as(usize, 2), roots.items[0].children.items.len);
+    try testing.expectEqual(@as(?usize, 1), tv.selectedNode());
+    try testing.expectApproxEqAbs(@as(f32, 0.35), store.getStyle(rowFor(tv, 1).row, .background).?.color.a, 0.001);
+}
+
+test "TreeView uncontrolled: expand/collapse handlers fire and expanded still toggles" {
+    const a = testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    var router = events.EventRouter.init(a);
+    defer router.deinit();
+
+    var roots = std.array_list.Managed(TreeNode).init(a);
+    defer {
+        for (roots.items) |*n| deinitNode(n);
+        roots.deinit();
+    }
+    var br = branchNode(a, 1, "src", false);
+    try br.children.append(leaf(a, 2, "a.zig"));
+    try roots.append(br);
+
+    var rec = ExpansionRecorder.init(a);
+    defer rec.deinit();
+    var mounts = component.MountTable.init(a);
+    defer mounts.deinit();
+    registry.addNodeRemovedListener(&mounts, component.MountTable.nodeRemovedListener);
+
+    var b = component.UIBuilder.init(&registry, &store);
+    var ctx = component.BuildContext{ .builder = &b, .router = &router, .mounts = &mounts };
+    _ = try b.openNodeKeyed(.box, null);
+    try ctx.mountOwned(TreeView, .{ .roots = &roots, .on_expand = rec.expandH(), .on_collapse = rec.collapseH() });
+    b.close();
+    const anchor = registry.getNode(0).?.first_child;
+    const tv: *TreeView = @ptrCast(@alignCast(mounts.get(anchor).?.component_ptr));
+
+    _ = router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 1).caret });
+    try testing.expect(roots.items[0].expanded);
+    try testing.expectEqual(@as(usize, 2), tv.row_map.items.len);
+    try testing.expectEqualSlices(usize, &.{1}, rec.expands.items);
+
+    tv.selSig().set(1);
+    keyDown(&router, tv.root_id, .left);
+    try testing.expect(!roots.items[0].expanded);
+    try testing.expectEqual(@as(usize, 1), tv.row_map.items.len);
+    keyDown(&router, tv.root_id, .enter);
+    try testing.expect(roots.items[0].expanded);
+    try testing.expectEqualSlices(usize, &.{1}, rec.collapses.items);
+    try testing.expectEqualSlices(usize, &.{ 1, 1 }, rec.expands.items);
+}
+
+test "TreeView on_activate: double click and Enter on a leaf activate; a single click only selects" {
+    const a = testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    var router = events.EventRouter.init(a);
+    defer router.deinit();
+
+    var roots = std.array_list.Managed(TreeNode).init(a);
+    defer {
+        for (roots.items) |*n| deinitNode(n);
+        roots.deinit();
+    }
+    var br = branchNode(a, 1, "src", true);
+    try br.children.append(leaf(a, 2, "a.zig"));
+    try roots.append(br);
+    try roots.append(leaf(a, 3, "b.zig"));
+
+    var rec = ExpansionRecorder.init(a);
+    defer rec.deinit();
+    var mounts = component.MountTable.init(a);
+    defer mounts.deinit();
+    registry.addNodeRemovedListener(&mounts, component.MountTable.nodeRemovedListener);
+
+    var b = component.UIBuilder.init(&registry, &store);
+    var ctx = component.BuildContext{ .builder = &b, .router = &router, .mounts = &mounts };
+    _ = try b.openNodeKeyed(.box, null);
+    try ctx.mountOwned(TreeView, .{ .roots = &roots, .on_activate = rec.activateH(), .on_collapse = rec.collapseH() });
+    b.close();
+    const anchor = registry.getNode(0).?.first_child;
+    const tv: *TreeView = @ptrCast(@alignCast(mounts.get(anchor).?.component_ptr));
+
+    // Single click: selects, no activation.
+    _ = router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 3).row });
+    try testing.expectEqual(@as(?usize, 3), tv.selectedNode());
+    try testing.expectEqual(@as(usize, 0), rec.activates.items.len);
+
+    // Double click (the engine sends a click, then double_click).
+    _ = router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 2).row });
+    _ = router.route(.{ .name = "double_click", .id = "", .node_id = rowFor(tv, 2).row, .key_code = 2 });
+    try testing.expectEqualSlices(usize, &.{2}, rec.activates.items);
+
+    // Enter on the selected leaf activates it.
+    tv.selSig().set(3);
+    keyDown(&router, tv.root_id, .enter);
+    try testing.expectEqualSlices(usize, &.{ 2, 3 }, rec.activates.items);
+
+    // Enter on a branch keeps toggling and does not activate.
+    tv.selSig().set(1);
+    keyDown(&router, tv.root_id, .enter);
+    try testing.expectEqualSlices(usize, &.{ 2, 3 }, rec.activates.items);
+    try testing.expectEqualSlices(usize, &.{1}, rec.collapses.items);
+    try testing.expect(!roots.items[0].expanded);
 }
