@@ -9,6 +9,25 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Added
+
+- **`TreeView.on_expand` / `.on_collapse`** (`?events.Handler`) — fired for every
+  expand/collapse gesture (caret click, row click with `toggle_on_row_click`, ←/→,
+  Enter on a branch) as an event named `"expand"` / `"collapse"` carrying the node
+  id in `ev.item_id`.
+- **`TreeView.controlled_expansion`** (default `false`) — the widget no longer writes
+  `TreeNode.expanded`; it only fires the handlers, and the caller updates `roots`
+  (e.g. loading a folder's children lazily) and bumps `data_rev`, which this mode
+  requires (asserted in Debug builds). Selection, hover and scroll survive the
+  rebuild.
+- **`TreeView.on_activate`** (`?events.Handler`) — an `"activate"` event with the
+  node id in `ev.item_id`, fired on a double click on a row and on Enter on a leaf
+  (where Enter used to do nothing). Enter on a branch still toggles it.
+- **`events.Event.item_id: ?usize`** — the item a widget-level event refers to.
+  Framework-only; the C-ABI event and `CELERIS_ABI_VERSION` are unchanged.
+
 ## 0.1.11 — 2026-11-09
 
 ### Added

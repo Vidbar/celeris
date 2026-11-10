@@ -574,7 +574,7 @@ fn onRun(self: *MyApp, ev: fw.events.Event) void {
 
 No string action-id, no `router.on`.
 
-**Common widget handlers:** `on_click` (Button/IconButton), `on_change` (Checkbox/Radio/Slider/Dropdown, and **TextInput/TextArea**), `on_submit` (TextInput/TextArea, on Enter). For the text widgets `on_change` fires on **real text mutations only** — insert, delete, paste, cut, IME commit, undo and redo — with the new buffer contents in `ev.text` and the widget's root node id in `ev.node_id`; caret and selection moves never fire it. It's the hook for reactive text, e.g. a live search filter:
+**Common widget handlers:** `on_click` (Button/IconButton), `on_change` (Checkbox/Radio/Slider/Dropdown, and **TextInput/TextArea**), `on_submit` (TextInput/TextArea, on Enter), `on_expand`/`on_collapse`/`on_activate` (TreeView; the node id is in `ev.item_id`, see "TreeView expansion and activation events" under lifted state above). For the text widgets `on_change` fires on **real text mutations only** — insert, delete, paste, cut, IME commit, undo and redo — with the new buffer contents in `ev.text` and the widget's root node id in `ev.node_id`; caret and selection moves never fire it. It's the hook for reactive text, e.g. a live search filter:
 
 ```zig
 try ctx.mountOwned(fw.text_input.TextInput, .{
