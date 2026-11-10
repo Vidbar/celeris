@@ -372,7 +372,7 @@ For `TreeView` specifically, because selection lives in a caller-owned signal ke
 | ↑ / ↓ | Move the selection up/down across the visible rows (clamped at the ends; from no selection, ↓/↑ pick the first row). |
 | → | Expand a collapsed branch; if already expanded, step into its first child. |
 | ← | Collapse an expanded branch; otherwise step out to the parent. |
-| Enter | Activate/toggle the selected node — the same effect as clicking it. |
+| Enter | On a branch, toggle it. On a leaf, fire `on_activate` (see below). |
 
 Navigation drives the `.selected` signal, so it composes with the lifted-state recipe above: the caller observes selection changes identically whether they came from the mouse, the keyboard, or the caller's own `.set`.
 
@@ -380,6 +380,31 @@ Navigation drives the `.selected` signal, so it composes with the lifted-state r
 
 - The **caret** (the ▸/▾ disclosure triangle) always toggles expand/collapse and never touches the selection. The glyphs are overridable via `.caret_collapsed` / `.caret_expanded`, for a different look or a font that lacks them.
 - The **row body** always selects. By default it *also* toggles a branch (the classic file-tree gesture). Pass `.toggle_on_row_click = false` for the DevTools/IDE pattern where clicking a container only selects it — expanding stays available via the caret, ←/→, and Enter. This is the right setting for inspectors, where the most-inspected nodes are branches and collapsing on select is disruptive.
+
+**TreeView expansion and activation events.** Three optional `events.Handler` props (build them with `ctx.handler`). Each receives a synthesized event whose `ev.name` is `"expand"`, `"collapse"` or `"activate"` and whose `ev.item_id` is the `TreeNode.id`:
+
+- `.on_expand` / `.on_collapse` fire for every expand/collapse gesture: caret click, row click (when `toggle_on_row_click`), ←/→, and Enter on a branch.
+- `.on_activate` fires on a double click on a row and on Enter on a leaf. An IDE opens the file here. A single click only selects.
+
+**Controlled expansion (model owns `expanded`, lazy children).** Set `.controlled_expansion = true` when an app model decides which folders are open. The widget then never writes `TreeNode.expanded`; it only fires `on_expand`/`on_collapse`. The handler updates `roots` (e.g. loads a folder's children the first time it opens) and bumps `data_rev`, which is required in this mode (asserted). Selection, hover and scroll survive that rebuild like any data refresh.
+
+```zig
+fn onExpand(self: *App, ev: fw.events.Event) void {
+    const node = self.model.find(ev.item_id.?);
+    if (!node.loaded) self.model.loadChildren(node); // fill roots lazily
+    node.expanded = true;
+    self.tree_rev.set(self.tree_rev.peek() + 1);
+}
+
+try ctx.mountOwned(fw.tree_view.TreeView, .{
+    .roots = &self.tree_roots,
+    .data_rev = &self.tree_rev,
+    .controlled_expansion = true,
+    .on_expand = ctx.handler(self, onExpand),
+    .on_collapse = ctx.handler(self, onCollapse),
+    .on_activate = ctx.handler(self, onOpenFile),
+});
+```
 
 **Recipe — scroll a tree to reveal the selected node (element picker + keyboard).** A `TreeView` doesn't know its container `ScrollView`; the bridge is a *shared* offset signal. Pass the same `Signal(f32)` as the ScrollView's `.offset` and the TreeView's `.scroll_offset`, and give the TreeView the viewport height. Whenever the selection changes — by keyboard nav, or by the caller's own `.selected.set(picked)` (the element-picker path) — the tree nudges the shared offset so the selected row stays inside the viewport (offsets are `<= 0`; a row above the window aligns its top, one below aligns its bottom; a row already visible doesn't move). A selection whose row isn't currently visible (an ancestor is collapsed) is left alone.
 

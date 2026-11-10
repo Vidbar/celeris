@@ -54,6 +54,10 @@ pub const Event = struct {
     /// confuses them with a pointer position.
     width: f32 = 0,
     height: f32 = 0,
+    /// Widget-level events that refer to an item of a data-driven widget (e.g.
+    /// TreeView "expand"/"collapse"/"activate") carry the caller's item id here.
+    /// Null for engine events. Framework-only: not part of the C-ABI event.
+    item_id: ?usize = null,
     /// char_input / IME composed text (UTF-8).
     text: []const u8 = "",
     /// Keyboard modifiers held during the event.

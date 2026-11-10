@@ -23,7 +23,9 @@
 //!     so writing either (by a click or by the caller) re-runs it.
 //!   • expand / collapse → structural but local: the click handler toggles the
 //!     node then partial-rebuilds the tree body via `UIBuilder.rootAt` — no
-//!     whole-tree rebuild. (`expanded` lives on the caller's TreeNode.)
+//!     whole-tree rebuild. (`expanded` lives on the caller's TreeNode.) Every
+//!     gesture also fires `on_expand`/`on_collapse`; with `controlled_expansion`
+//!     the widget only fires them and the caller applies the change via `data_rev`.
 //!   • data swap (caller) → bump `data_rev` → isolated re-run of build().
 //!
 //! **Virtualization** (active only when the scroll bridge from `ScrollView.offset`
@@ -65,16 +67,13 @@ pub const TreeNode = struct {
     children: std.array_list.Managed(TreeNode),
 };
 
-/// Typed callback carrying a tree node id (expand/collapse requests, activation).
-/// `ptr` is the caller's context, passed back verbatim.
-pub const NodeIdHandler = struct {
-    ptr: ?*anyopaque = null,
-    call: *const fn (ptr: ?*anyopaque, node_id: usize) void,
-
-    fn fire(self: NodeIdHandler, node_id: usize) void {
-        self.call(self.ptr, node_id);
-    }
-};
+/// Delivers a widget-level event (`name` = "expand" / "collapse" / "activate") to a
+/// caller `events.Handler`, with the tree node id in `Event.item_id` — the same
+/// synthesized-event shape as `Dialog`'s "close".
+fn fireItem(h: ?events.Handler, name: []const u8, node_id: usize) void {
+    const handler = h orelse return;
+    handler.call(handler.ptr, .{ .name = name, .id = "", .item_id = node_id });
+}
 
 const RowInfo = struct { node_id: usize, row: reg.NodeId, name: reg.NodeId, caret: reg.NodeId = reg.NULL_NODE };
 
@@ -138,21 +137,25 @@ pub const TreeView = struct {
     caret_expanded: []const u8 = "▾",
     /// Disclosure glyph for a collapsed branch (▸, U+25B8 by default).
     caret_collapsed: []const u8 = "▸",
-    /// Called with the branch id whenever a gesture asks to expand it (caret click,
-    /// row click when `toggle_on_row_click`, →, Enter). Fires in both modes.
-    on_expand: ?NodeIdHandler = null,
-    /// Called with the branch id whenever a gesture asks to collapse it (caret
-    /// click, row click when `toggle_on_row_click`, ←, Enter). Fires in both modes.
-    on_collapse: ?NodeIdHandler = null,
+    /// Fired (event name "expand", branch id in `ev.item_id`) whenever a gesture
+    /// asks to expand a branch: caret click, row click when `toggle_on_row_click`,
+    /// →, Enter. Fires in both modes; uncontrolled, after the rows are rebuilt.
+    on_expand: ?events.Handler = null,
+    /// Fired (event name "collapse", branch id in `ev.item_id`) for the same
+    /// gestures (← instead of →) when they ask to collapse a branch.
+    on_collapse: ?events.Handler = null,
     /// Controlled expansion: when true the widget never writes `TreeNode.expanded`;
     /// it only fires `on_expand`/`on_collapse`. The caller updates `roots` (e.g.
-    /// loading a branch's children lazily on first expand) and bumps `data_rev`;
-    /// selection/hover/scroll survive that rebuild like any data swap. False (the
+    /// loading a branch's children lazily on first expand) and bumps `data_rev` —
+    /// required in this mode, it is the only way the change reaches the widget.
+    /// Selection/hover/scroll survive that rebuild like any data swap. False (the
     /// default) keeps the widget toggling `expanded` itself.
     controlled_expansion: bool = false,
-    /// Called with the node id on a double click on a row, and on Enter on a leaf
-    /// (Enter on a branch keeps toggling). An IDE opens the file here.
-    on_activate: ?NodeIdHandler = null,
+    /// Fired (event name "activate", node id in `ev.item_id`) on a double click on
+    /// a row and on Enter on a leaf (Enter on a branch keeps toggling). An IDE
+    /// opens the file here. A double click on a branch row with
+    /// `toggle_on_row_click` also toggles it twice (once per click), net unchanged.
+    on_activate: ?events.Handler = null,
 
     // State (auto-created in onMount; preserved across rebuilds). The internal
     // selection/hover signals are the fallback when the caller passes none.
@@ -420,7 +423,7 @@ pub const TreeView = struct {
                 const id = sel.peek() orelse return;
                 const node = findNode(list, id) orelse return;
                 if (node.node_type == .leaf) {
-                    if (self.on_activate) |h| h.fire(id);
+                    fireItem(self.on_activate, "activate", id);
                 } else self.toggleNode(node);
             },
             else => {},
@@ -458,7 +461,7 @@ pub const TreeView = struct {
             }
         } else if (std.mem.eql(u8, ev.name, "double_click")) {
             if (on_caret) return; // rapid caret clicks are disclosure, not activation
-            if (self.on_activate) |h| h.fire(id);
+            fireItem(self.on_activate, "activate", id);
         } else if (std.mem.eql(u8, ev.name, "mouse_enter")) {
             const hov = self.hovSig();
             if (hov.peek() == null or hov.peek().? != id) hov.set(id);
@@ -494,8 +497,7 @@ pub const TreeView = struct {
             node.expanded = expand;
             self.rebuildBody();
         }
-        const h = if (expand) self.on_expand else self.on_collapse;
-        if (h) |handler| handler.fire(id);
+        if (expand) fireItem(self.on_expand, "expand", id) else fireItem(self.on_collapse, "collapse", id);
     }
 
     pub fn build(self: *TreeView, ctx: *component.BuildContext) !void {
@@ -503,6 +505,9 @@ pub const TreeView = struct {
         self.store = b.store;
         self.router = ctx.router;
         self.theme = b.theme;
+        // Controlled expansion reaches the widget only through a `data_rev` bump;
+        // without it every expand/collapse would be silently dropped.
+        std.debug.assert(!self.controlled_expansion or self.data_rev != null);
 
         // Subscribe the build-effect to caller data swaps; a bump re-runs this
         // build in isolation. On a swap, keep selection/hover if their id still
@@ -1702,28 +1707,29 @@ const ExpansionRecorder = struct {
         }
         self.data_rev.?.set(self.data_rev.?.peek() + 1);
     }
-    fn onExpand(p: ?*anyopaque, id: usize) void {
-        const self: *ExpansionRecorder = @ptrCast(@alignCast(p.?));
-        self.expands.append(id) catch unreachable;
-        self.apply(id, true);
+    fn onExpand(self: *ExpansionRecorder, ev: events.Event) void {
+        std.debug.assert(std.mem.eql(u8, ev.name, "expand"));
+        self.expands.append(ev.item_id.?) catch unreachable;
+        self.apply(ev.item_id.?, true);
     }
-    fn onCollapse(p: ?*anyopaque, id: usize) void {
-        const self: *ExpansionRecorder = @ptrCast(@alignCast(p.?));
-        self.collapses.append(id) catch unreachable;
-        self.apply(id, false);
+    fn onCollapse(self: *ExpansionRecorder, ev: events.Event) void {
+        std.debug.assert(std.mem.eql(u8, ev.name, "collapse"));
+        self.collapses.append(ev.item_id.?) catch unreachable;
+        self.apply(ev.item_id.?, false);
     }
-    fn onActivate(p: ?*anyopaque, id: usize) void {
-        const self: *ExpansionRecorder = @ptrCast(@alignCast(p.?));
-        self.activates.append(id) catch unreachable;
+    fn onActivate(self: *ExpansionRecorder, ev: events.Event) void {
+        std.debug.assert(std.mem.eql(u8, ev.name, "activate"));
+        self.activates.append(ev.item_id.?) catch unreachable;
     }
-    fn expandH(self: *ExpansionRecorder) NodeIdHandler {
-        return .{ .ptr = self, .call = onExpand };
+    // Built exactly as an app would: `ctx.handler(payload, f)`.
+    fn expandH(self: *ExpansionRecorder, ctx: *component.BuildContext) events.Handler {
+        return ctx.handler(self, onExpand);
     }
-    fn collapseH(self: *ExpansionRecorder) NodeIdHandler {
-        return .{ .ptr = self, .call = onCollapse };
+    fn collapseH(self: *ExpansionRecorder, ctx: *component.BuildContext) events.Handler {
+        return ctx.handler(self, onCollapse);
     }
-    fn activateH(self: *ExpansionRecorder) NodeIdHandler {
-        return .{ .ptr = self, .call = onActivate };
+    fn activateH(self: *ExpansionRecorder, ctx: *component.BuildContext) events.Handler {
+        return ctx.handler(self, onActivate);
     }
 };
 
@@ -1751,6 +1757,9 @@ test "TreeView controlled_expansion: gestures only request; the widget leaves ex
     try open_br.children.append(leaf(a, 3, "x.zig"));
     try roots.append(open_br);
 
+    // Recorder does not bump it (non-lazy): the requests are observed only.
+    var data_rev = signals.Signal(u32).init(a, 0);
+    defer data_rev.deinit();
     var rec = ExpansionRecorder.init(a);
     defer rec.deinit();
     var mounts = component.MountTable.init(a);
@@ -1762,9 +1771,10 @@ test "TreeView controlled_expansion: gestures only request; the widget leaves ex
     _ = try b.openNodeKeyed(.box, null);
     try ctx.mountOwned(TreeView, .{
         .roots = &roots,
+        .data_rev = &data_rev,
         .controlled_expansion = true,
-        .on_expand = rec.expandH(),
-        .on_collapse = rec.collapseH(),
+        .on_expand = rec.expandH(&ctx),
+        .on_collapse = rec.collapseH(&ctx),
     });
     b.close();
     const anchor = registry.getNode(0).?.first_child;
@@ -1839,8 +1849,8 @@ test "TreeView controlled_expansion: caller fills a branch lazily + bumps data_r
         .roots = &roots,
         .data_rev = &data_rev,
         .controlled_expansion = true,
-        .on_expand = rec.expandH(),
-        .on_collapse = rec.collapseH(),
+        .on_expand = rec.expandH(&ctx),
+        .on_collapse = rec.collapseH(&ctx),
     });
     b.close();
     const anchor = registry.getNode(0).?.first_child;
@@ -1896,7 +1906,7 @@ test "TreeView uncontrolled: expand/collapse handlers fire and expanded still to
     var b = component.UIBuilder.init(&registry, &store);
     var ctx = component.BuildContext{ .builder = &b, .router = &router, .mounts = &mounts };
     _ = try b.openNodeKeyed(.box, null);
-    try ctx.mountOwned(TreeView, .{ .roots = &roots, .on_expand = rec.expandH(), .on_collapse = rec.collapseH() });
+    try ctx.mountOwned(TreeView, .{ .roots = &roots, .on_expand = rec.expandH(&ctx), .on_collapse = rec.collapseH(&ctx) });
     b.close();
     const anchor = registry.getNode(0).?.first_child;
     const tv: *TreeView = @ptrCast(@alignCast(mounts.get(anchor).?.component_ptr));
@@ -1945,7 +1955,7 @@ test "TreeView on_activate: double click and Enter on a leaf activate; a single 
     var b = component.UIBuilder.init(&registry, &store);
     var ctx = component.BuildContext{ .builder = &b, .router = &router, .mounts = &mounts };
     _ = try b.openNodeKeyed(.box, null);
-    try ctx.mountOwned(TreeView, .{ .roots = &roots, .on_activate = rec.activateH(), .on_collapse = rec.collapseH() });
+    try ctx.mountOwned(TreeView, .{ .roots = &roots, .on_activate = rec.activateH(&ctx), .on_collapse = rec.collapseH(&ctx) });
     b.close();
     const anchor = registry.getNode(0).?.first_child;
     const tv: *TreeView = @ptrCast(@alignCast(mounts.get(anchor).?.component_ptr));
