@@ -9,6 +9,12 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Added
+
+- `icons.files` (Codicon U+EAF0, the Explorer icon from the VS Code activity bar).
+
 ## 0.1.12 — 2026-11-10
 
 ### Added

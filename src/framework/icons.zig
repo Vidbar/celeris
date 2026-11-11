@@ -67,6 +67,7 @@ pub const ellipsis = cp(0xEA7C);
 pub const file = cp(0xEA7B);
 pub const folder = cp(0xEA83);
 pub const folder_opened = cp(0xEAF7);
+pub const files = cp(0xEAF0);
 pub const settings_gear = cp(0xEB51);
 pub const account = cp(0xEB99);
 pub const bell = cp(0xEAA2);
