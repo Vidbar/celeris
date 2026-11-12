@@ -575,18 +575,73 @@ pub const LayoutEngine = struct {
             // Flex Grow / Shrink
             var remaining = main_avail - line_main_size;
             if (remaining > 0 and total_flex_grow > 0) {
+                // Resolve the grown sizes the CSS way (§9.7): hand out the free
+                // space by grow factor, clamp each item to its min/max, freeze the
+                // ones that hit a limit and redistribute what they gave up or took
+                // among the rest. Without the clamp a `flex-basis: 0` item with a
+                // `min-width` grew to its share and ignored its minimum.
+                const GROW_MAX = 256; // like shrink's MAX_FLEX: bounded stack per frame
+                var g_base: [GROW_MAX]f32 = undefined;
+                var g_target: [GROW_MAX]f32 = undefined;
+                var g_frozen: [GROW_MAX]bool = undefined;
+                const n_items = @min(line_count, GROW_MAX);
+                {
+                    var k: usize = 0;
+                    while (k < n_items) : (k += 1) {
+                        const cid = flow_children.get(current_idx + k);
+                        const child = self.registry.getNode(cid).?;
+                        g_base[k] = if (is_row) child.geometry.width else child.geometry.height;
+                        g_target[k] = g_base[k];
+                        g_frozen[k] = self.getFlexGrow(cid) <= 0;
+                    }
+                }
+                var pass: usize = 0;
+                while (pass <= n_items) : (pass += 1) {
+                    var free = remaining;
+                    var sum_g: f32 = 0;
+                    var k: usize = 0;
+                    while (k < n_items) : (k += 1) {
+                        if (g_frozen[k]) {
+                            free -= g_target[k] - g_base[k];
+                        } else {
+                            sum_g += self.getFlexGrow(flow_children.get(current_idx + k));
+                        }
+                    }
+                    if (sum_g <= 0) break;
+                    var any_clamped = false;
+                    k = 0;
+                    while (k < n_items) : (k += 1) if (!g_frozen[k]) {
+                        const cid = flow_children.get(current_idx + k);
+                        const raw = g_base[k] + (self.getFlexGrow(cid) / sum_g) * @max(free, 0);
+                        var t = raw;
+                        if (self.getMaxDim(cid, if (is_row) .max_width else .max_height, main_avail)) |mx| t = @min(t, mx);
+                        if (self.getMinDim(cid, if (is_row) .min_width else .min_height, main_avail)) |mn| t = @max(t, mn);
+                        g_target[k] = t;
+                        if (t != raw) {
+                            g_frozen[k] = true;
+                            any_clamped = true;
+                        }
+                    };
+                    if (!any_clamped) break;
+                }
+
                 line_main_size = 0;
                 var j = current_idx;
                 while (j < current_idx + line_count) {
                     const cid = flow_children.get(j);
                     const child = self.registry.getNode(cid).?;
-                    const fg = self.getFlexGrow(cid);
-                    const extra = (fg / total_flex_grow) * remaining;
-
+                    const k = j - current_idx;
+                    // Past GROW_MAX items (a pathological line) fall back to the
+                    // plain unclamped share.
+                    const grown = if (k < n_items)
+                        g_target[k]
+                    else
+                        (if (is_row) child.geometry.width else child.geometry.height) +
+                            (self.getFlexGrow(cid) / total_flex_grow) * remaining;
                     if (is_row) {
-                        child.geometry.width += extra;
+                        child.geometry.width = grown;
                     } else {
-                        child.geometry.height += extra;
+                        child.geometry.height = grown;
                     }
                     child.measured_gen = self.gen; // grown → must be re-placed
 
@@ -3605,4 +3660,34 @@ test "Box model — 100% height in a content-sized parent stays finite" {
     e.solve(root, 0, 0, 200, std.math.floatMax(f32));
     try std.testing.expect(std.math.isFinite(r.getNode(child).?.geometry.height));
     try std.testing.expect(std.math.isFinite(r.getNode(root).?.geometry.height));
+}
+
+test "Flexbox — grow respects min/max and hands the difference to the other items (CSS 9.7)" {
+    var r = reg.UIRegistry.init(std.testing.allocator);
+    defer r.deinit();
+    var s = props.PropertyStore.init(std.testing.allocator);
+    defer s.deinit();
+
+    // 1000px row, three basis-0 items growing 1:1:2. Plain shares: 250 / 250 / 500.
+    const row = try boxModelNode(&r, &s, null);
+    try s.setLayout(row, .width, pxv(1000));
+    try s.setLayout(row, .height, pxv(50));
+    try s.setLayout(row, .flex_direction, .{ .keyword = .row });
+    var kids: [3]reg.NodeId = undefined;
+    const grows = [_]f32{ 1, 1, 2 };
+    for (&kids, grows) |*k, g| {
+        k.* = try boxModelNode(&r, &s, row);
+        try s.setLayout(k.*, .flex_basis, pxv(0));
+        try s.setLayout(k.*, .flex_grow, .{ .number = g });
+    }
+    try s.setLayout(kids[0], .min_width, pxv(400)); // share 250 < 400 → frozen at 400
+    try s.setLayout(kids[2], .max_width, pxv(300)); // share would exceed 300 → frozen at 300
+
+    var e = LayoutEngine.init(&r, &s, null);
+    e.solve(row, 0, 0, 1000, 50);
+    try std.testing.expectApproxEqAbs(@as(f32, 400), r.getNode(kids[0]).?.geometry.width, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 300), r.getNode(kids[2]).?.geometry.width, 0.01);
+    // The middle item takes everything left; the line still fills exactly 1000.
+    try std.testing.expectApproxEqAbs(@as(f32, 300), r.getNode(kids[1]).?.geometry.width, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 700), r.getNode(kids[2]).?.geometry.x, 0.01);
 }

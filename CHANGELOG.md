@@ -27,6 +27,21 @@ listed here as well.
 - Absolute children resolve `%` sizes and `left` / `top` against the parent's
   padding box (inside the border), as in CSS; before, they used the border box.
 
+- Flex grow now honors `min-*` / `max-*` (CSS 9.7): an item that hits a limit
+  freezes there and the rest of the free space goes to the other items. Before,
+  a growing item ignored its `min-width`/`max-width` (only shrink clamped).
+
+### Added
+
+- `SplitPane`: per-pane `PaneCfg` (`.left` / `.right`) with a px `min`,
+  VS Code-style snap-collapse (`collapsible`, `collapse_threshold`,
+  `collapsed_size`) and a lifted two-way `collapsed: ?*Signal(bool)`. The drag
+  policy is the pure, public `split_pane.resolveDrag`. See *SplitPane sizing* in
+  FRAMEWORK_API.md.
+- `SplitPane`: a `sash_color` with alpha 0 stays invisible on hover (no state
+  layer) while still taking hover and drags.
+- `examples/dashboard.zig`: collapsible side bar plus a "Side Bar" toolbar toggle.
+
 ### Fixed
 
 - Changing a border (`borderWidth` or a side) at runtime now relayouts; it was

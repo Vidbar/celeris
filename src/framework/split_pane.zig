@@ -20,6 +20,13 @@
 //! `stretch` skips any child that declares the cross dimension, so the panes and the
 //! sash must leave it unset. The sash is `sash_thickness` px of `sash_color`
 //! (default `theme.border_color`), lightened by an M3 state layer on hover.
+//!
+//! Each pane has a `PaneCfg` (`.left` / `.right`): a px `min`, an optional
+//! VS Code-style snap-collapse (`collapsible`, `collapse_threshold`,
+//! `collapsed_size`) and a lifted `collapsed: ?*Signal(bool)`. The drag policy is
+//! the pure `resolveDrag`; `updateVisuals` turns ratio + collapsed state into
+//! flex_grow / flex_basis / min-size on the panes, so the layout engine — not the
+//! drag — enforces the minimums (window resizes included).
 
 const std = @import("std");
 const component = @import("component.zig");
@@ -34,8 +41,90 @@ const Theme = theme_mod.Theme;
 
 pub const Orientation = enum { horizontal, vertical };
 
+/// Without a `min` on a side, a drag still keeps that pane at least this fraction.
 const MIN_RATIO: f32 = 0.05;
 const MAX_RATIO: f32 = 0.95;
+
+/// Once a pane snapped shut, the pointer must pass the threshold by this many px
+/// before it reopens, so a pointer resting on the threshold doesn't flicker.
+pub const RESTORE_HYSTERESIS: f32 = 4;
+
+/// Per-pane sizing rules. `left` / `right` name the first / second pane, which are
+/// top / bottom when `orientation = .vertical` (same as `left_child`/`right_child`).
+pub const PaneCfg = struct {
+    /// Smallest size in px while the pane is open, on the main axis. A drag stops
+    /// there, and the layout keeps it there when the window shrinks. 0 = no minimum.
+    min: f32 = 0,
+    /// Lets a drag snap the pane shut (VS Code's side-bar behavior): past `min` the
+    /// pane stays at `min` until the pointer crosses `collapse_threshold`, then it
+    /// collapses to `collapsed_size`; dragging back over the threshold reopens it
+    /// at `min`.
+    collapsible: bool = false,
+    /// Pointer distance in px from this pane's outer edge below which it collapses.
+    /// Default `min / 2`.
+    collapse_threshold: ?f32 = null,
+    /// Size in px while collapsed — e.g. 48 to keep an activity bar showing. 0 hides it.
+    collapsed_size: f32 = 0,
+    /// Optional caller-owned collapsed state (two-way, like `ratio`): a drag writes
+    /// it, and setting it from a command collapses or reopens the pane. Reopening
+    /// returns to the last open `ratio`. Omit it and the widget keeps its own.
+    /// Works whether or not `collapsible` is set — that only gates the drag snap.
+    collapsed: ?*signals.Signal(bool) = null,
+
+    pub fn threshold(self: PaneCfg) f32 {
+        return self.collapse_threshold orelse self.min / 2;
+    }
+};
+
+/// Input to `resolveDrag`, along the main axis.
+pub const DragState = struct {
+    /// Pointer offset from the container's start edge, px.
+    pos: f32,
+    /// Container size, px.
+    total: f32,
+    left_collapsed: bool = false,
+    right_collapsed: bool = false,
+};
+
+pub const DragResult = struct {
+    /// New split ratio, or null when a pane is collapsed: the open ratio is kept so
+    /// reopening returns to it.
+    ratio: ?f32,
+    left_collapsed: bool,
+    right_collapsed: bool,
+};
+
+/// The whole sash-drag policy as a pure function: min clamp, snap-collapse with
+/// hysteresis, reopen at min. When both minimums can't fit, the left one wins; at
+/// most one pane is collapsed at a time (the one that already was, else the left).
+pub fn resolveDrag(left: PaneCfg, right: PaneCfg, s: DragState) DragResult {
+    if (!(s.total > 0)) return .{ .ratio = null, .left_collapsed = s.left_collapsed, .right_collapsed = s.right_collapsed };
+    const pos = std.math.clamp(s.pos, 0, s.total);
+    const far = s.total - pos; // pointer distance from the right pane's outer edge
+
+    var lc = s.left_collapsed;
+    var rc = s.right_collapsed;
+    if (left.collapsible) {
+        const t = left.threshold();
+        if (!lc and pos < t) lc = true else if (lc and pos > t + RESTORE_HYSTERESIS) lc = false;
+    }
+    if (right.collapsible) {
+        const t = right.threshold();
+        if (!rc and far < t) rc = true else if (rc and far > t + RESTORE_HYSTERESIS) rc = false;
+    }
+    if (lc and rc) {
+        if (s.right_collapsed and !s.left_collapsed) lc = false else rc = false;
+    }
+    if (lc or rc) return .{ .ratio = null, .left_collapsed = lc, .right_collapsed = rc };
+
+    // Right minimum first, then left: if they overlap, the left one wins.
+    var p = @min(pos, s.total - right.min);
+    p = @max(p, left.min);
+    var r = p / s.total;
+    if (left.min <= 0) r = @max(r, MIN_RATIO);
+    if (right.min <= 0) r = @min(r, MAX_RATIO);
+    return .{ .ratio = std.math.clamp(r, 0, 1), .left_collapsed = false, .right_collapsed = false };
+}
 
 pub const SplitPane = struct {
     // Props (set from mountOwned's init_props; re-applied on rebuild).
@@ -43,21 +132,30 @@ pub const SplitPane = struct {
     right_child: component.Child = undefined,
     orientation: Orientation = .horizontal,
     initial_ratio: f32 = 0.25,
-    /// Optional caller-owned split ratio (two-way, left fraction in [0.05, 0.95]).
-    /// The widget reads it to size the panes and writes it while dragging the sash;
-    /// the caller can set/animate it to open/collapse a pane. Omit to use the
-    /// internal `left_ratio` seeded from `initial_ratio`.
+    /// Optional caller-owned split ratio (two-way, left fraction in [0, 1]). The
+    /// widget reads it to size the panes and writes it while dragging the sash; the
+    /// caller can set/animate it. Pane minimums still apply on top of it. While a
+    /// pane is collapsed the ratio is kept, not written. Omit to use the internal
+    /// `left_ratio` seeded from `initial_ratio`.
     ratio: ?*signals.Signal(f32) = null,
+    /// Sizing rules for the first / second pane: minimum, snap-collapse, collapsed
+    /// size and collapsed state. See `PaneCfg`.
+    left: PaneCfg = .{},
+    right: PaneCfg = .{},
     /// Sash thickness on the main axis, in px.
     sash_thickness: f32 = 4,
     /// Sash fill. Defaults to `theme.border_color`; an unset (transparent) token
     /// falls back to the built-in grey, same convention as StatusBar's dots. The
-    /// hover shade is an M3 state layer over whichever base ends up in effect.
+    /// hover shade is an M3 state layer over whichever base ends up in effect. A
+    /// fully transparent color (alpha 0) gets no hover layer either: the sash stays
+    /// invisible but still takes hover, the resize cursor and drags.
     sash_color: ?theme_mod.Color = null,
 
-    // State (auto-created in onMount; preserved across rebuilds). `left_ratio` is
-    // the fallback when the caller passes no `ratio` signal.
+    // State (auto-created in onMount; preserved across rebuilds). `left_ratio` and
+    // the `*_collapsed_state` signals are the fallbacks when the caller passes none.
     left_ratio: signals.Signal(f32) = undefined,
+    left_collapsed_state: signals.Signal(bool) = undefined,
+    right_collapsed_state: signals.Signal(bool) = undefined,
     hovering: signals.Signal(bool) = undefined,
     scope: signals.Scope = undefined,
     dragging: bool = false, // plain: only gates the global move handler
@@ -74,6 +172,8 @@ pub const SplitPane = struct {
 
     pub fn onMount(self: *SplitPane, allocator: std.mem.Allocator) void {
         self.left_ratio = signals.Signal(f32).init(allocator, self.initial_ratio);
+        self.left_collapsed_state = signals.Signal(bool).init(allocator, false);
+        self.right_collapsed_state = signals.Signal(bool).init(allocator, false);
         self.hovering = signals.Signal(bool).init(allocator, false);
         self.scope = signals.Scope.init(allocator);
     }
@@ -81,12 +181,21 @@ pub const SplitPane = struct {
     pub fn deinit(self: *SplitPane) void {
         self.scope.deinit();
         self.left_ratio.deinit();
+        self.left_collapsed_state.deinit();
+        self.right_collapsed_state.deinit();
         self.hovering.deinit();
     }
 
     /// The active ratio signal: caller-owned if provided, else the internal one.
     fn ratioSig(self: *SplitPane) *signals.Signal(f32) {
         return self.ratio orelse &self.left_ratio;
+    }
+    /// The active collapsed signals: caller-owned if provided, else internal.
+    fn leftCollapsedSig(self: *SplitPane) *signals.Signal(bool) {
+        return self.left.collapsed orelse &self.left_collapsed_state;
+    }
+    fn rightCollapsedSig(self: *SplitPane) *signals.Signal(bool) {
+        return self.right.collapsed orelse &self.right_collapsed_state;
     }
 
     fn onSashDown(self: *SplitPane, ev: events.Event) void {
@@ -111,17 +220,20 @@ pub const SplitPane = struct {
         const registry = store.registry orelse return;
         if (self.container_id == reg.NULL_NODE) return;
         const c = registry.getNode(self.container_id) orelse return;
-        const ratio = switch (self.orientation) {
-            .horizontal => blk: {
-                if (c.geometry.width <= 0) return;
-                break :blk (x - c.geometry.x) / c.geometry.width;
-            },
-            .vertical => blk: {
-                if (c.geometry.height <= 0) return;
-                break :blk (y - c.geometry.y) / c.geometry.height;
-            },
+        const g = c.geometry;
+        const st: DragState = switch (self.orientation) {
+            .horizontal => .{ .pos = x - g.x, .total = g.width },
+            .vertical => .{ .pos = y - g.y, .total = g.height },
         };
-        self.ratioSig().set(std.math.clamp(ratio, MIN_RATIO, MAX_RATIO));
+        const res = resolveDrag(self.left, self.right, .{
+            .pos = st.pos,
+            .total = st.total,
+            .left_collapsed = self.leftCollapsedSig().peek(),
+            .right_collapsed = self.rightCollapsedSig().peek(),
+        });
+        if (res.ratio) |r| self.ratioSig().set(r);
+        self.leftCollapsedSig().set(res.left_collapsed);
+        self.rightCollapsedSig().set(res.right_collapsed);
     }
 
     pub fn build(self: *SplitPane, ctx: *BuildContext) !void {
@@ -186,11 +298,25 @@ pub const SplitPane = struct {
         const store = self.store orelse return;
         if (self.left_pane_id == reg.NULL_NODE) return;
         const ratio = self.ratioSig().get();
-        store.setLayout(self.left_pane_id, .flex_grow, .{ .number = ratio }) catch {};
-        store.setLayout(self.right_pane_id, .flex_grow, .{ .number = 1.0 - ratio }) catch {};
+        const lc = self.leftCollapsedSig().get();
+        const rc = self.rightCollapsedSig().get();
+        // A collapsed pane is a fixed `collapsed_size` (grow 0) and the other takes
+        // the rest; open panes split by ratio, floored at their `min` by the layout
+        // itself (so a shrinking window can't push them under it either).
+        if (lc) {
+            self.sizePane(store, self.left_pane_id, 0, self.left.collapsed_size, 0);
+            self.sizePane(store, self.right_pane_id, 1, 0, self.right.min);
+        } else if (rc) {
+            self.sizePane(store, self.left_pane_id, 1, 0, self.left.min);
+            self.sizePane(store, self.right_pane_id, 0, self.right.collapsed_size, 0);
+        } else {
+            self.sizePane(store, self.left_pane_id, ratio, 0, self.left.min);
+            self.sizePane(store, self.right_pane_id, 1.0 - ratio, 0, self.right.min);
+        }
 
         const base = self.sashBase();
-        const fill = if (self.hovering.get())
+        // A transparent sash stays invisible on hover too (no state layer).
+        const fill = if (self.hovering.get() and base.a > 0)
             Theme.stateLayer(base, if (self.theme.is_dark)
                 theme_mod.Color{ .r = 255, .g = 255, .b = 255 }
             else
@@ -198,6 +324,13 @@ pub const SplitPane = struct {
         else
             base;
         store.setStyle(self.sash_id, .background, props.PropValue.rgbA(fill.r, fill.g, fill.b, @as(f32, @floatFromInt(fill.a)) / 255.0)) catch {};
+    }
+
+    fn sizePane(self: *const SplitPane, store: *props.PropertyStore, id: reg.NodeId, grow: f32, basis: f32, min: f32) void {
+        const min_key: props.LayoutKey = if (self.orientation == .horizontal) .min_width else .min_height;
+        store.setLayout(id, .flex_grow, .{ .number = grow }) catch {};
+        store.setLayout(id, .flex_basis, .{ .dimension = .{ .value = basis, .unit = .px } }) catch {};
+        store.setLayout(id, min_key, .{ .dimension = .{ .value = min, .unit = .px } }) catch {};
     }
 
     /// Explicit override → theme border → built-in grey (for an unset token).
@@ -407,4 +540,229 @@ test "SplitPane removes its global handler on unmount" {
     try b.rootAt(root);
     b.close(); // reconcile the SplitPane anchor away → onUnmount
     try testing.expectEqual(@as(usize, 0), router.global_handlers.items.len);
+}
+
+// ── Minimum size and snap-collapse ────────────────────────────────────────────
+
+test "resolveDrag: min clamp, collapse past the threshold, hysteresis, reopen at min" {
+    const side = PaneCfg{ .min = 200, .collapsible = true, .collapsed_size = 48 }; // threshold 100
+    const none = PaneCfg{};
+    const Case = struct { pos: f32, lc_in: bool, ratio: ?f32, lc: bool };
+    const cases = [_]Case{
+        .{ .pos = 500, .lc_in = false, .ratio = 0.5, .lc = false }, // free drag
+        .{ .pos = 150, .lc_in = false, .ratio = 0.2, .lc = false }, // held at min
+        .{ .pos = 100, .lc_in = false, .ratio = 0.2, .lc = false }, // exactly at threshold: still open
+        .{ .pos = 99, .lc_in = false, .ratio = null, .lc = true }, // past it: collapse, ratio kept
+        .{ .pos = 0, .lc_in = true, .ratio = null, .lc = true },
+        .{ .pos = 104, .lc_in = true, .ratio = null, .lc = true }, // inside the hysteresis band
+        .{ .pos = 105, .lc_in = true, .ratio = 0.2, .lc = false }, // reopened at min, not at pos
+        .{ .pos = 700, .lc_in = true, .ratio = 0.7, .lc = false }, // a big jump reopens at pos
+    };
+    for (cases) |c| {
+        const res = resolveDrag(side, none, .{ .pos = c.pos, .total = 1000, .left_collapsed = c.lc_in });
+        try testing.expectEqual(c.lc, res.left_collapsed);
+        try testing.expect(!res.right_collapsed);
+        if (c.ratio) |r| try testing.expectApproxEqAbs(r, res.ratio.?, 0.0001) else try testing.expectEqual(@as(?f32, null), res.ratio);
+    }
+}
+
+test "resolveDrag: the right pane mirrors the left, measured from its own edge" {
+    const side = PaneCfg{ .min = 150, .collapsible = true, .collapse_threshold = 60 };
+    const none = PaneCfg{};
+    // 1000px: right min 150 → ratio never above 0.85.
+    try testing.expectApproxEqAbs(@as(f32, 0.85), resolveDrag(none, side, .{ .pos = 900, .total = 1000 }).ratio.?, 0.0001);
+    const shut = resolveDrag(none, side, .{ .pos = 950, .total = 1000 }); // 50 from the edge < 60
+    try testing.expect(shut.right_collapsed);
+    try testing.expectEqual(@as(?f32, null), shut.ratio);
+    try testing.expect(resolveDrag(none, side, .{ .pos = 937, .total = 1000, .right_collapsed = true }).right_collapsed); // 63 ≤ 64
+    const back = resolveDrag(none, side, .{ .pos = 930, .total = 1000, .right_collapsed = true });
+    try testing.expect(!back.right_collapsed);
+    try testing.expectApproxEqAbs(@as(f32, 0.85), back.ratio.?, 0.0001);
+}
+
+test "resolveDrag: edge cases — no mins keeps the old 5%..95% clamp, overlapping mins favor left, one collapse at a time" {
+    const none = PaneCfg{};
+    try testing.expectApproxEqAbs(MIN_RATIO, resolveDrag(none, none, .{ .pos = 0, .total = 1000 }).ratio.?, 0.0001);
+    try testing.expectApproxEqAbs(MAX_RATIO, resolveDrag(none, none, .{ .pos = 1000, .total = 1000 }).ratio.?, 0.0001);
+    // 600 + 600 > 1000: the left minimum wins.
+    const big = PaneCfg{ .min = 600 };
+    try testing.expectApproxEqAbs(@as(f32, 0.6), resolveDrag(big, big, .{ .pos = 500, .total = 1000 }).ratio.?, 0.0001);
+    // Both collapsible and the pointer past both thresholds (tiny container): only one shuts.
+    const c = PaneCfg{ .min = 100, .collapsible = true };
+    const res = resolveDrag(c, c, .{ .pos = 20, .total = 60 });
+    try testing.expect(res.left_collapsed != res.right_collapsed);
+    // Zero-size container: nothing changes.
+    const z = resolveDrag(c, c, .{ .pos = 0, .total = 0, .left_collapsed = true });
+    try testing.expect(z.left_collapsed and z.ratio == null);
+}
+
+test "SplitPane: PaneCfg takes a plain nested literal in mountOwned props" {
+    var h = Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+    var l = StubPane{};
+    var r = StubPane{};
+    var b = component.UIBuilder.init(&h.registry, &h.store);
+    var ctx = BuildContext{ .builder = &b, .router = &h.router, .mounts = &h.mounts };
+    _ = try b.openNodeKeyed(.box, null);
+    try ctx.mountOwned(SplitPane, .{
+        .left_child = component.childOf(StubPane, &l),
+        .right_child = component.childOf(StubPane, &r),
+        .left = .{ .min = 180, .collapsible = true }, // no `PaneCfg{` spelled out
+    });
+    b.close();
+    const anchor = h.registry.getNode(0).?.first_child;
+    const sp: *SplitPane = @ptrCast(@alignCast(h.mounts.get(anchor).?.component_ptr));
+    try testing.expectApproxEqAbs(@as(f32, 180), sp.left.min, 0.0001);
+    try testing.expect(sp.left.collapsible);
+    try testing.expectApproxEqAbs(@as(f32, 0), sp.left.collapsed_size, 0.0001); // default kept
+}
+
+const Harness = @import("test_support.zig").Harness;
+
+/// screen (fixed size) > SplitPane(.fill); returns the widget.
+fn mountSplit(h: *Harness, w: f32, hgt: f32, init_props: anytype) !*SplitPane {
+    const S = struct {
+        var l = StubPane{};
+        var r = StubPane{};
+    };
+    var b = component.UIBuilder.init(&h.registry, &h.store);
+    var ctx = BuildContext{ .builder = &b, .router = &h.router, .mounts = &h.mounts };
+    const screen = try b.openNodeKeyed(.box, null);
+    try b.width(screen, w, .px);
+    try b.height(screen, hgt, .px);
+    var p = init_props;
+    p.fill = true;
+    p.left_child = component.childOf(StubPane, &S.l);
+    p.right_child = component.childOf(StubPane, &S.r);
+    try ctx.mountOwned(SplitPane, p);
+    b.close();
+    const anchor = h.registry.getNode(screen).?.first_child;
+    return @ptrCast(@alignCast(h.mounts.get(anchor).?.component_ptr));
+}
+
+const TestProps = struct {
+    fill: bool = true,
+    left_child: component.Child = undefined,
+    right_child: component.Child = undefined,
+    orientation: Orientation = .horizontal,
+    initial_ratio: f32 = 0.25,
+    ratio: ?*signals.Signal(f32) = null,
+    left: PaneCfg = .{},
+    right: PaneCfg = .{},
+    sash_color: ?theme_mod.Color = null,
+};
+
+fn dragTo(h: *Harness, sp: *SplitPane, x: f32, y: f32) void {
+    h.route(.{ .name = "mouse_down", .id = "", .node_id = sp.sash_id });
+    h.route(.{ .name = "mouse_move", .id = "", .x = x, .y = y });
+    h.route(.{ .name = "mouse_up", .id = "" });
+    h.solve(0, 1000, 600);
+}
+
+test "SplitPane (horizontal): left pane holds its min, collapses past the threshold, reopens at min — in solved geometry" {
+    var h = Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+    const sp = try mountSplit(&h, 1000, 600, TestProps{
+        .initial_ratio = 0.3,
+        .left = .{ .min = 200, .collapsible = true, .collapsed_size = 48 },
+    });
+    h.solve(0, 1000, 600);
+    // ratio × (1000 - 4px sash)
+    try testing.expectApproxEqAbs(@as(f32, 298.8), h.geom(sp.left_pane_id).width, 0.1);
+
+    dragTo(&h, sp, 150, 10); // under the 200px minimum
+    try testing.expectApproxEqAbs(@as(f32, 200), h.geom(sp.left_pane_id).width, 0.1);
+    try testing.expect(!sp.left_collapsed_state.peek());
+
+    dragTo(&h, sp, 90, 10); // past the 100px threshold → collapsed to 48px
+    try testing.expect(sp.left_collapsed_state.peek());
+    try testing.expectApproxEqAbs(@as(f32, 48), h.geom(sp.left_pane_id).width, 0.1);
+    try testing.expectApproxEqAbs(@as(f32, 48), h.geom(sp.sash_id).x, 0.1); // sash moved to that edge
+    try testing.expectApproxEqAbs(@as(f32, 1000 - 48 - 4), h.geom(sp.right_pane_id).width, 0.1);
+
+    dragTo(&h, sp, 120, 10); // back over the threshold → reopens at its minimum
+    try testing.expect(!sp.left_collapsed_state.peek());
+    try testing.expectApproxEqAbs(@as(f32, 200), h.geom(sp.left_pane_id).width, 0.1);
+}
+
+test "SplitPane (vertical): bottom pane holds its min, collapses to 0, reopens — in solved geometry" {
+    var h = Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+    const sp = try mountSplit(&h, 1000, 600, TestProps{
+        .orientation = .vertical,
+        .initial_ratio = 0.5,
+        .right = .{ .min = 150, .collapsible = true }, // threshold 75, collapsed_size 0
+    });
+    h.solve(0, 1000, 600);
+    try testing.expectApproxEqAbs(@as(f32, 298), h.geom(sp.right_pane_id).height, 0.1);
+
+    dragTo(&h, sp, 10, 500); // 100px from the bottom: held at 150
+    try testing.expectApproxEqAbs(@as(f32, 150), h.geom(sp.right_pane_id).height, 0.1);
+    try testing.expectApproxEqAbs(@as(f32, 600 - 150 - 4), h.geom(sp.left_pane_id).height, 0.1);
+
+    dragTo(&h, sp, 10, 540); // 60px from the bottom < 75 → collapsed
+    try testing.expect(sp.right_collapsed_state.peek());
+    try testing.expectApproxEqAbs(@as(f32, 0), h.geom(sp.right_pane_id).height, 0.1);
+    try testing.expectApproxEqAbs(@as(f32, 596), h.geom(sp.left_pane_id).height, 0.1);
+
+    dragTo(&h, sp, 10, 515); // 85px from the bottom → reopened at 150
+    try testing.expect(!sp.right_collapsed_state.peek());
+    try testing.expectApproxEqAbs(@as(f32, 150), h.geom(sp.right_pane_id).height, 0.1);
+}
+
+test "SplitPane: a caller-owned collapsed signal collapses and reopens from a command, back to the last ratio" {
+    var collapsed = signals.Signal(bool).init(testing.allocator, false);
+    defer collapsed.deinit();
+    var h = Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+    const sp = try mountSplit(&h, 1000, 600, TestProps{
+        .initial_ratio = 0.4,
+        .left = .{ .min = 200, .collapsible = true, .collapsed_size = 48, .collapsed = &collapsed },
+    });
+    h.solve(0, 1000, 600);
+    try testing.expectApproxEqAbs(@as(f32, 398.4), h.geom(sp.left_pane_id).width, 0.1);
+
+    collapsed.set(true); // e.g. "Toggle Side Bar"
+    h.solve(0, 1000, 600);
+    try testing.expectApproxEqAbs(@as(f32, 48), h.geom(sp.left_pane_id).width, 0.1);
+
+    collapsed.set(false);
+    h.solve(0, 1000, 600);
+    try testing.expectApproxEqAbs(@as(f32, 398.4), h.geom(sp.left_pane_id).width, 0.1);
+
+    // And a drag writes the caller's signal.
+    dragTo(&h, sp, 30, 10);
+    try testing.expect(collapsed.peek());
+}
+
+test "SplitPane: the layout keeps a pane's minimum when the window shrinks" {
+    var h = Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+    const sp = try mountSplit(&h, 1000, 600, TestProps{ .initial_ratio = 0.25, .left = .{ .min = 240 } });
+    h.solve(0, 1000, 600);
+    try testing.expectApproxEqAbs(@as(f32, 249), h.geom(sp.left_pane_id).width, 0.1);
+    h.registry.getNode(0).?.geometry = .{};
+    try h.store.setLayout(0, .width, .{ .dimension = .{ .value = 600, .unit = .px } });
+    h.solve(0, 600, 600);
+    // 25% of 596 would be 149: the pane stays at 240 and the right pane takes the rest.
+    try testing.expectApproxEqAbs(@as(f32, 240), h.geom(sp.left_pane_id).width, 0.1);
+    try testing.expectApproxEqAbs(@as(f32, 600 - 240 - 4), h.geom(sp.right_pane_id).width, 0.1);
+}
+
+test "SplitPane: a transparent sash stays invisible on hover but still drags" {
+    var h = Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+    const sp = try mountSplit(&h, 1000, 600, TestProps{ .sash_color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } });
+    h.solve(0, 1000, 600);
+    h.route(.{ .name = "mouse_enter", .id = "", .node_id = sp.sash_id });
+    try testing.expect(sp.hovering.peek());
+    try testing.expectApproxEqAbs(@as(f32, 0), h.store.getStyle(sp.sash_id, .background).?.color.a, 0.0001);
+    dragTo(&h, sp, 500, 10);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), sp.left_ratio.peek(), 0.001);
 }

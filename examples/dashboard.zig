@@ -489,6 +489,9 @@ const DashboardApp = struct {
     components_tab: ComponentsTab,
     /// Dialog demo state (caller-owned control signal + body content).
     dialog_open: fw.signals.Signal(bool),
+    /// Side-bar collapsed state, lifted out of the SplitPane: a drag past its
+    /// threshold writes it, and the "Side Bar" toolbar button toggles it.
+    sidebar_collapsed: fw.signals.Signal(bool),
     dialog_body: DialogBody,
     /// Context-menu demo: a plain, app-owned Menu (not mountOwned — same pattern
     /// the framework's own Menu tests use), popped up from a button handler.
@@ -536,6 +539,7 @@ const DashboardApp = struct {
 
         self.left_pane = .{ .app = self };
         self.dialog_open = fw.signals.Signal(bool).init(allocator, false);
+        self.sidebar_collapsed = fw.signals.Signal(bool).init(allocator, false);
         self.dialog_body = .{};
         self.ctx_menu = try fw.menu.Menu.init(allocator, "components_ctx_menu");
         try self.ctx_menu.addItem("Cut", "cut");
@@ -565,6 +569,13 @@ const DashboardApp = struct {
         // Buttons — no router.on / action-id strings.
 
         return self;
+    }
+
+    /// "Side Bar" (typed on_click): collapses / reopens the tree pane by writing
+    /// the SplitPane's lifted `collapsed` signal — no widget pointer needed.
+    fn onToggleSidebar(self: *DashboardApp, ev: fw.events.Event) void {
+        _ = ev;
+        self.sidebar_collapsed.set(!self.sidebar_collapsed.peek());
     }
 
     /// "Add Folder" (typed on_click): picks a folder off the UI thread.
@@ -706,6 +717,7 @@ const DashboardApp = struct {
     pub fn deinit(self: *DashboardApp) void {
         self.ctx_menu.deinit();
         self.dialog_open.deinit();
+        self.sidebar_collapsed.deinit();
         self.rev.deinit();
         self.router.deinit();
         for (self.tree_roots.items) |*n| deinitTreeNode(n);
@@ -775,6 +787,17 @@ const DashboardApp = struct {
             .on_click = ctx.handler(self, onRunAgent),
         });
         b.close();
+        const tb_side = try b.openBox();
+        try b.flexRow(tb_side);
+        try b.marginRight(tb_side, 8);
+        try ctx.mountOwned(fw.button.Button, .{
+            .hug = true,
+            .key = "toggle_sidebar",
+            .label = "Side Bar",
+            .background = theme_mod.Color{ .r = 60, .g = 60, .b = 63 },
+            .on_click = ctx.handler(self, onToggleSidebar),
+        });
+        b.close();
 
         // Flexible spacer pushes the search box to the right edge.
         const spacer = try b.openBox();
@@ -801,6 +824,10 @@ const DashboardApp = struct {
             .left_child = fw.component.childOf(LeftPaneWidget, &self.left_pane),
             .right_child = fw.component.childOf(RightPane, &self.right_pane),
             .orientation = .horizontal,
+            // VS Code-style side bar: stops at 180px, snaps shut when dragged past
+            // 90px, reopens at 180px; the toolbar toggles the same signal.
+            .left = .{ .min = 180, .collapsible = true, .collapsed = &self.sidebar_collapsed },
+            .right = .{ .min = 240 },
         });
         b.close(); // body
 

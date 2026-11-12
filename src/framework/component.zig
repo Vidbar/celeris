@@ -897,10 +897,14 @@ fn validateProps(comptime T: type, comptime IP: type) void {
 /// The bridge rebuilds the named struct field by field: fields the literal names are
 /// copied (each coercing on its own, so `.weight = .bold` still works), the rest take
 /// their declared defaults.
+///
+/// The same holds for a plain (non-optional) struct prop — e.g. SplitPane's
+/// `.left = .{ .min = 180 }` — because `init_props` is itself an anonymous literal,
+/// so its nested literals are already typed values that don't coerce either.
 fn assignProp(comptime FT: type, dst: *FT, value: anytype) void {
     const VT = @TypeOf(value);
-    if (comptime @typeInfo(FT) == .optional and VT != FT) {
-        const Inner = @typeInfo(FT).optional.child;
+    if (comptime VT != FT) {
+        const Inner = if (@typeInfo(FT) == .optional) @typeInfo(FT).optional.child else FT;
         if (comptime VT != Inner and @typeInfo(Inner) == .@"struct" and
             @typeInfo(VT) == .@"struct" and !@typeInfo(VT).@"struct".is_tuple)
         {

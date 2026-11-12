@@ -328,7 +328,8 @@ This is the same mechanism across the widget suite:
 |--------|-------------|------|-----|
 | `Tabs` | `.active` | `*Signal(usize)` | switch tabs from app code / know the active tab |
 | `TreeView` | `.selected`, `.hovered` | `*Signal(?usize)` | react to / drive selection & hover by node id |
-| `SplitPane` | `.ratio` | `*Signal(f32)` | set or animate the split (collapse/expand a pane) |
+| `SplitPane` | `.ratio` | `*Signal(f32)` | set or animate the split |
+| `SplitPane` | `.left.collapsed`, `.right.collapsed` | `*Signal(bool)` | collapse / reopen a pane from a command (see *SplitPane sizing*) |
 | `ScrollView` | `.offset` | `*Signal(f32)` | read/drive the scroll position (px, `<= 0`; 0 = top) |
 | `Scrollbar` | `.offset`, `.content_size`, `.viewport_size` | `*Signal(f32)` | standalone bar for a view that draws only its visible slice; same offset convention as `ScrollView` |
 
@@ -358,6 +359,57 @@ self.selected.set(picked_node_id);   // the tree repaints the highlight
 > the UI for that long. Same rule as `fw.dialogs`: run the blocking work on a
 > worker thread and marshal back with `application.postTask`, writing signals from
 > the posted task (writes from a posted task run on the UI thread and are safe).
+
+### SplitPane sizing: minimums and collapse
+
+Each pane takes a `fw.split_pane.PaneCfg` — `.left` is the first pane, `.right` the
+second (top / bottom when `orientation = .vertical`). All sizes are px on the
+main axis:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `min` | `0` | Smallest size while open. A drag stops there, and the layout keeps it when the window shrinks. Without a `min`, a drag keeps the pane at ≥ 5% as before. |
+| `collapsible` | `false` | Lets a drag snap the pane shut. |
+| `collapse_threshold` | `min / 2` | Pointer distance from the pane's outer edge below which it collapses. |
+| `collapsed_size` | `0` | Size while collapsed — e.g. the width of an activity bar that must stay visible. |
+| `collapsed` | `null` | Caller-owned `*Signal(bool)`, two-way. |
+
+Dragging works like VS Code's side bar: the pane shrinks to `min` and **stays
+there** while the pointer keeps going (the cushion); once the pointer passes the
+threshold it collapses to `collapsed_size` and the sash jumps to that edge;
+dragging back over the threshold (plus a 4px hysteresis band, so it doesn't
+flicker) reopens it **at `min`**. Setting `collapsed` from code reopens it at the
+**last open ratio** instead — the ratio isn't touched while a pane is collapsed.
+At most one pane is collapsed at a time; if both minimums don't fit, the first
+pane's wins.
+
+```zig
+// App struct: the state is yours (declare it before the mount table).
+sidebar_collapsed: fw.signals.Signal(bool),
+
+// build():
+try ctx.mountOwned(fw.split_pane.SplitPane, .{
+    .fill = true,
+    .left_child = fw.component.childOf(SideBar, &self.side_bar),
+    .right_child = fw.component.childOf(Editor, &self.editor),
+    .left = .{
+        .min = 170,
+        .collapsible = true,
+        .collapsed_size = 48, // keep the activity bar showing
+        .collapsed = &self.sidebar_collapsed,
+    },
+    .right = .{ .min = 300 },
+    .sash_color = .{ .r = 0, .g = 0, .b = 0, .a = 0 }, // invisible, still draggable
+});
+
+// A "Toggle Side Bar" command:
+self.sidebar_collapsed.set(!self.sidebar_collapsed.peek());
+```
+
+`sash_color` with alpha 0 makes the sash fully invisible, hover included (no
+state layer), while it keeps taking hover, the resize cursor and drags. The drag
+policy itself is the pure `fw.split_pane.resolveDrag`, if you need the same
+behavior in a custom splitter. See `examples/dashboard.zig` ("Side Bar" button).
 
 ### Native file dialogs (`fw.dialogs`)
 
