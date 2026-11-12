@@ -70,6 +70,14 @@ pub const AppOptions = struct {
     /// Draw the hairline under the `.custom` caption. Off when the app's own layout
     /// already separates the bar from the body.
     app_bar_divider: bool = true,
+    /// `.custom` caption content takes the whole drag area instead of sitting left of
+    /// a spacer, so it can center itself across the bar. See `WindowChrome.content_fill`.
+    app_bar_fill: bool = false,
+    /// `.custom` caption colors (ignored by `.classic`). Null keeps the theme roles (`surface_low`,
+    /// `text_secondary` glyphs / `text` hover layer, `border_color`).
+    app_bar_background: ?theme_mod.Color = null,
+    app_bar_foreground: ?theme_mod.Color = null,
+    app_bar_divider_color: ?theme_mod.Color = null,
     /// Accessible names of the caption buttons (minimize / maximize / restore /
     /// close). English by default; set these to localize what screen readers announce.
     window_control_labels: component.WindowControlLabels = .{},
@@ -165,6 +173,10 @@ pub const WindowHost = struct {
     bar_content: ?component.Child = null,
     bar_height: f32 = window_chrome.DEFAULT_HEIGHT,
     bar_divider: bool = true,
+    bar_fill: bool = false,
+    bar_background: ?theme_mod.Color = null,
+    bar_foreground: ?theme_mod.Color = null,
+    bar_divider_color: ?theme_mod.Color = null,
     bar_labels: component.WindowControlLabels = .{},
     outline: ?theme_mod.Color = null,
     outline_radius: f32 = 0,
@@ -351,6 +363,10 @@ pub const WindowHost = struct {
                     .content = self.bar_content,
                     .height = self.bar_height,
                     .divider = self.bar_divider,
+                    .content_fill = self.bar_fill,
+                    .background = self.bar_background,
+                    .foreground = self.bar_foreground,
+                    .divider_color = self.bar_divider_color,
                     .control_labels = self.bar_labels,
                     .context = @as(?*anyopaque, @ptrCast(self)),
                     .on_drag = onDrag,
@@ -492,6 +508,10 @@ pub const WindowOptions = struct {
     app_bar: ?component.Child = null,
     app_bar_height: f32 = window_chrome.DEFAULT_HEIGHT,
     app_bar_divider: bool = true,
+    app_bar_fill: bool = false,
+    app_bar_background: ?theme_mod.Color = null,
+    app_bar_foreground: ?theme_mod.Color = null,
+    app_bar_divider_color: ?theme_mod.Color = null,
     /// Accessible names of the caption buttons (minimize / maximize / restore /
     /// close). English by default; set these to localize what screen readers announce.
     window_control_labels: component.WindowControlLabels = .{},
@@ -821,6 +841,10 @@ pub const window = struct {
             .bar_content = options.app_bar,
             .bar_height = options.app_bar_height,
             .bar_divider = options.app_bar_divider,
+            .bar_fill = options.app_bar_fill,
+            .bar_background = options.app_bar_background,
+            .bar_foreground = options.app_bar_foreground,
+            .bar_divider_color = options.app_bar_divider_color,
             .bar_labels = options.window_control_labels,
             .outline = options.window_outline,
             .outline_radius = outlineRadius(options.window_corners),
@@ -1034,6 +1058,10 @@ pub fn runApp(app_instance: anytype, router: *events.EventRouter, options: AppOp
         .bar_content = options.app_bar,
         .bar_height = options.app_bar_height,
         .bar_divider = options.app_bar_divider,
+        .bar_fill = options.app_bar_fill,
+        .bar_background = options.app_bar_background,
+        .bar_foreground = options.app_bar_foreground,
+        .bar_divider_color = options.app_bar_divider_color,
         .bar_labels = options.window_control_labels,
         .outline = options.window_outline,
         .outline_radius = outlineRadius(options.window_corners),

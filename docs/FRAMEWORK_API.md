@@ -94,7 +94,7 @@ pub fn main() !void {
 
 ### `runApp` and `AppOptions`
 
-`fw.runApp(app_instance, router, options)` creates the window/engine and mounts `app_instance` reactively (via `mountReactiveFill`, so the app root fills the window). `AppOptions` fields: `.title`, `.width`, `.height`, `.theme` (a `Theme`, e.g. `Theme.fromSeed(color, .dark)`), `.fonts` (see below), `.hide_app_bar` (drop the default title bar), `.app_bar_style` / `.app_bar` / `.app_bar_height` / `.app_bar_divider` (a custom caption: put your own content in the window chrome, as `examples/titlebar_proto.zig` does), `.window_control_labels` (accessible names of the caption buttons, for localization), `.window_corners`, `.window_outline` and `.is_headless`.
+`fw.runApp(app_instance, router, options)` creates the window/engine and mounts `app_instance` reactively (via `mountReactiveFill`, so the app root fills the window). `AppOptions` fields: `.title`, `.width`, `.height`, `.theme` (a `Theme`, e.g. `Theme.fromSeed(color, .dark)`), `.fonts` (see below), `.hide_app_bar` (drop the default title bar), `.app_bar_style` / `.app_bar` / `.app_bar_height` / `.app_bar_divider` / `.app_bar_fill` / `.app_bar_background` / `.app_bar_foreground` / `.app_bar_divider_color` (a custom caption: put your own content in the window chrome, as `examples/titlebar_proto.zig` does), `.window_control_labels` (accessible names of the caption buttons, for localization), `.window_corners`, `.window_outline` and `.is_headless`.
 
 
 **Typography (`.fonts`).** An app can set the face its UI is drawn in, instead of
@@ -131,7 +131,19 @@ contents come from `.app_bar` — a `component.Child`, so either `component.slot
 or `component.childOf(T, &instance)` (`T` needs `pub fn build(self, ctx) !void` and
 `pub fn deinit(self) void`). Setting `.app_bar` implies `.custom`. Use
 `.app_bar_height` for a taller bar (default 32px), and `.app_bar_divider = false`
-to drop the bottom hairline. The framework draws no wordmark, logo or badge of its own —
+to drop the bottom hairline. `.app_bar_background`, `.app_bar_foreground` and
+`.app_bar_divider_color` (`?theme.Color`) tint this bar alone — null keeps the theme
+roles (`surface_low`, `text_secondary` glyphs, `border_color`), and the control hover
+layer is mixed from background + foreground the way it is from `surface_low` + `text`.
+The tokens' alpha is honored, so a translucent background lets what is behind show
+through. The close button's hover stays the theme's `danger` red whatever
+`foreground` is, so pick a foreground that still reads on red. These colors apply only
+to `.custom`; the classic bar ignores them (set `.app_bar_style = .custom` or
+`.app_bar`). `.app_bar_fill = true` drops the drag spacer and wraps the content in a
+box that takes the whole drag area. The wrapper centers vertically only: to center a
+title across the caption, make the content center itself (e.g. a box with
+`flexGrow(1)` and `justifyContent(.center)`). The wrapper sits inside the drag region,
+so the bar still drags. `WindowOptions` takes the same fields for secondary windows. The framework draws no wordmark, logo or badge of its own —
 that is app content. Full example: `examples/titlebar_proto.zig`.
 
 ```zig
@@ -139,6 +151,8 @@ var caption = MyCaption{};                     // caller-owned; must outlive run
 try fw.runApp(&app, &router, .{
     .app_bar = fw.component.childOf(MyCaption, &caption),
     .app_bar_height = 44,
+    .app_bar_fill = true,                      // content spans the drag area
+    .app_bar_background = .{ .r = 0x1f, .g = 0x1f, .b = 0x1f },
 });
 ```
 

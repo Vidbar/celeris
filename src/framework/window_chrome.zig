@@ -12,6 +12,11 @@
 //! A wordmark, a logo, tabs, a status pill — the framework has no opinion.
 //!
 //! Layout: [ …content… ][ ……drag spacer…… ][ _ ▢ ✕ ]
+//! With `content_fill`: [ ………content (fills the drag area)……… ][ _ ▢ ✕ ]
+//!
+//! Colors default to theme roles (`surface_low` / `text_secondary` / `border_color`);
+//! `background`, `foreground` and `divider_color` override them for this bar only,
+//! as explicit tokens, so an app can tint its caption without rewriting the theme.
 //!
 //! `runApp` mounts it for `app_bar_style = .custom`, forwarding `AppOptions.app_bar`
 //! as the content slot and `app_bar_height` as the height.
@@ -38,8 +43,21 @@ pub const WindowChrome = struct {
     /// Content built inside the draggable caption, before the spacer. Caller-owned:
     /// it must outlive the mount, and the chrome never deinits it.
     content: ?component.Child = null,
+    /// Wrap `content` in a box that takes the whole drag area (`flexGrow(1)`) instead
+    /// of placing it ahead of a spacer, so the content has the full caption width to
+    /// lay out in (e.g. to center a title). The wrapper only centers vertically;
+    /// horizontal placement is the content's. It sits inside the drag region, so it drags.
+    content_fill: bool = false,
     /// Draw the 1px bottom hairline separating the caption from the body.
     divider: bool = true,
+    /// Caption background. Null = theme `surface_low`.
+    background: ?theme_mod.Color = null,
+    /// Control glyph color, and the "on" color the hover state layer is mixed from.
+    /// Null = glyphs in theme `text_secondary`, hover layer from theme `text`.
+    /// The close button's hover stays the theme's `danger` color regardless.
+    foreground: ?theme_mod.Color = null,
+    /// Hairline color when `divider` is on. Null = theme `border_color`.
+    divider_color: ?theme_mod.Color = null,
     /// Accessible names of the caption buttons; override to localize.
     control_labels: component.WindowControlLabels = .{},
     on_close: ?*const fn (ctx: ?*anyopaque) void = null,
@@ -59,6 +77,8 @@ pub const WindowChrome = struct {
     // Captured during build().
     store: ?*props.PropertyStore = null,
     drag_area: reg.NodeId = reg.NULL_NODE,
+    /// The `content_fill` wrapper; NULL_NODE otherwise.
+    content_box: reg.NodeId = reg.NULL_NODE,
     min_btn: reg.NodeId = reg.NULL_NODE,
     max_btn: reg.NodeId = reg.NULL_NODE,
     close_btn: reg.NodeId = reg.NULL_NODE,
@@ -114,11 +134,11 @@ pub const WindowChrome = struct {
         try b.height(bar, self.height, .px);
         try b.flexRow(bar);
         try b.alignItems(bar, .center);
-        try b.background(bar, t.surface_low.r, t.surface_low.g, t.surface_low.b);
+        try b.backgroundOf(bar, self.background orelse t.surface_low);
         try b.role(bar, "app_bar");
         if (self.divider) {
             try b.borderBottom(bar, 1);
-            try b.borderColorOf(bar, t.border_color);
+            try b.borderColorOf(bar, self.divider_color orelse t.border_color);
         }
 
         // Close-hover background follows the theme's danger role.
@@ -136,13 +156,26 @@ pub const WindowChrome = struct {
         try wireHit(b, self.drag_area, true, false);
         if (ctx.router) |r| try r.onNode(self.drag_area, .mouse_down, ctx.handler(self, onDragDown));
 
-        if (self.content) |child| try child.build(ctx);
+        if (self.content_fill) {
+            // The slot may emit several nodes, so the fill is a wrapper the chrome
+            // owns rather than a style forced onto the app's own nodes.
+            self.content_box = try b.openNodeKeyed(.box, null);
+            try b.flexRow(self.content_box);
+            try b.flexGrow(self.content_box, 1);
+            try b.height(self.content_box, 100, .percent);
+            try b.alignItems(self.content_box, .center);
+            if (self.content) |child| try child.build(ctx);
+            b.close(); // content_box
+        } else {
+            self.content_box = reg.NULL_NODE;
+            if (self.content) |child| try child.build(ctx);
 
-        // Flexible drag spacer fills the remaining width.
-        const spacer = try b.openNodeKeyed(.box, null);
-        try b.flexGrow(spacer, 1);
-        try b.height(spacer, 100, .percent);
-        b.close(); // spacer
+            // Flexible drag spacer fills the remaining width.
+            const spacer = try b.openNodeKeyed(.box, null);
+            try b.flexGrow(spacer, 1);
+            try b.height(spacer, 100, .percent);
+            b.close(); // spacer
+        }
 
         b.close(); // drag_area
 
@@ -190,7 +223,7 @@ pub const WindowChrome = struct {
         }
         const glyph_txt = try b.addText(glyph);
         try b.fontSize(glyph_txt, 16);
-        try b.textColor(glyph_txt, b.theme.text_secondary.r, b.theme.text_secondary.g, b.theme.text_secondary.b);
+        try b.textColorOf(glyph_txt, self.foreground orelse b.theme.text_secondary);
         b.close();
         return btn;
     }
@@ -208,8 +241,8 @@ pub const WindowChrome = struct {
         const Theme = theme_mod.Theme;
         const t = self.theme;
         // Min/Max: M3 hover state layer over the bar's own surface.
-        const hl = Theme.stateLayer(t.surface_low, t.text, .hover);
-        const hl_bg = props.PropValue.rgbA(hl.r, hl.g, hl.b, 1.0);
+        const hl = Theme.stateLayer(self.background orelse t.surface_low, self.foreground orelse t.text, .hover);
+        const hl_bg = props.PropValue.rgbA(hl.r, hl.g, hl.b, @as(f32, @floatFromInt(hl.a)) / 255.0);
         const transparent_bg = props.PropValue{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } };
         store.setStyle(self.min_btn, .background, if (self.hover_min.get()) hl_bg else transparent_bg) catch {};
         store.setStyle(self.max_btn, .background, if (self.hover_max.get()) hl_bg else transparent_bg) catch {};
@@ -381,4 +414,106 @@ test "WindowChrome: caption buttons expose English names by default and localize
         .close = "Cerrar",
     } });
     try testing.expectEqualStrings("Cerrar", store2.getModifier(es.close_btn, .label).?.string);
+}
+
+test "WindowChrome: background, foreground and divider_color override the theme roles" {
+    var h = @import("test_support.zig").Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+
+    // Translucent background: the token's alpha must reach the bar and the hover layer.
+    const bg = theme_mod.Color{ .r = 10, .g = 20, .b = 30, .a = 128 };
+    const fg = theme_mod.Color{ .r = 200, .g = 210, .b = 220 };
+    const dv = theme_mod.Color{ .r = 90, .g = 0, .b = 0 };
+    const bar = try mountChrome(&h.registry, &h.store, &h.router, &h.mounts, .{
+        .background = bg,
+        .foreground = fg,
+        .divider_color = dv,
+    });
+    const bar_node = h.registry.getNode(bar.drag_area).?.parent;
+    try expectColor(bg, h.store.getStyle(bar_node, .background).?);
+    try expectColor(dv, h.store.getStyle(bar_node, .border_color).?);
+    const glyph = h.registry.getNode(bar.min_btn).?.first_child;
+    try expectColor(fg, h.store.getStyle(glyph, .color).?);
+
+    // Hover layer is mixed from the overrides, not from surface_low / text.
+    h.route(.{ .name = "mouse_enter", .id = "", .node_id = bar.min_btn });
+    try expectColor(theme_mod.Theme.stateLayer(bg, fg, .hover), h.store.getStyle(bar.min_btn, .background).?);
+}
+
+/// Asserts a stored color equals a theme token, alpha included.
+fn expectColor(c: theme_mod.Color, v: props.PropValue) !void {
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(c.r)) / 255.0, v.color.r, 0.002);
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(c.g)) / 255.0, v.color.g, 0.002);
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(c.b)) / 255.0, v.color.b, 0.002);
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(c.a)) / 255.0, v.color.a, 0.002);
+}
+
+test "WindowChrome: null color props keep the theme roles" {
+    var h = @import("test_support.zig").Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+
+    const t = theme_mod.Theme.dark(); // what mountChrome sets on the builder
+    const bar = try mountChrome(&h.registry, &h.store, &h.router, &h.mounts, .{});
+    const bar_node = h.registry.getNode(bar.drag_area).?.parent;
+    try expectColor(t.surface_low, h.store.getStyle(bar_node, .background).?);
+    try expectColor(t.border_color, h.store.getStyle(bar_node, .border_color).?);
+    const glyph = h.registry.getNode(bar.min_btn).?.first_child;
+    try expectColor(t.text_secondary, h.store.getStyle(glyph, .color).?);
+
+    h.route(.{ .name = "mouse_enter", .id = "", .node_id = bar.min_btn });
+    try expectColor(theme_mod.Theme.stateLayer(t.surface_low, t.text, .hover), h.store.getStyle(bar.min_btn, .background).?);
+}
+
+test "WindowChrome: content_fill makes the content as wide as the drag area" {
+    var h = @import("test_support.zig").Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+
+    const caption = .{component.Text{ .content = "Title" }};
+    const bar = try mountChrome(&h.registry, &h.store, &h.router, &h.mounts, .{
+        .content = component.slot(&caption),
+        .content_fill = true,
+    });
+    // No spacer: the wrapper is the drag area's only child, so it takes all of it,
+    // and it sits inside the drag region, so the caption still drags over it.
+    try testing.expectEqual(@as(usize, 1), captionChildCount(&h.registry, bar.drag_area));
+    try testing.expectEqual(bar.drag_area, h.registry.getNode(bar.content_box).?.parent);
+    h.solve(0, 800, 40);
+    const area = h.geom(bar.drag_area);
+    try testing.expect(area.width > 0);
+    try testing.expectApproxEqAbs(area.width, h.geom(bar.content_box).width, 0.5);
+}
+
+test "WindowChrome: with content_fill, a press on the content still drags the window" {
+    var h = @import("test_support.zig").Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+
+    const Holder = struct {
+        var dragged: u32 = 0;
+        fn onDrag(_: ?*anyopaque) void {
+            dragged += 1;
+        }
+    };
+    Holder.dragged = 0;
+
+    const caption = .{component.Text{ .content = "Title" }};
+    const bar = try mountChrome(&h.registry, &h.store, &h.router, &h.mounts, .{
+        .content = component.slot(&caption),
+        .content_fill = true,
+        .on_drag = Holder.onDrag,
+    });
+    // The engine's hit-test returns the topmost drawn node — the title text — and
+    // `c_api.hitAndDispatch` delivers mouse_down to every clickable node on its
+    // ancestor path. Mirror that walk: the fill wrapper must not break the path.
+    const title = h.registry.getNode(bar.content_box).?.first_child;
+    try testing.expect(title != reg.NULL_NODE);
+    var cur = title;
+    while (cur != reg.NULL_NODE) : (cur = h.registry.getNode(cur).?.parent) {
+        if (h.store.getModifier(cur, .clickable) != null)
+            h.route(.{ .name = "mouse_down", .id = "", .node_id = cur });
+    }
+    try testing.expectEqual(@as(u32, 1), Holder.dragged);
 }

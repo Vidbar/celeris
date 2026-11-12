@@ -9,6 +9,24 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Added
+
+- `WindowChrome.background` / `foreground` / `divider_color` (`?theme.Color`, null =
+  theme roles) and `AppOptions`/`WindowOptions.app_bar_background` /
+  `app_bar_foreground` / `app_bar_divider_color`: tint the custom caption without
+  overriding theme roles app-wide. The control hover layer mixes from them.
+- `WindowChrome.content_fill` / `app_bar_fill`: the caption content gets the whole
+  drag area (no spacer) and can center itself across the bar.
+
+### Changed
+
+- The custom caption (`WindowChrome`) now honors the alpha of the theme tokens it
+  paints with (`surface_low`, `text_secondary`, and the hover layer), where it used to
+  force them opaque. Built-in themes are opaque, so nothing changes for them; a custom
+  theme with translucent tokens there now renders the caption translucent.
+
 ## 0.1.13 — 2026-11-11
 
 ### Added
