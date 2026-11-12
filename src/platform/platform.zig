@@ -123,6 +123,11 @@ pub const PlatformWindow = struct {
         /// Optional: reports whether the window is currently maximized. Backends
         /// that don't implement it leave it null (treated as "not maximized").
         isMaximized: ?*const fn (ptr: *anyopaque) bool = null,
+        /// Optional: true while the compositor itself draws the window's left,
+        /// right and bottom edge in the outline color (Win32: DWM's frame border on
+        /// a resizable, restored window). The app's outline must then skip those
+        /// sides, or the edge reads 2px there and 1px on top. Null → false.
+        nativeSideEdges: ?*const fn (ptr: *anyopaque) bool = null,
         /// Sets the root UIA provider for this window. Win32 only.
         setUiaProvider: ?*const fn (ptr: *anyopaque, provider: *anyopaque) void = null,
         /// Moves and resizes the window in logical screen pixels. Backends that
@@ -166,6 +171,10 @@ pub const PlatformWindow = struct {
 
     pub fn isMaximized(self: *PlatformWindow) bool {
         return if (self.vtable.isMaximized) |f| f(self.ptr) else false;
+    }
+
+    pub fn nativeSideEdges(self: *PlatformWindow) bool {
+        return if (self.vtable.nativeSideEdges) |f| f(self.ptr) else false;
     }
 
     /// Moves/resizes the window (logical px). Also updates the cached logical size so

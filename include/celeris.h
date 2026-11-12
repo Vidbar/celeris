@@ -384,6 +384,10 @@ void celeris_window_maximize(int32_t engine_id);
 void celeris_window_minimize(int32_t engine_id);
 /* Returns 1 if the window is currently maximized, 0 otherwise. */
 int32_t celeris_window_is_maximized(int32_t engine_id);
+/* Returns 1 while the platform itself draws the window's left/right/bottom edge
+ * (Win32: DWM's frame border on a resizable, restored window), so an app-drawn
+ * outline should skip it; 0 otherwise. */
+int32_t celeris_window_native_side_edges(int32_t engine_id);
 /* Registers a callback fired when the OS changes a window's maximized state
  * without a button click (e.g. dragging a maximized window restores it). */
 void celeris_set_maximize_change_callback(void (*cb)(int32_t engine_id));

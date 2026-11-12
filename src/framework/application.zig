@@ -337,8 +337,18 @@ pub const WindowHost = struct {
         // and body sit inside the line instead of painting over it.
         if (self.outline) |oc| {
             try b.borderColorAlpha(root, oc.r, oc.g, oc.b, @as(f32, @floatFromInt(oc.a)) / 255.0);
-            try b.borderWidth(root, 1);
-            if (self.outline_radius > 0) try b.radius(root, self.outline_radius);
+            // Where the compositor already draws the edge (DWM's frame border on a
+            // resizable, restored Win32 window: 1px just outside the client on the
+            // left/right/bottom, and over the client's first row on top), a second
+            // line inside it would make the sides 2px. DWM's line *is* the outline
+            // there, so ours is skipped and the content runs to the client edge.
+            // DWM also clips the corners and strokes their curve, so the root stays
+            // square: a radius of ours would never match DWM's clip exactly, and
+            // the sliver between the two curves shows the swapchain clear color.
+            if (c_api.celeris_window_native_side_edges(self.engine_id) == 0) {
+                try b.borderWidth(root, 1);
+                if (self.outline_radius > 0) try b.radius(root, self.outline_radius);
+            }
         }
 
         var ctx = component.BuildContext.initWithRouter(b, self.router);

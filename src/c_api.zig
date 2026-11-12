@@ -959,6 +959,15 @@ pub export fn celeris_window_is_maximized(engine_id: i32) i32 {
     return 0;
 }
 
+/// Returns 1 while the platform draws the window's left/right/bottom edge itself
+/// (see `PlatformWindow.nativeSideEdges`), 0 otherwise (or on error).
+pub export fn celeris_window_native_side_edges(engine_id: i32) i32 {
+    if (getEngine(engine_id)) |engine| {
+        if (engine.window) |*w| return if (w.nativeSideEdges()) 1 else 0;
+    }
+    return 0;
+}
+
 /// Sets this window's focus-ring color (RGBA, 0..1), normally from its theme's
 /// `focus_ring` token. Per engine: two windows on different themes each draw their
 /// own ring, instead of the last one to build deciding for both.

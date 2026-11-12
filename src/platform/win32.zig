@@ -454,8 +454,21 @@ const SIZE = extern struct { cx: i32, cy: i32 };
 /// SM_CXPADDEDBORDER) — the invisible border a native window resizes from.
 fn resizeFrame(hwnd: HWND) i32 {
     const dpi = GetDpiForWindow(hwnd);
-    const d: UINT = if (dpi > 0) dpi else 96;
-    return GetSystemMetricsForDpi(32, d) + GetSystemMetricsForDpi(92, d);
+    return carvedFrame(if (dpi > 0) dpi else 96);
+}
+
+/// The non-client strip carved off the left, right and bottom at `dpi`: the system
+/// sizing frame minus a trim. DWM draws its 1px frame border right next to the
+/// client only while the carve stays within the frame's invisible part (measured:
+/// 2px short of SM_CXFRAME+SM_CXPADDEDBORDER at 96 dpi). Carving the full system
+/// frame leaves a 1px non-client column between that border and the client that
+/// nothing paints — it shows white. The trim scales with DPI, rounded up:
+/// over-trimming is harmless (the border still hugs the client; the outer grip is
+/// a pixel narrower), under-trimming brings the white column back.
+fn carvedFrame(dpi: UINT) i32 {
+    const sys = GetSystemMetricsForDpi(32, dpi) + GetSystemMetricsForDpi(92, dpi);
+    const trim: i32 = @intCast((2 * dpi + 95) / 96);
+    return @max(0, sys - trim);
 }
 
 /// The sizing frame WM_NCCALCSIZE keeps outside the client (left/right/bottom),
@@ -633,7 +646,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(WINAPI) LRESU
     } else if (msg == 0x02E4) { // WM_GETDPISCALEDSIZE
         // Sent before WM_DPICHANGED, still at the old DPI. Windows' default scales
         // the whole outer rect linearly, but the sizing frame isn't linear in DPI
-        // (8 px at 96, 11 at 144), so the client would drift by a few px. Scale
+        // (6 px at 96, 8 at 144), so the client would drift by a few px. Scale
         // the client instead and re-add the frame at the new DPI.
         const f_old = invisibleFrame(hwnd);
         if (f_old == 0) return 0; // no frame: the linear default is exact
@@ -643,7 +656,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(WINAPI) LRESU
         var cr: RECT = undefined;
         if (GetClientRect(hwnd, &cr) == .FALSE) return 0;
         const ratio = @as(f32, @floatFromInt(new_dpi)) / @as(f32, @floatFromInt(old_dpi));
-        const f_new = GetSystemMetricsForDpi(32, new_dpi) + GetSystemMetricsForDpi(92, new_dpi);
+        const f_new = carvedFrame(new_dpi);
         const size: *SIZE = @ptrFromInt(@as(usize, @bitCast(lp)));
         size.cx = @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(cr.right - cr.left)) * ratio))) + 2 * f_new;
         size.cy = @as(i32, @intFromFloat(@round(@as(f32, @floatFromInt(cr.bottom - cr.top)) * ratio))) + f_new;
@@ -763,6 +776,8 @@ pub const Win32Window = struct {
     /// Set once the engine has begun tearing this window down, so a WM_CLOSE
     /// arriving mid-teardown isn't handed back to the engine a second time.
     closing: bool = false,
+    /// DWM accepted the frame border color, so it draws the window edge itself.
+    dwm_border: bool = false,
 
     fn deinit(ptr: *anyopaque) void {
         const self: *Win32Window = @ptrCast(@alignCast(ptr));
@@ -820,6 +835,15 @@ pub const Win32Window = struct {
         const self: *Win32Window = @ptrCast(@alignCast(ptr));
         if (self.hwnd) |hwnd| return IsZoomed(hwnd) != 0;
         return false;
+    }
+
+    /// DWM draws the left/right/bottom edge (1px, in the border color) just outside
+    /// the client while the window is resizable and restored. The top has no frame:
+    /// there DWM's line lands on the client's first row, over whatever is drawn.
+    fn nativeSideEdges(ptr: *anyopaque) bool {
+        const self: *Win32Window = @ptrCast(@alignCast(ptr));
+        const hwnd = self.hwnd orelse return false;
+        return self.dwm_border and invisibleFrame(hwnd) > 0;
     }
 
     fn minimize(ptr: *anyopaque) void {
@@ -890,6 +914,7 @@ const vtable = platform.PlatformWindow.VTable{
     .maximize = Win32Window.maximize,
     .minimize = Win32Window.minimize,
     .isMaximized = Win32Window.isMaximized,
+    .nativeSideEdges = Win32Window.nativeSideEdges,
     .setUiaProvider = Win32Window.setUiaProvider,
     .setBounds = Win32Window.setBounds,
     .getBounds = Win32Window.getBounds,
@@ -961,7 +986,7 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
     // on top), so the window is the client plus that frame on three sides.
     const frame: i32 = if (config.resizable) blk: {
         const dpi: UINT = @intFromFloat(@round(scale * 96.0));
-        break :blk GetSystemMetricsForDpi(32, dpi) + GetSystemMetricsForDpi(92, dpi);
+        break :blk carvedFrame(dpi);
     } else 0;
 
     const win_w = phys_w + 2 * frame;
@@ -984,7 +1009,7 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
     // Corner rounding and frame border before the first paint, so the window never
     // flashes square or with a mismatched edge.
     applyCornerPreference(hwnd, config.corners);
-    _ = applyBorderColor(hwnd, config.border_color);
+    const dwm_border = config.border_color != null and applyBorderColor(hwnd, config.border_color);
 
     if (config.visible) {
         // A topmost overlay shows without activating; the primary window activates
@@ -1004,6 +1029,7 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
         .parent_hwnd = parent_hwnd,
         .modal = config.modal,
         .quit_on_close = config.quit_on_close,
+        .dwm_border = dwm_border,
     };
 
     _ = SetWindowLongPtrA(hwnd, GWLP_USERDATA, @bitCast(@as(usize, @intFromPtr(win32_win))));
