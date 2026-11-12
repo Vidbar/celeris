@@ -9,6 +9,28 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.1.15 — 2026-11-12
+
+### Fixed
+
+- Win32: a resizable window with `window_corners` rounded and a `window_outline`
+  showed a 1px white column between DWM's border and the content on the left, right
+  and bottom (the non-client carve was 1px wider than DWM's invisible frame). The
+  edge is now one continuous 1px line in the outline color on all four sides. While
+  DWM draws that border (resizable, restored window), the framework skips its own
+  outline and corner radius instead of doubling it; maximized windows get the
+  framework outline back. The resize grip still sits entirely outside the content.
+
+### Added
+
+- `celeris_window_native_side_edges(engine_id)` (and the optional
+  `PlatformWindow.nativeSideEdges` backend query): 1 while the platform draws the
+  window's left/right/bottom edge itself.
+- `examples/window_edge.zig` + `scripts/sample_window_edge.ps1`: manual check that
+  samples the four window edges and fails on any white pixel.
+
+No BREAKING changes. `CELERIS_ABI_VERSION` 7 (additive).
+
 ## 0.1.14 — 2026-11-11
 
 ### Added

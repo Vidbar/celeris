@@ -858,7 +858,7 @@ pub export fn celeris_last_error() [*:0]const u8 {
 /// v5 adds the CELERIS_EVENT_RESIZE event type; v6 adds the `line_height` style
 /// key and celeris_get_caret_metrics_ex / celeris_get_char_index_at_ex.
 pub export fn celeris_abi_version() u32 {
-    return 6;
+    return 7;
 }
 
 // ─── Diagnostics: zone profiler ────────────────────────────────────────────────
