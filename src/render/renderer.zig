@@ -203,15 +203,33 @@ pub const Clip = struct {
 /// 1px border always covers whole pixels, and two siblings that share an edge in
 /// layout still share it on screen (rounding widths instead would open or overlap
 /// a pixel between them). Layout stays fractional and DPI-agnostic; only painting
-/// and clipping snap. Every walker that turns geometry into pixels (the box bake,
-/// the text pass's clips) goes through here. Hit-testing keeps the layout box.
+/// and clipping snap. The box bake paints and clips with it; the text pass clips
+/// glyphs with `snapGeometryOut`. Hit-testing keeps the layout box.
 pub fn snapGeometry(g: reg.Geometry, scale: f32) reg.Geometry {
     const s: f32 = if (scale > 0) scale else 1;
-    const x0 = @round(g.x * s) / s;
-    const y0 = @round(g.y * s) / s;
-    const x1 = @round((g.x + g.width) * s) / s;
-    const y1 = @round((g.y + g.height) * s) / s;
-    return .{ .x = x0, .y = y0, .width = @max(x1 - x0, 0), .height = @max(y1 - y0, 0) };
+    const x0 = @round(g.x * s);
+    const y0 = @round(g.y * s);
+    var x1 = @round((g.x + g.width) * s);
+    var y1 = @round((g.y + g.height) * s);
+    // A box thinner than a device pixel must not vanish or appear depending on
+    // where it lands (a hairline divider flickering during a drag): a non-empty
+    // extent that rounds to zero keeps one device pixel.
+    if (g.width > 0 and x1 <= x0) x1 = x0 + 1;
+    if (g.height > 0 and y1 <= y0) y1 = y0 + 1;
+    return .{ .x = x0 / s, .y = y0 / s, .width = @max(x1 - x0, 0) / s, .height = @max(y1 - y0, 0) / s };
+}
+
+/// `g` grown outward to whole device pixels (floor the near edges, ceil the far
+/// ones). The text pass clips glyphs with this instead of `snapGeometry`: glyphs
+/// are placed from the layout box, not the snapped one, so a container edge that
+/// rounds inward must not trim the antialias column of a glyph inside it.
+pub fn snapGeometryOut(g: reg.Geometry, scale: f32) reg.Geometry {
+    const s: f32 = if (scale > 0) scale else 1;
+    const x0 = @floor(g.x * s);
+    const y0 = @floor(g.y * s);
+    const x1 = @ceil((g.x + g.width) * s);
+    const y1 = @ceil((g.y + g.height) * s);
+    return .{ .x = x0 / s, .y = y0 / s, .width = @max(x1 - x0, 0) / s, .height = @max(y1 - y0, 0) / s };
 }
 
 pub const unclipped: Clip = .{ .rect = .{ .x = -10000.0, .y = -10000.0, .w = 20000.0, .h = 20000.0 } };

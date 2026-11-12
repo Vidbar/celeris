@@ -1149,10 +1149,11 @@ pub const WgpuBackend = struct {
         const node = node_opt.?;
         const g = node.geometry;
 
-        // Same clip computation as the box bake (renderer.clipForChildren): it
-        // intersects with the inherited clip — never widens it — and interns the
-        // rounded part into the same table, so glyphs and boxes clip identically.
-        const next_clip = renderer_mod.clipForChildren(store, node_id, renderer_mod.snapGeometry(g, self.scale), clip_in);
+        // Same clip computation as the box bake (renderer.clipForChildren), on the
+        // box grown OUTWARD to whole device pixels: glyphs sit at layout positions,
+        // so an edge the box bake rounds inward must not trim a glyph's antialias.
+        // It intersects with the inherited clip and interns into the same table.
+        const next_clip = renderer_mod.clipForChildren(store, node_id, renderer_mod.snapGeometryOut(g, self.scale), clip_in);
         const glyph_clip = [4]f32{ next_clip.rect.x, next_clip.rect.y, next_clip.rect.w, next_clip.rect.h };
         const glyph_clip_id = renderer_mod.internClip(clips, next_clip);
 

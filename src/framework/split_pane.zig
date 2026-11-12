@@ -867,9 +867,35 @@ test "snapGeometry rounds edges, so abutting boxes keep sharing their edge at an
     for ([_]f32{ 1, 1.25, 1.5, 2 }) |s| {
         const a = renderer.snapGeometry(.{ .x = 10.3, .y = 0, .width = 284.2, .height = 10 }, s);
         const b2 = renderer.snapGeometry(.{ .x = 294.5, .y = 0, .width = 100.37, .height = 10 }, s);
-        try testing.expectEqual(a.x + a.width, b2.x);
+        // Compared in device pixels: the shared edge is the same whole pixel.
+        try testing.expectApproxEqAbs(@round(b2.x * s), (a.x + a.width) * s, 0.001);
         // Every edge is on the device-pixel grid.
-        try testing.expectEqual(@round(a.x * s), a.x * s);
-        try testing.expectEqual(@round((b2.x + b2.width) * s), (b2.x + b2.width) * s);
+        for ([_]f32{ a.x, a.x + a.width, b2.x, b2.x + b2.width }) |e| {
+            try testing.expectApproxEqAbs(@round(e * s), e * s, 0.001);
+        }
+    }
+}
+
+test "snapGeometry keeps a sub-pixel box at one device pixel wherever it lands" {
+    for ([_]f32{ 1, 2 }) |s| {
+        var x: f32 = 10;
+        while (x < 11) : (x += 0.05) {
+            const g = renderer.snapGeometry(.{ .x = x, .y = x, .width = 0.5 / s, .height = 0.5 / s }, s);
+            try testing.expectApproxEqAbs(1 / s, g.width, 0.0001);
+            try testing.expectApproxEqAbs(1 / s, g.height, 0.0001);
+        }
+    }
+    // An empty box stays empty.
+    try testing.expectEqual(@as(f32, 0), renderer.snapGeometry(.{ .x = 10.6, .width = 0 }, 1).width);
+}
+
+test "snapGeometryOut covers the layout box, so a glyph clip never trims inside it" {
+    const g = reg.Geometry{ .x = 10.6, .y = 3.4, .width = 50.2, .height = 20.3 };
+    for ([_]f32{ 1, 1.25, 1.5, 2 }) |s| {
+        const o = renderer.snapGeometryOut(g, s);
+        try testing.expect(o.x <= g.x and o.y <= g.y);
+        try testing.expect(o.x + o.width >= g.x + g.width - 0.0001);
+        try testing.expect(o.y + o.height >= g.y + g.height - 0.0001);
+        try testing.expectApproxEqAbs(@round(o.x * s), o.x * s, 0.001);
     }
 }
