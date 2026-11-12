@@ -766,3 +766,110 @@ test "SplitPane: a transparent sash stays invisible on hover but still drags" {
     dragTo(&h, sp, 500, 10);
     try testing.expectApproxEqAbs(@as(f32, 0.5), sp.left_ratio.peek(), 0.001);
 }
+
+const renderer = @import("../render/renderer.zig");
+
+/// A bordered card filling its pane: `#2B2B2B` 1px border over a `#1E1E1E` fill,
+/// optionally rounded with `overflowHidden` (the Albesi side-bar card).
+const CardPane = struct {
+    rounded: bool = false,
+    card_id: reg.NodeId = reg.NULL_NODE,
+    pub fn build(self: *CardPane, ctx: *BuildContext) !void {
+        const b = ctx.builder;
+        const card = try b.openNodeKeyed(.box, null);
+        try b.height(card, 200, .px);
+        try b.background(card, 0x1E, 0x1E, 0x1E);
+        try b.borderWidth(card, 1);
+        try b.borderColor(card, 0x2B, 0x2B, 0x2B);
+        if (self.rounded) {
+            try b.radius(card, 6);
+            try b.overflowHidden(card);
+        }
+        b.close();
+        self.card_id = card;
+    }
+    pub fn deinit(_: *CardPane) void {}
+};
+
+/// Composites every baked rect over a black window at pixel center (px+.5, y),
+/// the way the GPU blends them (straight-alpha "over", in draw order).
+fn pixelAt(prims: []const renderer.RectPrimitive, clips: []const renderer.ClipEntry, px: usize, y: f32) [3]f32 {
+    var dst = [3]f32{ 0, 0, 0 };
+    const x = @as(f32, @floatFromInt(px)) + 0.5;
+    for (prims) |p| {
+        if (p.is_shadow != 0) continue;
+        const e = clips[@intFromFloat(p.clip_id)];
+        const c = renderer.shadeRect(p, .{ e.a, e.b }, x, y);
+        for (0..3) |i| dst[i] = c[i] * c[3] + dst[i] * (1 - c[3]);
+    }
+    return dst;
+}
+
+test "SplitPane at a fractional ratio: every card border column is exactly the border color, rounded or not" {
+    for ([_]bool{ false, true }) |rounded| {
+        var h = Harness.init(testing.allocator);
+        defer h.deinit();
+        h.wire();
+        var l = CardPane{ .rounded = rounded };
+        var r = CardPane{ .rounded = rounded };
+        var b = component.UIBuilder.init(&h.registry, &h.store);
+        var ctx = BuildContext{ .builder = &b, .router = &h.router, .mounts = &h.mounts };
+        const screen = try b.openNodeKeyed(.box, null);
+        try b.width(screen, 1182, .px);
+        try b.height(screen, 600, .px);
+        try ctx.mountOwned(SplitPane, TestProps{
+            .initial_ratio = 0.25,
+            .left_child = component.childOf(CardPane, &l),
+            .right_child = component.childOf(CardPane, &r),
+        });
+        b.close();
+        h.solve(0, 1182, 600);
+        // The layout itself stays fractional: (1182 - 4) * 0.25 = 294.5.
+        const lg = h.geom(l.card_id);
+        try testing.expectApproxEqAbs(@as(f32, 294.5), lg.x + lg.width, 0.01);
+
+        var prims = std.array_list.Managed(renderer.RectPrimitive).init(testing.allocator);
+        defer prims.deinit();
+        var images = std.array_list.Managed(renderer.ImagePrimitive).init(testing.allocator);
+        defer images.deinit();
+        var paths = std.array_list.Managed(renderer.PathSegPrim).init(testing.allocator);
+        defer paths.deinit();
+        var hits = std.array_list.Managed(renderer.HitNode).init(testing.allocator);
+        defer hits.deinit();
+        var clips = renderer.ClipTable.init(testing.allocator);
+        defer clips.deinit();
+        try renderer.bakeRegistry(&h.registry, &h.store, &prims, &images, &paths, &hits, &clips, null, null, .pointer, testing.allocator, 1);
+
+        const border: f32 = 0x2B / @as(f32, 255);
+        const fill: f32 = 0x1E / @as(f32, 255);
+        const y: f32 = 100.5; // mid-card, clear of the corners
+        for ([_]reg.NodeId{ l.card_id, r.card_id }) |card| {
+            const g = renderer.snapGeometry(h.geom(card), 1);
+            const left: usize = @intFromFloat(g.x);
+            const right: usize = @intFromFloat(g.x + g.width - 1);
+            for ([_]usize{ left, right }) |col| {
+                const c = pixelAt(prims.items, clips.items, col, y);
+                for (c) |ch| try testing.expectApproxEqAbs(border, ch, 0.0005);
+            }
+            // One pixel thick: the next column in is the card's fill.
+            const inner = pixelAt(prims.items, clips.items, left + 1, y);
+            for (inner) |ch| try testing.expectApproxEqAbs(fill, ch, 0.0005);
+            const inner_r = pixelAt(prims.items, clips.items, right - 1, y);
+            for (inner_r) |ch| try testing.expectApproxEqAbs(fill, ch, 0.0005);
+        }
+        // Snapping rounds edges, not widths: the left pane (and card) end where the sash begins.
+        const pane = renderer.snapGeometry(h.geom(h.registry.getNode(l.card_id).?.parent), 1);
+        try testing.expectEqual(@as(f32, 295), pane.x + pane.width);
+    }
+}
+
+test "snapGeometry rounds edges, so abutting boxes keep sharing their edge at any scale" {
+    for ([_]f32{ 1, 1.25, 1.5, 2 }) |s| {
+        const a = renderer.snapGeometry(.{ .x = 10.3, .y = 0, .width = 284.2, .height = 10 }, s);
+        const b2 = renderer.snapGeometry(.{ .x = 294.5, .y = 0, .width = 100.37, .height = 10 }, s);
+        try testing.expectEqual(a.x + a.width, b2.x);
+        // Every edge is on the device-pixel grid.
+        try testing.expectEqual(@round(a.x * s), a.x * s);
+        try testing.expectEqual(@round((b2.x + b2.width) * s), (b2.x + b2.width) * s);
+    }
+}

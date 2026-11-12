@@ -1285,6 +1285,13 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
   it. See *Box model* above.
 - `try b.borderStyle(node, .dashed)` — dashed border (`.solid` is the default). Dashes
   only render on boxes without `radius`; a rounded box always draws a solid border.
+- **Pixel snapping.** Layout stays fractional (a `SplitPane` at ratio 0.25 can put an
+  edge at x = 294.5), but boxes are *painted* with each edge rounded to the nearest
+  device pixel — edges, not widths, so siblings that share an edge in layout still
+  share it on screen, and a 1px border at 100% scale is always one whole pixel in its
+  color. Backgrounds, borders, radii and `overflowHidden` clips all use the snapped
+  box; hit-testing and `ctx.measuredSize` report the layout box. A border is never
+  drawn brighter than its color: a partly covered edge pixel blends toward the fill.
 
 **Text styling:**
 - `try b.textColor(text_node, 255, 255, 255)`

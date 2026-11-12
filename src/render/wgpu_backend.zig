@@ -249,10 +249,20 @@ const WGSL = WGSL_CLIP ++
     \\        final_color = mix(final_color, c2, clamp(t, 0.0, 1.0));
     \\    }
     \\    
-    \\    // Border Logic
+    \\    // Border Logic: the border composites OVER the fill ("over" on straight
+    \\    // colors), so a partly covered border pixel is a blend toward the fill —
+    \\    // never brighter than the border, and not faded twice over a transparent
+    \\    // fill (mixing straight colors scaled rgb AND alpha by coverage, and the
+    \\    // SrcAlpha blend then applied it again). Mirrored by `renderer.shadeRect`.
     \\    if (bmax > 0.0) {
-    \\        let border_col = vec4(inst.b_cr, inst.b_cg, inst.b_cb, inst.b_ca);
-    \\        final_color = mix(final_color, border_col, b_a);
+    \\        let ba = inst.b_ca * b_a;
+    \\        let out_a = ba + final_color.a * (1.0 - ba);
+    \\        if (out_a > 0.0) {
+    \\            let rgb = (vec3(inst.b_cr, inst.b_cg, inst.b_cb) * ba + final_color.rgb * final_color.a * (1.0 - ba)) / out_a;
+    \\            final_color = vec4(rgb, out_a);
+    \\        } else {
+    \\            final_color = vec4(final_color.rgb, 0.0);
+    \\        }
     \\    }
     \\    
     \\    return vec4(final_color.rgb, final_color.a * a * cov);
@@ -891,10 +901,14 @@ pub const WgpuBackend = struct {
                     .srcFactor = wgpu.WGPUBlendFactor_SrcAlpha,
                     .dstFactor = wgpu.WGPUBlendFactor_OneMinusSrcAlpha,
                 },
+                // Alpha accumulates ("over"), it is not replaced: with One/Zero
+                // every antialiased edge (alpha < 1) punched a hole in the
+                // target's alpha, and a compositor or capture that un-premultiplies
+                // by it showed that pixel up to twice as bright as drawn.
                 .alpha = .{
                     .operation = wgpu.WGPUBlendOperation_Add,
                     .srcFactor = wgpu.WGPUBlendFactor_One,
-                    .dstFactor = wgpu.WGPUBlendFactor_Zero,
+                    .dstFactor = wgpu.WGPUBlendFactor_OneMinusSrcAlpha,
                 },
             },
             .writeMask = wgpu.WGPUColorWriteMask_All,
@@ -1138,7 +1152,7 @@ pub const WgpuBackend = struct {
         // Same clip computation as the box bake (renderer.clipForChildren): it
         // intersects with the inherited clip — never widens it — and interns the
         // rounded part into the same table, so glyphs and boxes clip identically.
-        const next_clip = renderer_mod.clipForChildren(store, node_id, g, clip_in);
+        const next_clip = renderer_mod.clipForChildren(store, node_id, renderer_mod.snapGeometry(g, self.scale), clip_in);
         const glyph_clip = [4]f32{ next_clip.rect.x, next_clip.rect.y, next_clip.rect.w, next_clip.rect.h };
         const glyph_clip_id = renderer_mod.internClip(clips, next_clip);
 

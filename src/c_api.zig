@@ -3423,7 +3423,7 @@ fn bakeAndRenderFrame(engine: *EngineState, render: bool) !void {
     var clips = renderer_mod.ClipTable.init(frame_arena.allocator());
     engine.hit_list.clearRetainingCapacity();
     const bz = prof.zoneNamed("bake");
-    try renderer_mod.bakeRegistry(&engine.registry, &engine.store, &prims, &image_prims, &path_prims, &engine.hit_list, &clips, engine.focused_node, engine.focus_ring_color, engine.focus_highlight_mode, frame_arena.allocator());
+    try renderer_mod.bakeRegistry(&engine.registry, &engine.store, &prims, &image_prims, &path_prims, &engine.hit_list, &clips, engine.focused_node, engine.focus_ring_color, engine.focus_highlight_mode, frame_arena.allocator(), engine.scale);
     bz.end();
 
     if (!render) return;

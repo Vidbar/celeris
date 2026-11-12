@@ -199,6 +199,21 @@ pub const Clip = struct {
     }
 };
 
+/// The box `g` as painted: each EDGE rounded to the nearest device pixel, so a
+/// 1px border always covers whole pixels, and two siblings that share an edge in
+/// layout still share it on screen (rounding widths instead would open or overlap
+/// a pixel between them). Layout stays fractional and DPI-agnostic; only painting
+/// and clipping snap. Every walker that turns geometry into pixels (the box bake,
+/// the text pass's clips) goes through here. Hit-testing keeps the layout box.
+pub fn snapGeometry(g: reg.Geometry, scale: f32) reg.Geometry {
+    const s: f32 = if (scale > 0) scale else 1;
+    const x0 = @round(g.x * s) / s;
+    const y0 = @round(g.y * s) / s;
+    const x1 = @round((g.x + g.width) * s) / s;
+    const y1 = @round((g.y + g.height) * s) / s;
+    return .{ .x = x0, .y = y0, .width = @max(x1 - x0, 0), .height = @max(y1 - y0, 0) };
+}
+
 pub const unclipped: Clip = .{ .rect = .{ .x = -10000.0, .y = -10000.0, .w = 20000.0, .h = 20000.0 } };
 
 /// Signed distance from `p` (relative to the rect's center) to a rounded rect of
@@ -218,6 +233,57 @@ pub fn roundCoverage(rc: RoundClip, x: f32, y: f32) f32 {
     const r = @min(rc.r, @min(rc.w, rc.h) * 0.5);
     const d = sdfRRect(x - (rc.x + rc.w * 0.5), y - (rc.y + rc.h * 0.5), rc.w * 0.5, rc.h * 0.5, r);
     return std.math.clamp(0.5 - d, 0, 1);
+}
+
+/// Straight-alpha color the rect shader outputs for `p` at point (x, y) — the CPU
+/// mirror of the WGSL `fs` for a body prim (fill, radius, solid borders, the
+/// rectangle clip and rounded clips `round`). Gradients, dashes and shadows are
+/// not mirrored. Tests rasterize with it at pixel centers to check what is drawn.
+pub fn shadeRect(p: RectPrimitive, round: [2]RoundClip, x: f32, y: f32) [4]f32 {
+    const transparent = [4]f32{ 0, 0, 0, 0 };
+    // The quad covers the rect exactly; a pixel center on its far edge is outside.
+    if (x < p.x or y < p.y or x >= p.x + p.width or y >= p.y + p.height) return transparent;
+    if (x < p.clip_rect_x or y < p.clip_rect_y or x > p.clip_rect_x + p.clip_rect_w or y > p.clip_rect_y + p.clip_rect_h) return transparent;
+    const hx = p.width * 0.5;
+    const hy = p.height * 0.5;
+    const lx = x - (p.x + hx);
+    const ly = y - (p.y + hy);
+    var a: f32 = 1;
+    if (p.border_radius > 0.001) {
+        const d = sdfRRect(lx, ly, hx, hy, p.border_radius);
+        a = 1 - smoothstep(-0.5, 0.5, d);
+    }
+    const bmax = @max(@max(p.border_top, p.border_right), @max(p.border_bottom, p.border_left));
+    var b_a: f32 = 0;
+    if (bmax > 0) {
+        if (p.border_radius <= 0.001) {
+            const on = (p.border_left > 0 and lx < -hx + p.border_left) or
+                (p.border_right > 0 and lx > hx - p.border_right) or
+                (p.border_top > 0 and ly < -hy + p.border_top) or
+                (p.border_bottom > 0 and ly > hy - p.border_bottom);
+            if (on) b_a = 1;
+        } else {
+            b_a = smoothstep(-0.5, 0.5, sdfRRect(lx, ly, hx - bmax, hy - bmax, @max(0, p.border_radius - bmax)));
+        }
+    }
+    const cov = @min(roundCoverage(round[0], x, y), roundCoverage(round[1], x, y));
+    var c = [4]f32{ p.color_r, p.color_g, p.color_b, p.color_a };
+    if (bmax > 0) {
+        const ba = p.border_color_a * b_a;
+        const out_a = ba + c[3] * (1 - ba);
+        const bc = [3]f32{ p.border_color_r, p.border_color_g, p.border_color_b };
+        if (out_a > 0) {
+            for (0..3) |i| c[i] = (bc[i] * ba + c[i] * c[3] * (1 - ba)) / out_a;
+        }
+        c[3] = out_a;
+    }
+    c[3] *= a * cov;
+    return c;
+}
+
+fn smoothstep(e0: f32, e1: f32, v: f32) f32 {
+    const t = std.math.clamp((v - e0) / (e1 - e0), 0, 1);
+    return t * t * (3 - 2 * t);
 }
 
 /// The clip a node's CHILDREN draw under. A node without `overflow_hidden` passes
@@ -339,6 +405,8 @@ const BakeContext = struct {
     /// this field ONLY gates the visual.
     focus_highlight_mode: core_events.FocusHighlightMode,
     draw_counter: *u32,
+    /// Device pixels per logical px; box edges snap to this grid (`snapGeometry`).
+    scale: f32,
 };
 
 /// Converts the UIRegistry (layout-resolved tree) into a flat list
@@ -354,7 +422,7 @@ fn bakeNodeRecursive(
     const node_opt = ctx.registry.getNode(node_id);
     if (node_opt == null) return;
     const node = node_opt.?;
-    const g = node.geometry;
+    const g = snapGeometry(node.geometry, ctx.scale);
 
     // This node draws under `clip_in`; its children under `next_clip`.
     const current_clip = clip_in.rect;
@@ -678,6 +746,8 @@ pub fn bakeRegistry(
     /// `BakeContext.focus_highlight_mode`.
     focus_highlight_mode: core_events.FocusHighlightMode,
     allocator: std.mem.Allocator,
+    /// Device pixels per logical px (the window's DPI scale; 1 at 96 DPI).
+    scale: f32,
 ) !void {
     const initial_clip = unclipped;
     if (clip_out) |t| {
@@ -712,6 +782,7 @@ pub fn bakeRegistry(
         .focus_ring_color = ring_color orelse default_focus_ring_color,
         .focus_highlight_mode = focus_highlight_mode,
         .draw_counter = &d_counter,
+        .scale = scale,
     };
 
     // Find roots
@@ -797,7 +868,7 @@ test "Primitive baking" {
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
 
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
     try std.testing.expectEqual(@as(usize, 2), prims.items.len);
     try std.testing.expectEqual(@as(f32, 6.0), prims.items[1].border_radius); // second box has border-radius
@@ -847,7 +918,7 @@ test "A path node emits stroke segments at its z, styled, offset by geometry; no
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
 
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
     // Exactly one stroke segment, no rect body for the path node (root + 2 boxes = 3).
     try std.testing.expectEqual(@as(usize, 1), paths.items.len);
@@ -886,7 +957,7 @@ test "Flatten failure or empty path emits nothing, and unstyled path defaults to
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
     try std.testing.expectEqual(@as(usize, 1), paths.items.len);
     try std.testing.expectEqual(@as(f32, 0.5), paths.items[0].half_width); // 1px default
@@ -926,7 +997,7 @@ test "Uniform border_width seeds all sides; per-side keys override just their ed
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
     try std.testing.expectEqual(@as(usize, 3), prims.items.len);
 
     // prims are baked root-first, then children in order.
@@ -969,7 +1040,7 @@ test "A box with no background bakes transparent, not an opaque slab" {
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
     // The card keeps its explicit fill; the unstyled wrapper lets it show through
     // instead of tiling the theme's base color over it.
@@ -1006,7 +1077,7 @@ test "an image node bakes a transparent box behind the texture, unless it has an
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
     // prims[0] = root, prims[1] = bare image's box, prims[2] = boxed image's box.
     // A bare image would otherwise paint an opaque near-white slab that shows
@@ -1046,7 +1117,7 @@ test "Focus ring is baked only for the focused focusable node" {
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
         try std.testing.expectEqual(@as(usize, 2), prims.items.len);
     }
 
@@ -1061,7 +1132,7 @@ test "Focus ring is baked only for the focused focusable node" {
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, null, .keyboard, std.testing.allocator, 1);
 
         try std.testing.expectEqual(@as(usize, 3), prims.items.len);
         const btn_geo = registry.getNode(btn).?.geometry;
@@ -1090,7 +1161,7 @@ test "Focus ring is baked only for the focused focusable node" {
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
         const magenta = [4]f32{ 1.0, 0.0, 1.0, 1.0 };
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, magenta, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, magenta, .keyboard, std.testing.allocator, 1);
 
         var ring: ?RectPrimitive = null;
         for (prims.items) |p| {
@@ -1142,7 +1213,7 @@ test "Focus ring only paints in .keyboard highlight mode, never .pointer" {
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, null, .pointer, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, null, .pointer, std.testing.allocator, 1);
         try std.testing.expectEqual(@as(usize, 2), prims.items.len);
         try std.testing.expect(!hasRing(prims.items));
     }
@@ -1157,7 +1228,7 @@ test "Focus ring only paints in .keyboard highlight mode, never .pointer" {
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, null, .keyboard, std.testing.allocator, 1);
         try std.testing.expectEqual(@as(usize, 3), prims.items.len);
         try std.testing.expect(hasRing(prims.items));
     }
@@ -1174,7 +1245,7 @@ fn countRingsAround(registry: *reg.UIRegistry, store: *props.PropertyStore, focu
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(registry, store, &prims, &images, &paths, &hits, null, focused, null, .keyboard, std.testing.allocator);
+    try bakeRegistry(registry, store, &prims, &images, &paths, &hits, null, focused, null, .keyboard, std.testing.allocator, 1);
     const tg = registry.getNode(target).?.geometry;
     var n: usize = 0;
     for (prims.items) |p| {
@@ -1304,7 +1375,7 @@ test ".virtual_focus_target redirects the ring to a live descendant (roving/aria
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, container, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, container, null, .keyboard, std.testing.allocator, 1);
         try std.testing.expect(hasRingAround(prims.items, registry.getNode(container).?.geometry));
         try std.testing.expect(!hasRingAround(prims.items, registry.getNode(row).?.geometry));
     }
@@ -1321,7 +1392,7 @@ test ".virtual_focus_target redirects the ring to a live descendant (roving/aria
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, container, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, container, null, .keyboard, std.testing.allocator, 1);
         try std.testing.expect(hasRingAround(prims.items, registry.getNode(row).?.geometry));
         try std.testing.expect(!hasRingAround(prims.items, registry.getNode(container).?.geometry));
     }
@@ -1337,7 +1408,7 @@ test ".virtual_focus_target redirects the ring to a live descendant (roving/aria
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, container, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, container, null, .keyboard, std.testing.allocator, 1);
         try std.testing.expect(hasRingAround(prims.items, registry.getNode(container).?.geometry));
     }
 }
@@ -1371,7 +1442,7 @@ test "BUG: bake does not recurse past MAX_TREE_DEPTH (deep tree can't overflow t
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
 
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
     // Each box bakes one rect prim. With the bound, only nodes at depth ≤ cap are
     // visited, so the count is bounded regardless of how deep the tree goes. Pre-fix
@@ -1423,7 +1494,7 @@ test "A blurred shadow bakes as its own prim: flagged, offset, spread-inflated" 
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
     // Shadow first, body second — the shadow must paint underneath.
     try std.testing.expectEqual(@as(usize, 2), prims.items.len);
@@ -1478,7 +1549,7 @@ test "Blur 0 with an offset still casts a (hard-edged) shadow; a shadow going no
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
         try std.testing.expectEqual(c.prims, prims.items.len);
     }
 }
@@ -1544,7 +1615,7 @@ const ClipFixture = struct {
     fn bake(self: *ClipFixture, root: reg.NodeId) !void {
         var engine = layout.LayoutEngine.init(&self.registry, &self.store, null);
         engine.solve(root, 0, 0, 800, 600);
-        try bakeRegistry(&self.registry, &self.store, &self.prims, &self.images, &self.paths, &self.hits, &self.clips, null, null, .pointer, std.testing.allocator);
+        try bakeRegistry(&self.registry, &self.store, &self.prims, &self.images, &self.paths, &self.hits, &self.clips, null, null, .pointer, std.testing.allocator, 1);
     }
     /// The body prim drawn for node `id` (matched by geometry).
     fn primOf(self: *ClipFixture, id: reg.NodeId) RectPrimitive {

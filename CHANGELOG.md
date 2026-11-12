@@ -9,6 +9,20 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Fixed
+
+- Borders at fractional positions (e.g. the cards in a `SplitPane` at ratio 0.25)
+  were missing, smeared over two faint pixels, or — on rounded boxes — up to twice
+  as bright as their color. Boxes now paint with their edges snapped to device
+  pixels (layout itself stays fractional; see *Pixel snapping* in
+  `docs/FRAMEWORK_API.md`), the border composites over the fill instead of fading
+  twice, and the framebuffer's alpha accumulates instead of being replaced by each
+  antialiased edge.
+- `internal.renderer.bakeRegistry` takes the window's DPI scale as a new last
+  argument (internal API, not covered by semver).
+
 ## 0.2.0 — 2026-11-12
 
 ### BREAKING
