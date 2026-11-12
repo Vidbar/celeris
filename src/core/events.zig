@@ -26,11 +26,11 @@ pub fn hitTest(hit_list: []const @import("../render/renderer.zig").HitNode, regi
         if (x >= node.geometry.x and x <= node.geometry.x + node.geometry.width and
             y >= node.geometry.y and y <= node.geometry.y + node.geometry.height)
         {
-            // Verify it wasn't visually clipped away by a parent overflow_hidden
-            const c = hit_node.clip_rect;
-            if (x >= c.x and x <= c.x + c.w and y >= c.y and y <= c.y + c.h) {
-                return node_id;
-            }
+            // Verify it wasn't visually clipped away by a parent overflow_hidden —
+            // its rectangle and any rounded corners (a click in a clipped corner
+            // falls through to whatever is drawn there).
+            const clip = @import("../render/renderer.zig").Clip{ .rect = hit_node.clip_rect, .round = hit_node.round };
+            if (clip.contains(x, y)) return node_id;
         }
     }
 

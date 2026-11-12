@@ -74,7 +74,34 @@ const stbi = @cImport({
     @cInclude("stb_image.h");
 });
 
-const WGSL =
+/// Rounded clipping, shared by all four pipelines (prepended to each shader).
+/// `clips` is the per-frame table built by `renderer.internClip` — one storage
+/// buffer bound at @group(1) for every pipeline; a primitive's `clip_id` indexes
+/// it (0 = no rounded clip). `ClipEntry` must match `renderer.ClipEntry`, and
+/// `round_cov` must match `renderer.roundCoverage` (the CPU mirror the tests and
+/// hit-testing use).
+const WGSL_CLIP =
+    \\struct RoundClip { x: f32, y: f32, w: f32, h: f32, r: f32 }
+    \\struct ClipEntry { a: RoundClip, b: RoundClip, _p0: f32, _p1: f32 }
+    \\@group(1) @binding(0) var<storage, read> clips: array<ClipEntry>;
+    \\fn round_cov(c: RoundClip, p: vec2<f32>) -> f32 {
+    \\    if (c.r <= 0.0) { return 1.0; }
+    \\    let r = min(c.r, min(c.w, c.h) * 0.5);
+    \\    let half = vec2(c.w, c.h) * 0.5;
+    \\    let q = abs(p - vec2(c.x, c.y) - half) - half + r;
+    \\    let d = length(max(q, vec2(0.))) + min(max(q.x, q.y), 0.) - r;
+    \\    return clamp(0.5 - d, 0.0, 1.0);
+    \\}
+    \\fn clip_cov(id: f32, p: vec2<f32>) -> f32 {
+    \\    let i = u32(id + 0.5);
+    \\    if (i == 0u) { return 1.0; }
+    \\    let e = clips[i];
+    \\    return min(round_cov(e.a, p), round_cov(e.b, p));
+    \\}
+    \\
+;
+
+const WGSL = WGSL_CLIP ++
     \\struct InstanceData {
     \\    rect_x: f32, rect_y: f32, rect_w: f32, rect_h: f32,
     \\    cr: f32, cg: f32, cb: f32, ca: f32,
@@ -85,7 +112,7 @@ const WGSL =
     \\    shadow_color_r: f32, shadow_color_g: f32, shadow_color_b: f32, shadow_color_a: f32,
     \\    grad_type: f32, c2_r: f32, c2_g: f32, c2_b: f32,
     \\    c2_a: f32, border_style: f32, z_index: f32, _pad2: f32,
-    \\    shadow_spread: f32, is_shadow: f32, _pad3: f32, _pad4: f32,
+    \\    shadow_spread: f32, is_shadow: f32, clip_id: f32, _pad4: f32,
     \\}
     \\@group(0) @binding(0) var<storage, read> instances: array<InstanceData>;
     \\struct U { vp_w: f32, vp_h: f32, _pad1: f32, _pad2: f32 }
@@ -184,7 +211,10 @@ const WGSL =
     \\        in.px.x > inst.clip_x + inst.clip_w || in.px.y > inst.clip_y + inst.clip_h) {
     \\        discard;
     \\    }
-    \\    
+    \\    // Rounded clip of the overflow_hidden ancestors (antialiased).
+    \\    let cov = clip_cov(inst.clip_id, in.px);
+    \\    if (cov < .001) { discard; }
+    \\
     \\    // Shadow: fade the alpha out across the blur radius instead of painting a
     \\    // displaced copy of the rect. `d` is the signed distance to the (already
     \\    // spread-inflated) shadow edge, so the falloff is centred on that edge and
@@ -200,7 +230,7 @@ const WGSL =
     \\            sa = 1. - smoothstep(-0.5, 0.5, d); // blur 0 → hard edge, antialiased
     \\        }
     \\        if (sa < .002) { discard; }
-    \\        return vec4(inst.cr, inst.cg, inst.cb, inst.ca * sa);
+    \\        return vec4(inst.cr, inst.cg, inst.cb, inst.ca * sa * cov);
     \\    }
     \\    
     \\    var final_color = vec4(inst.cr, inst.cg, inst.cb, inst.ca);
@@ -225,11 +255,11 @@ const WGSL =
     \\        final_color = mix(final_color, border_col, b_a);
     \\    }
     \\    
-    \\    return vec4(final_color.rgb, final_color.a * a);
+    \\    return vec4(final_color.rgb, final_color.a * a * cov);
     \\}
 ;
 
-const WGSL_TEXT =
+const WGSL_TEXT = WGSL_CLIP ++
     \\struct U {
     \\    vp_w: f32, vp_h: f32, cr: f32, cg: f32,
     \\    cb: f32, ca: f32, clip_x: f32, clip_y: f32,
@@ -244,6 +274,7 @@ const WGSL_TEXT =
     \\    @location(1) uv: vec2<f32>,
     \\    @location(2) clip: vec4<f32>,
     \\    @location(3) color: vec4<f32>,
+    \\    @location(4) clip_id: f32,
     \\}
     \\struct VOut {
     \\    @builtin(position) pos: vec4<f32>,
@@ -251,22 +282,23 @@ const WGSL_TEXT =
     \\    @location(1) px: vec2<f32>,
     \\    @location(2) clip: vec4<f32>,
     \\    @location(3) color: vec4<f32>,
+    \\    @location(4) @interpolate(flat) clip_id: f32,
     \\}
     \\@vertex fn vs(in: VIn) -> VOut {
     \\    let ndc = vec2(in.pos.x/u.vp_w*2.-1., 1.-in.pos.y/u.vp_h*2.);
-    \\    var o: VOut; o.pos = vec4(ndc, 0., 1.); o.uv = in.uv; o.px = in.pos; o.clip = in.clip; o.color = in.color; return o;
+    \\    var o: VOut; o.pos = vec4(ndc, 0., 1.); o.uv = in.uv; o.px = in.pos; o.clip = in.clip; o.color = in.color; o.clip_id = in.clip_id; return o;
     \\}
     \\@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
-    \\    if (in.px.x < in.clip.x || in.px.y < in.clip.y || 
+    \\    if (in.px.x < in.clip.x || in.px.y < in.clip.y ||
     \\        in.px.x > in.clip.x + in.clip.z || in.px.y > in.clip.y + in.clip.w) {
     \\        discard;
     \\    }
     \\    let alpha = textureSample(t, s, in.uv).r;
-    \\    return vec4(in.color.rgb, in.color.a * alpha);
+    \\    return vec4(in.color.rgb, in.color.a * alpha * clip_cov(in.clip_id, in.px));
     \\}
 ;
 
-const WGSL_IMAGE =
+const WGSL_IMAGE = WGSL_CLIP ++
     \\struct U {
     \\    vp_w: f32, vp_h: f32, _pad1: f32, _pad2: f32,
     \\}
@@ -279,6 +311,7 @@ const WGSL_IMAGE =
     \\    @location(1) uv: vec2<f32>,
     \\    @location(2) clip: vec4<f32>,
     \\    @location(3) opacity: f32,
+    \\    @location(4) clip_id: f32,
     \\}
     \\struct VOut {
     \\    @builtin(position) pos: vec4<f32>,
@@ -286,10 +319,11 @@ const WGSL_IMAGE =
     \\    @location(1) px: vec2<f32>,
     \\    @location(2) clip: vec4<f32>,
     \\    @location(3) opacity: f32,
+    \\    @location(4) @interpolate(flat) clip_id: f32,
     \\}
     \\@vertex fn vs(in: VIn) -> VOut {
     \\    let ndc = vec2(in.pos.x/u.vp_w*2.-1., 1.-in.pos.y/u.vp_h*2.);
-    \\    var o: VOut; o.pos = vec4(ndc, 0., 1.); o.uv = in.uv; o.px = in.pos; o.clip = in.clip; o.opacity = in.opacity; return o;
+    \\    var o: VOut; o.pos = vec4(ndc, 0., 1.); o.uv = in.uv; o.px = in.pos; o.clip = in.clip; o.opacity = in.opacity; o.clip_id = in.clip_id; return o;
     \\}
     \\@fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
     \\    if (in.px.x < in.clip.x || in.px.y < in.clip.y || 
@@ -297,7 +331,7 @@ const WGSL_IMAGE =
     \\        discard;
     \\    }
     \\    let tex_col = textureSample(t, s, in.uv);
-    \\    return vec4(tex_col.rgb, tex_col.a * in.opacity);
+    \\    return vec4(tex_col.rgb, tex_col.a * in.opacity * clip_cov(in.clip_id, in.px));
     \\}
 ;
 
@@ -305,13 +339,13 @@ const WGSL_IMAGE =
 // stage evaluates a capsule SDF (segment inflated by `half_width`, round ends →
 // round caps and joins fall out for free). Field order of `PathInstance` MUST
 // match `renderer.PathSegPrim` — the bytes are uploaded straight in.
-const WGSL_PATH =
+const WGSL_PATH = WGSL_CLIP ++
     \\struct PathInstance {
     \\    ax: f32, ay: f32, bx: f32, by: f32,
     \\    half_width: f32,
     \\    cr: f32, cg: f32, cb: f32, ca: f32,
     \\    clip_x: f32, clip_y: f32, clip_w: f32, clip_h: f32,
-    \\    z_index: f32, _p0: f32, _p1: f32,
+    \\    z_index: f32, clip_id: f32, _p1: f32,
     \\}
     \\@group(0) @binding(0) var<storage, read> insts: array<PathInstance>;
     \\struct U { vp_w: f32, vp_h: f32, _a: f32, _b: f32 }
@@ -354,7 +388,7 @@ const WGSL_PATH =
     \\    if (in.px.x < it.clip_x || in.px.y < it.clip_y ||
     \\        in.px.x > it.clip_x + it.clip_w || in.px.y > it.clip_y + it.clip_h) { discard; }
     \\    let d = sd_seg(in.px, vec2(it.ax, it.ay), vec2(it.bx, it.by)) - it.half_width;
-    \\    let a = it.ca * (1.0 - smoothstep(-0.7, 0.7, d));
+    \\    let a = it.ca * (1.0 - smoothstep(-0.7, 0.7, d)) * clip_cov(it.clip_id, in.px);
     \\    if (a < 0.002) { discard; }
     \\    return vec4(it.cr, it.cg, it.cb, a);
     \\}
@@ -379,6 +413,8 @@ const TextVertex = extern struct {
     uv: [2]f32,
     clip: [4]f32,
     color: [4]f32,
+    /// Index into the rounded-clip table (0 = none).
+    clip_id: f32 = 0,
 };
 
 const ImageUniforms = extern struct {
@@ -392,6 +428,8 @@ const ImageVertex = extern struct {
     uv: [2]f32,
     clip: [4]f32,
     opacity: f32,
+    /// Index into the rounded-clip table (0 = none).
+    clip_id: f32 = 0,
 };
 
 const CachedTexture = struct {
@@ -453,13 +491,57 @@ fn createVertexBuffer(device: wgpu.WGPUDevice, size: u64) wgpu.WGPUBuffer {
     });
 }
 
-fn createPipelineLayout(device: wgpu.WGPUDevice, bgl: wgpu.WGPUBindGroupLayout) wgpu.WGPUPipelineLayout {
-    var bgl_local = bgl;
+/// Pipeline layout = the pipeline's own group 0 + the shared clip table at group 1.
+fn createPipelineLayout(device: wgpu.WGPUDevice, bgl: wgpu.WGPUBindGroupLayout, clip_bgl: wgpu.WGPUBindGroupLayout) wgpu.WGPUPipelineLayout {
+    const layouts = [_]wgpu.WGPUBindGroupLayout{ bgl, clip_bgl };
     return wgpu.wgpuDeviceCreatePipelineLayout(device, &.{
         .nextInChain = null,
         .label = null,
-        .bindGroupLayoutCount = 1,
-        .bindGroupLayouts = &bgl_local,
+        .bindGroupLayoutCount = 2,
+        .bindGroupLayouts = &layouts,
+    });
+}
+
+/// Group 1, shared by every pipeline: the read-only rounded-clip table.
+fn createClipBGL(device: wgpu.WGPUDevice) wgpu.WGPUBindGroupLayout {
+    const entries = [_]wgpu.WGPUBindGroupLayoutEntry{.{
+        .nextInChain = null,
+        .binding = 0,
+        .visibility = wgpu.WGPUShaderStage_Fragment,
+        .buffer = .{ .nextInChain = null, .type = wgpu.WGPUBufferBindingType_ReadOnlyStorage, .hasDynamicOffset = 0, .minBindingSize = 0 },
+        .sampler = .{ .nextInChain = null, .type = wgpu.WGPUSamplerBindingType_Undefined },
+        .texture = .{ .nextInChain = null, .sampleType = wgpu.WGPUTextureSampleType_Undefined, .viewDimension = wgpu.WGPUTextureViewDimension_Undefined, .multisampled = 0 },
+        .storageTexture = .{ .nextInChain = null, .access = wgpu.WGPUStorageTextureAccess_Undefined, .format = wgpu.WGPUTextureFormat_Undefined, .viewDimension = wgpu.WGPUTextureViewDimension_Undefined },
+    }};
+    return wgpu.wgpuDeviceCreateBindGroupLayout(device, &.{
+        .nextInChain = null,
+        .label = null,
+        .entryCount = 1,
+        .entries = &entries,
+    });
+}
+
+/// Initial capacity (entries) of the rounded-clip table buffer; grows on demand.
+const INIT_CLIP_CAP: usize = 64;
+
+fn createClipBuffer(device: wgpu.WGPUDevice, cap: usize) wgpu.WGPUBuffer {
+    return wgpu.wgpuDeviceCreateBuffer(device, &.{
+        .nextInChain = null,
+        .label = "Clip Table",
+        .usage = wgpu.WGPUBufferUsage_Storage | wgpu.WGPUBufferUsage_CopyDst,
+        .size = @sizeOf(renderer_mod.ClipEntry) * cap,
+        .mappedAtCreation = 0,
+    });
+}
+
+fn createClipBindGroup(device: wgpu.WGPUDevice, layout: wgpu.WGPUBindGroupLayout, buf: wgpu.WGPUBuffer) wgpu.WGPUBindGroup {
+    const entries = [_]wgpu.WGPUBindGroupEntry{.{ .nextInChain = null, .binding = 0, .buffer = buf, .offset = 0, .size = wgpu.WGPU_WHOLE_SIZE, .sampler = null, .textureView = null }};
+    return wgpu.wgpuDeviceCreateBindGroup(device, &.{
+        .nextInChain = null,
+        .label = null,
+        .layout = layout,
+        .entryCount = 1,
+        .entries = &entries,
     });
 }
 
@@ -594,6 +676,12 @@ pub const WgpuBackend = struct {
     p_bind_group: wgpu.WGPUBindGroup, // references p_inst_buf + the shared uni_buf, via self.bgl
     p_inst_buf: wgpu.WGPUBuffer,
     p_inst_cap: usize, // capacity of p_inst_buf, in segments
+
+    // Rounded-clip table (group 1 of every pipeline), rebuilt each frame.
+    clip_bgl: wgpu.WGPUBindGroupLayout,
+    clip_buf: wgpu.WGPUBuffer,
+    clip_cap: usize, // entries
+    clip_bind_group: wgpu.WGPUBindGroup,
     texture_cache: std.StringHashMap(CachedTexture),
     surface_format: wgpu.WGPUTextureFormat,
 
@@ -789,7 +877,10 @@ pub const WgpuBackend = struct {
             .entryCount = 2,
             .entries = &bgl_entries,
         });
-        const pl = createPipelineLayout(g_device, bgl);
+        const clip_bgl = createClipBGL(g_device);
+        const clip_buf = createClipBuffer(g_device, INIT_CLIP_CAP);
+        const clip_bind_group = createClipBindGroup(g_device, clip_bgl, clip_buf);
+        const pl = createPipelineLayout(g_device, bgl, clip_bgl);
 
         const color_target = wgpu.WGPUColorTargetState{
             .nextInChain = null,
@@ -924,7 +1015,7 @@ pub const WgpuBackend = struct {
         });
 
         const t_bgl = createSampledTextureBGL(g_device, @sizeOf(TextUniforms));
-        const t_pl = createPipelineLayout(g_device, t_bgl);
+        const t_pl = createPipelineLayout(g_device, t_bgl, clip_bgl);
         const t_shader = createShaderModuleWGSL(g_device, WGSL_TEXT.ptr);
 
         const t_vbl_attrs = [_]wgpu.WGPUVertexAttribute{
@@ -932,11 +1023,12 @@ pub const WgpuBackend = struct {
             .{ .format = wgpu.WGPUVertexFormat_Float32x2, .offset = @offsetOf(TextVertex, "uv"), .shaderLocation = 1 },
             .{ .format = wgpu.WGPUVertexFormat_Float32x4, .offset = @offsetOf(TextVertex, "clip"), .shaderLocation = 2 },
             .{ .format = wgpu.WGPUVertexFormat_Float32x4, .offset = @offsetOf(TextVertex, "color"), .shaderLocation = 3 },
+            .{ .format = wgpu.WGPUVertexFormat_Float32, .offset = @offsetOf(TextVertex, "clip_id"), .shaderLocation = 4 },
         };
         const t_vbl = wgpu.WGPUVertexBufferLayout{
             .arrayStride = @sizeOf(TextVertex),
             .stepMode = wgpu.WGPUVertexStepMode_Vertex,
-            .attributeCount = 4,
+            .attributeCount = 5,
             .attributes = &t_vbl_attrs,
         };
 
@@ -959,7 +1051,7 @@ pub const WgpuBackend = struct {
         const t_vbuf = createVertexBuffer(g_device, INIT_VBUF_BYTES);
 
         const i_bgl = createSampledTextureBGL(g_device, @sizeOf(ImageUniforms));
-        const i_pl = createPipelineLayout(g_device, i_bgl);
+        const i_pl = createPipelineLayout(g_device, i_bgl, clip_bgl);
         const i_shader = createShaderModuleWGSL(g_device, WGSL_IMAGE.ptr);
 
         const i_vbl_attrs = [_]wgpu.WGPUVertexAttribute{
@@ -967,11 +1059,12 @@ pub const WgpuBackend = struct {
             .{ .format = wgpu.WGPUVertexFormat_Float32x2, .offset = @offsetOf(ImageVertex, "uv"), .shaderLocation = 1 },
             .{ .format = wgpu.WGPUVertexFormat_Float32x4, .offset = @offsetOf(ImageVertex, "clip"), .shaderLocation = 2 },
             .{ .format = wgpu.WGPUVertexFormat_Float32, .offset = @offsetOf(ImageVertex, "opacity"), .shaderLocation = 3 },
+            .{ .format = wgpu.WGPUVertexFormat_Float32, .offset = @offsetOf(ImageVertex, "clip_id"), .shaderLocation = 4 },
         };
         const i_vbl = wgpu.WGPUVertexBufferLayout{
             .arrayStride = @sizeOf(ImageVertex),
             .stepMode = wgpu.WGPUVertexStepMode_Vertex,
-            .attributeCount = 4,
+            .attributeCount = 5,
             .attributes = &i_vbl_attrs,
         };
 
@@ -1014,6 +1107,10 @@ pub const WgpuBackend = struct {
             .p_bind_group = p_bind_group,
             .p_inst_buf = p_inst_buf,
             .p_inst_cap = INIT_RECT_CAP,
+            .clip_bgl = clip_bgl,
+            .clip_buf = clip_buf,
+            .clip_cap = INIT_CLIP_CAP,
+            .clip_bind_group = clip_bind_group,
             .texture_cache = std.StringHashMap(CachedTexture).init(allocator),
             .surface_format = surface_format,
             .render_target = render_target,
@@ -1026,33 +1123,24 @@ pub const WgpuBackend = struct {
         registry: *reg.UIRegistry,
         store: *const props.PropertyStore,
         node_id: reg.NodeId,
-        current_clip: [4]f32,
+        clip_in: renderer_mod.Clip,
         current_z: f32,
         global_order: *u32,
         t_verts: *std.array_list.Managed(TextVertex),
         batches: *std.array_list.Managed(DrawBatch),
+        clips: *renderer_mod.ClipTable,
     ) void {
         const node_opt = registry.getNode(node_id);
         if (node_opt == null) return;
         const node = node_opt.?;
         const g = node.geometry;
 
-        var next_clip = current_clip;
-        if (store.modifierFlag(node_id, .overflow_hidden)) {
-            // Intersect with the inherited clip — never widen it. A nested
-            // overflow_hidden box must stay inside its ancestors' clips (e.g. a
-            // TextInput inside a collapsed 0×0 dialog backdrop), matching the box
-            // baker's intersectRect. Replacing outright leaks glyphs that the box
-            // primitives correctly hide.
-            const cx1 = @max(current_clip[0], g.x);
-            const cy1 = @max(current_clip[1], g.y);
-            const cx2 = @min(current_clip[0] + current_clip[2], g.x + g.width);
-            const cy2 = @min(current_clip[1] + current_clip[3], g.y + g.height);
-            next_clip = if (cx2 <= cx1 or cy2 <= cy1)
-                .{ 0, 0, 0, 0 }
-            else
-                .{ cx1, cy1, cx2 - cx1, cy2 - cy1 };
-        }
+        // Same clip computation as the box bake (renderer.clipForChildren): it
+        // intersects with the inherited clip — never widens it — and interns the
+        // rounded part into the same table, so glyphs and boxes clip identically.
+        const next_clip = renderer_mod.clipForChildren(store, node_id, g, clip_in);
+        const glyph_clip = [4]f32{ next_clip.rect.x, next_clip.rect.y, next_clip.rect.w, next_clip.rect.h };
+        const glyph_clip_id = renderer_mod.internClip(clips, next_clip);
 
         const z_val = if (store.getStyle(node_id, .z_index)) |val| val.number else current_z;
 
@@ -1104,7 +1192,7 @@ pub const WgpuBackend = struct {
                 // Shaping is done once and cached on the layout (ensureShaped) — this
                 // hot path only looks up rasterized glyphs and appends vertices.
                 const Draw = struct {
-                    fn run(be: *WgpuBackend, verts: anytype, glyphs: []const text.ShapedGlyph, physical_sz: f32, origin_x: f32, baseline_y: f32, icon_baseline: f32, clip: anytype, col: anytype) void {
+                    fn run(be: *WgpuBackend, verts: anytype, glyphs: []const text.ShapedGlyph, physical_sz: f32, origin_x: f32, baseline_y: f32, icon_baseline: f32, clip: anytype, clip_id: f32, col: anytype) void {
                         // The pen advances in exact physical px and only *snaps* when a
                         // quad is emitted. Rounding each advance instead (the obvious
                         // way to keep glyphs on whole pixels) accumulates: over a label
@@ -1134,12 +1222,12 @@ pub const WgpuBackend = struct {
                                 const x1 = x1_phys * inv_scale;
                                 const y1 = y1_phys * inv_scale;
                                 verts.appendSlice(&.{
-                                    .{ .pos = .{ x0, y0 }, .uv = .{ gl.s0, gl.t0 }, .clip = clip, .color = col },
-                                    .{ .pos = .{ x1, y0 }, .uv = .{ gl.s1, gl.t0 }, .clip = clip, .color = col },
-                                    .{ .pos = .{ x0, y1 }, .uv = .{ gl.s0, gl.t1 }, .clip = clip, .color = col },
-                                    .{ .pos = .{ x0, y1 }, .uv = .{ gl.s0, gl.t1 }, .clip = clip, .color = col },
-                                    .{ .pos = .{ x1, y0 }, .uv = .{ gl.s1, gl.t0 }, .clip = clip, .color = col },
-                                    .{ .pos = .{ x1, y1 }, .uv = .{ gl.s1, gl.t1 }, .clip = clip, .color = col },
+                                    .{ .pos = .{ x0, y0 }, .uv = .{ gl.s0, gl.t0 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x1, y0 }, .uv = .{ gl.s1, gl.t0 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x0, y1 }, .uv = .{ gl.s0, gl.t1 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x0, y1 }, .uv = .{ gl.s0, gl.t1 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x1, y0 }, .uv = .{ gl.s1, gl.t0 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x1, y1 }, .uv = .{ gl.s1, gl.t1 }, .clip = clip, .color = col, .clip_id = clip_id },
                                 }) catch {};
                             }
                             pen_x_phys += sg.x_advance * be.scale;
@@ -1162,7 +1250,7 @@ pub const WgpuBackend = struct {
                             t_x += slack;
                         }
                         const glyphs = layout.shaped.items[line.glyph_start .. line.glyph_start + line.glyph_count];
-                        Draw.run(self, t_verts, glyphs, physical_size, t_x, current_y, icon_baseline_y, next_clip, c_arr);
+                        Draw.run(self, t_verts, glyphs, physical_size, t_x, current_y, icon_baseline_y, glyph_clip, glyph_clip_id, c_arr);
                         current_y += line_height;
                         icon_baseline_y += line_height;
                     }
@@ -1180,7 +1268,7 @@ pub const WgpuBackend = struct {
                     else
                         0;
                     self.atlas.shapePref(content, target_size, pref, ls, &shaped) catch {};
-                    Draw.run(self, t_verts, shaped.items, physical_size, g.x, current_y, icon_baseline_y, next_clip, c_arr);
+                    Draw.run(self, t_verts, shaped.items, physical_size, g.x, current_y, icon_baseline_y, glyph_clip, glyph_clip_id, c_arr);
                 }
             }
 
@@ -1199,7 +1287,7 @@ pub const WgpuBackend = struct {
 
         var child_id = node.first_child;
         while (child_id != reg.NULL_NODE) {
-            self.appendTextRecursive(registry, store, child_id, next_clip, z_val, global_order, t_verts, batches);
+            self.appendTextRecursive(registry, store, child_id, next_clip, z_val, global_order, t_verts, batches, clips);
             const child_node = registry.getNode(child_id) orelse break;
             child_id = child_node.next_sibling;
         }
@@ -1342,6 +1430,9 @@ pub const WgpuBackend = struct {
         safeRelease(self.sampler, wgpu.wgpuSamplerRelease);
 
         safeRelease(self.p_bind_group, wgpu.wgpuBindGroupRelease);
+        safeRelease(self.clip_bind_group, wgpu.wgpuBindGroupRelease);
+        safeRelease(self.clip_buf, wgpu.wgpuBufferRelease);
+        safeRelease(self.clip_bgl, wgpu.wgpuBindGroupLayoutRelease);
         safeRelease(self.p_inst_buf, wgpu.wgpuBufferRelease);
         safeRelease(self.p_pipeline, wgpu.wgpuRenderPipelineRelease);
 
@@ -1415,6 +1506,18 @@ pub const WgpuBackend = struct {
         self.inst_cap = new_cap;
     }
 
+    /// Grows the rounded-clip table buffer (and rebuilds its bind group).
+    fn ensureClipBuf(self: *WgpuBackend, needed: usize) void {
+        if (needed <= self.clip_cap) return;
+        var new_cap = if (self.clip_cap == 0) needed else self.clip_cap;
+        while (new_cap < needed) new_cap *= 2;
+        if (self.clip_buf != null) wgpu.wgpuBufferRelease(self.clip_buf);
+        self.clip_buf = createClipBuffer(self.device, new_cap);
+        if (self.clip_bind_group != null) wgpu.wgpuBindGroupRelease(self.clip_bind_group);
+        self.clip_bind_group = createClipBindGroup(self.device, self.clip_bgl, self.clip_buf);
+        self.clip_cap = new_cap;
+    }
+
     /// `ensureInstBuf` for the path pipeline's segment storage buffer.
     fn ensurePathBuf(self: *WgpuBackend, needed_segs: usize) void {
         if (needed_segs <= self.p_inst_cap) return;
@@ -1469,6 +1572,8 @@ pub const WgpuBackend = struct {
         prims: []const renderer_mod.RectPrimitive,
         image_prims: []const renderer_mod.ImagePrimitive,
         path_prims: []const renderer_mod.PathSegPrim,
+        /// The bake's rounded-clip table (`renderer.bakeRegistry`'s `clip_out`).
+        clips: []const renderer_mod.ClipEntry,
     ) !void {
         // Draw all primitives in the inst_buf
         const fz = prof.zone(@src());
@@ -1579,12 +1684,21 @@ pub const WgpuBackend = struct {
             defer t_verts.deinit();
 
             // Iterate over registry nodes to render text nodes recursively
-            const initial_clip = [_]f32{ -10000.0, -10000.0, 20000.0, 20000.0 };
+            // The rounded-clip table: the box bake's entries, plus any the text pass
+            // adds (interning by value keeps the bake's ids valid).
+            var clip_table = renderer_mod.ClipTable.init(self.allocator);
+            defer clip_table.deinit();
+            clip_table.appendSlice(clips) catch {};
+            if (clip_table.items.len == 0) clip_table.append(.{}) catch {};
+            const initial_clip = renderer_mod.unclipped;
             for (registry.nodes.items) |node| {
                 if (node.parent == reg.NULL_NODE) {
-                    self.appendTextRecursive(registry, store, node.id, initial_clip, 0.0, &global_order, &t_verts, &batches);
+                    self.appendTextRecursive(registry, store, node.id, initial_clip, 0.0, &global_order, &t_verts, &batches, &clip_table);
                 }
             }
+            // Upload the finished clip table (group 1 of every pipeline).
+            self.ensureClipBuf(clip_table.items.len);
+            wgpu.wgpuQueueWriteBuffer(self.queue, self.clip_buf, 0, clip_table.items.ptr, clip_table.items.len * @sizeOf(renderer_mod.ClipEntry));
             // Building the text verts may have rasterized new glyphs into the atlas;
             // re-upload it to the GPU before this frame samples it.
             if (self.atlas.dirty) {
@@ -1620,12 +1734,12 @@ pub const WgpuBackend = struct {
                 const clip = [_]f32{ img.clip_rect_x, img.clip_rect_y, img.clip_rect_w, img.clip_rect_h };
                 const op = img.opacity;
                 i_verts.appendSlice(&.{
-                    .{ .pos = .{ img.x, img.y }, .uv = .{ 0.0, 0.0 }, .clip = clip, .opacity = op },
-                    .{ .pos = .{ img.x + img.width, img.y }, .uv = .{ 1.0, 0.0 }, .clip = clip, .opacity = op },
-                    .{ .pos = .{ img.x, img.y + img.height }, .uv = .{ 0.0, 1.0 }, .clip = clip, .opacity = op },
-                    .{ .pos = .{ img.x, img.y + img.height }, .uv = .{ 0.0, 1.0 }, .clip = clip, .opacity = op },
-                    .{ .pos = .{ img.x + img.width, img.y }, .uv = .{ 1.0, 0.0 }, .clip = clip, .opacity = op },
-                    .{ .pos = .{ img.x + img.width, img.y + img.height }, .uv = .{ 1.0, 1.0 }, .clip = clip, .opacity = op },
+                    .{ .pos = .{ img.x, img.y }, .uv = .{ 0.0, 0.0 }, .clip = clip, .opacity = op, .clip_id = img.clip_id },
+                    .{ .pos = .{ img.x + img.width, img.y }, .uv = .{ 1.0, 0.0 }, .clip = clip, .opacity = op, .clip_id = img.clip_id },
+                    .{ .pos = .{ img.x, img.y + img.height }, .uv = .{ 0.0, 1.0 }, .clip = clip, .opacity = op, .clip_id = img.clip_id },
+                    .{ .pos = .{ img.x, img.y + img.height }, .uv = .{ 0.0, 1.0 }, .clip = clip, .opacity = op, .clip_id = img.clip_id },
+                    .{ .pos = .{ img.x + img.width, img.y }, .uv = .{ 1.0, 0.0 }, .clip = clip, .opacity = op, .clip_id = img.clip_id },
+                    .{ .pos = .{ img.x + img.width, img.y + img.height }, .uv = .{ 1.0, 1.0 }, .clip = clip, .opacity = op, .clip_id = img.clip_id },
                 }) catch continue;
             }
 
@@ -1695,6 +1809,7 @@ pub const WgpuBackend = struct {
                     .rect => {
                         if (current_pipeline == null or current_pipeline.? != .rect) {
                             wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.pipeline);
+                            wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, self.clip_bind_group, 0, null);
                             wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.bind_group, 0, null);
                             current_pipeline = .rect;
                         }
@@ -1703,6 +1818,7 @@ pub const WgpuBackend = struct {
                     .text => {
                         if (current_pipeline == null or current_pipeline.? != .text) {
                             wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.t_pipeline);
+                            wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, self.clip_bind_group, 0, null);
                             wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.t_bind_group, 0, null);
                             wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.t_vbuf, 0, @as(usize, t_verts.items.len) * @as(usize, @sizeOf(TextVertex)));
                             current_pipeline = .text;
@@ -1712,6 +1828,7 @@ pub const WgpuBackend = struct {
                     .image => {
                         if (current_pipeline == null or current_pipeline.? != .image) {
                             wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.i_pipeline);
+                            wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, self.clip_bind_group, 0, null);
                             wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.i_vbuf, 0, @as(usize, i_verts.items.len) * @as(usize, @sizeOf(ImageVertex)));
                             current_pipeline = .image;
                         }
@@ -1725,6 +1842,7 @@ pub const WgpuBackend = struct {
                     .path => {
                         if (current_pipeline == null or current_pipeline.? != .path) {
                             wgpu.wgpuRenderPassEncoderSetPipeline(pass, self.p_pipeline);
+                            wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, self.clip_bind_group, 0, null);
                             wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, self.p_bind_group, 0, null);
                             current_pipeline = .path;
                         }
@@ -1907,5 +2025,48 @@ test "The WGSL instance struct matches RectPrimitive field for field" {
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(renderer_mod.RectPrimitive) % @sizeOf(f32));
     inline for (std.meta.fields(renderer_mod.RectPrimitive)) |f| {
         try std.testing.expect(f.type == f32);
+    }
+}
+
+/// Index (in f32 slots) of `name` in a WGSL struct body made only of `x: f32` fields.
+fn wgslFieldIndex(body: []const u8, name: []const u8) ?usize {
+    var idx: usize = 0;
+    var it = std.mem.tokenizeAny(u8, body, " ,\n{}");
+    while (it.next()) |tok| {
+        if (tok.len > 1 and tok[tok.len - 1] == ':') {
+            if (std.mem.eql(u8, tok[0 .. tok.len - 1], name)) return idx;
+            idx += 1;
+        }
+    }
+    return null;
+}
+
+fn wgslStructBody(src: []const u8, header: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, src, header).?;
+    const end = std.mem.indexOfPos(u8, src, start, "}").?;
+    return src[start + header.len .. end];
+}
+
+test "clip_id sits at the same slot in the WGSL structs as in RectPrimitive / PathSegPrim" {
+    const rect_body = wgslStructBody(WGSL, "struct InstanceData {");
+    try std.testing.expectEqual(@as(usize, @offsetOf(renderer_mod.RectPrimitive, "clip_id") / 4), wgslFieldIndex(rect_body, "clip_id").?);
+    const path_body = wgslStructBody(WGSL_PATH, "struct PathInstance {");
+    try std.testing.expectEqual(@as(usize, @sizeOf(renderer_mod.PathSegPrim) / 4), blk: {
+        var n: usize = 0;
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, path_body, i, ": f32")) |at| : (i = at + 1) n += 1;
+        break :blk n;
+    });
+    try std.testing.expectEqual(@as(usize, @offsetOf(renderer_mod.PathSegPrim, "clip_id") / 4), wgslFieldIndex(path_body, "clip_id").?);
+}
+
+test "The WGSL clip table matches renderer.ClipEntry (two RoundClips + 2 pad, all f32)" {
+    try std.testing.expectEqual(@as(usize, 20), @sizeOf(renderer_mod.RoundClip));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(renderer_mod.ClipEntry));
+    try std.testing.expect(std.mem.indexOf(u8, WGSL_CLIP, "struct RoundClip { x: f32, y: f32, w: f32, h: f32, r: f32 }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, WGSL_CLIP, "struct ClipEntry { a: RoundClip, b: RoundClip, _p0: f32, _p1: f32 }") != null);
+    // Every pipeline's shader carries the clip snippet.
+    inline for (.{ WGSL, WGSL_TEXT, WGSL_IMAGE, WGSL_PATH }) |src| {
+        try std.testing.expect(std.mem.startsWith(u8, src, WGSL_CLIP));
     }
 }

@@ -286,6 +286,23 @@ re-measure — goes through it, on both axes, so `%` width and `%` height can't 
 apart again. Absolute children use the padding box (`borders` only). Border keys are
 layout-dirtying in `PropertyStore.setStyle`, since they move the content box.
 
+## Clipping
+
+`overflow_hidden` clips a subtree to the box's padding box; with a `radius`, to the
+rounded padding box (radius minus border). `renderer.clipForChildren` is the one
+function that computes a child clip, and both walkers call it — the box bake
+(`bakeNodeRecursive`) and the backend's text pass (`appendTextRecursive`) — so
+boxes, glyphs, images and paths can't disagree. A `Clip` is the intersected
+rectangle plus the two innermost `RoundClip`s.
+
+On the GPU each primitive keeps its rectangle (cheap discard) and a `clip_id` into a
+per-frame table of rounded clips (`ClipEntry`, one storage buffer bound at
+`@group(1)` of all four pipelines, index 0 = none). Walkers intern by value
+(`internClip`), so the bake's ids stay valid when the text pass adds entries. The
+shared WGSL `clip_cov` multiplies an antialiased coverage into the fragment's alpha;
+`renderer.roundCoverage` is its CPU mirror, used by tests and by hit-testing
+(`HitNode.round`). Struct layouts are pinned by tests in `wgpu_backend.zig`.
+
 ## C-ABI Boundary
 
 `src/c_api.zig` is a thin layer with no framework logic; `include/celeris.h` is the
@@ -335,6 +352,14 @@ Large follow-ups needing dedicated design, real hardware, or OS services to veri
 - **Tri-state toggles** — `.checked` is a bool, so UIA's `ToggleState.Indeterminate` is
   unreachable. Widen to an enum when a control actually needs it.
 - **Transforms (rotate/scale) and subtree opacity** — require render-to-texture.
+- **Rounded clips deeper than two, and per-corner radii.** A primitive carries the
+  two innermost rounded clips; a third rounded ancestor clips by its rectangle only.
+  A general clip stack (or a mask pass) is the fix if real UIs nest deeper. `radius`
+  is uniform, so clips are too.
+- **Foreign GPU surfaces.** Everything Celeris draws goes through its four pipelines
+  and is clipped; there is no API to composite an app-owned GPU texture yet. When
+  one is added, it should be drawn as a textured quad through the same `clip_cov`
+  (the image pipeline's path), not overpainted afterwards.
 - **Stroke path fill / joins-caps enum / dashes / per-path opacity** — `NodeType.path`
   ships stroke-only, opaque, round caps+joins (from the capsule SDF), reusing
   `border_color`/`border_width`/`opacity`. Each of the four is a real cost, not a

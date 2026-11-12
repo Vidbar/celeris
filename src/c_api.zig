@@ -3420,9 +3420,10 @@ fn bakeAndRenderFrame(engine: *EngineState, render: bool) !void {
     var prims = std.array_list.Managed(renderer_mod.RectPrimitive).init(frame_arena.allocator());
     var image_prims = std.array_list.Managed(renderer_mod.ImagePrimitive).init(frame_arena.allocator());
     var path_prims = std.array_list.Managed(renderer_mod.PathSegPrim).init(frame_arena.allocator());
+    var clips = renderer_mod.ClipTable.init(frame_arena.allocator());
     engine.hit_list.clearRetainingCapacity();
     const bz = prof.zoneNamed("bake");
-    try renderer_mod.bakeRegistry(&engine.registry, &engine.store, &prims, &image_prims, &path_prims, &engine.hit_list, engine.focused_node, engine.focus_ring_color, engine.focus_highlight_mode, frame_arena.allocator());
+    try renderer_mod.bakeRegistry(&engine.registry, &engine.store, &prims, &image_prims, &path_prims, &engine.hit_list, &clips, engine.focused_node, engine.focus_ring_color, engine.focus_highlight_mode, frame_arena.allocator());
     bz.end();
 
     if (!render) return;
@@ -3442,7 +3443,7 @@ fn bakeAndRenderFrame(engine: *EngineState, render: bool) !void {
     }
 
     if (engine.backend) |*be| {
-        try be.renderFrame(&engine.registry, &engine.store, prims.items, image_prims.items, path_prims.items);
+        try be.renderFrame(&engine.registry, &engine.store, prims.items, image_prims.items, path_prims.items, clips.items);
     }
 }
 

@@ -31,8 +31,17 @@ listed here as well.
   freezes there and the rest of the free space goes to the other items. Before,
   a growing item ignored its `min-width`/`max-width` (only shrink clamped).
 
+- `overflowHidden` clips to the **padding box** (inside the border), as in CSS;
+  it used to clip to the border box, so children could paint over the border.
+
 ### Added
 
+- Rounded clipping: `overflowHidden` on a box with `radius` clips its whole
+  subtree — backgrounds, text, images, paths — to the rounded padding box
+  (radius minus border), antialiased; nested clips intersect (the two innermost
+  rounded ones both apply). Hit-testing follows the rounded shape. See
+  `overflowHidden` in FRAMEWORK_API.md and `examples/rounded_clip.zig`
+  (`scripts/sample_rounded_clip.ps1` checks the corner pixels).
 - `SplitPane`: per-pane `PaneCfg` (`.left` / `.right`) with a px `min`,
   VS Code-style snap-collapse (`collapsible`, `collapse_threshold`,
   `collapsed_size`) and a lifted two-way `collapsed: ?*Signal(bool)`. The drag

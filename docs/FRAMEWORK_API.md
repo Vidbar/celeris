@@ -1236,6 +1236,25 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
 **Styling:**
 - `try b.background(node, r, g, b)`
 - `try b.radius(node, 8)`
+- `try b.overflowHidden(node)` — clips the node's whole subtree to its **padding box**
+  (inside the border): backgrounds, text, images and paths alike, and hit-testing
+  follows (a click where a child is clipped away doesn't reach it). With a `radius`
+  the clip is the **rounded** shape — its radius is the box's radius minus its border,
+  the inner edge of the border — so a child with its own background can't paint over
+  the corners:
+
+  ```zig
+  const card = try b.openBox();
+  try b.radius(card, 12);
+  try b.overflowHidden(card);       // children are cut to the rounded corners
+  // … a header with its own background, an image, a scrolled list …
+  ```
+
+  Nested clips intersect, and the two innermost rounded ones both apply (a rounded
+  panel inside a rounded window). A third rounded ancestor still clips by its
+  rectangle, but its corner rounding is not applied. `examples/rounded_clip.zig`
+  (`zig build rounded_clip`) shows the cases; `scripts/sample_rounded_clip.ps1`
+  checks the corner pixels on Windows.
 - `try b.boxShadow(node, .{ .blur = 40, .dy = 18, .spread = -4, .color = t.shadow })` —
   CSS `box-shadow` semantics: `blur` is the blur *radius* in px (the shadow fades out
   over that distance, half inside its edge and half outside), `spread` inflates the

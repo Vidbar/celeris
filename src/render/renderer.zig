@@ -70,7 +70,8 @@ pub const RectPrimitive = extern struct {
     /// rather than inferred from `shadow_blur > 0`: a shadow with `blur = 0` is a
     /// legitimate hard-edged shadow, so blur can't double as the marker.
     is_shadow: f32 = 0.0,
-    _pad3: f32 = 0.0,
+    /// Index into the per-frame rounded-clip table (`ClipEntry`); 0 = none.
+    clip_id: f32 = 0.0,
     _pad4: f32 = 0.0,
 };
 
@@ -84,6 +85,8 @@ pub const ImagePrimitive = struct {
     clip_rect_y: f32 = -10000.0,
     clip_rect_w: f32 = 20000.0,
     clip_rect_h: f32 = 20000.0,
+    /// Index into the per-frame rounded-clip table; 0 = none.
+    clip_id: f32 = 0.0,
     opacity: f32 = 1.0,
     src_path: []const u8,
 };
@@ -108,7 +111,8 @@ pub const PathSegPrim = extern struct {
     clip_rect_w: f32 = 20000.0,
     clip_rect_h: f32 = 20000.0,
     z_index: f32 = 0.0,
-    _pad0: f32 = 0.0,
+    /// Index into the per-frame rounded-clip table; 0 = none.
+    clip_id: f32 = 0.0,
     _pad1: f32 = 0.0,
 };
 
@@ -129,6 +133,9 @@ pub const HitNode = struct {
     z_index: f32,
     draw_order: u32,
     clip_rect: ClipRect,
+    /// The rounded clips around this node (see `Clip.round`): a point in a clipped
+    /// corner is not a hit, matching what is drawn.
+    round: [2]RoundClip = .{ .{}, .{} },
 };
 
 pub const ClipRect = struct {
@@ -137,6 +144,140 @@ pub const ClipRect = struct {
     w: f32,
     h: f32,
 };
+
+// ── Clipping ──────────────────────────────────────────────────────────────────
+//
+// A box with `overflowHidden` clips its subtree to its PADDING box (inside the
+// border, as in CSS). With a `radius` that clip is a rounded rectangle whose
+// radius is the box's radius minus its border — the inner edge of the border.
+//
+// Every primitive carries the intersected axis-aligned clip (`ClipRect`, cheap
+// discard) plus the two innermost rounded clips. Two cover the common nesting —
+// a rounded panel inside a rounded window or card — and nested clips intersect:
+// coverage is the minimum of both. A third rounded ancestor still clips by its
+// rectangle; only its corner rounding is dropped.
+//
+// On the GPU the rounded clips live in one per-frame table (`ClipEntry`,
+// a storage buffer shared by the rect, text, image and path pipelines) and each
+// primitive carries only its index (`clip_id`, 0 = none). Every walker computes
+// clips with the same `clipForChildren` and interns them by value, so the box
+// bake and the text pass agree on ids.
+
+/// One rounded clip rectangle in logical px. `r <= 0` means "unused".
+pub const RoundClip = extern struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    w: f32 = 0,
+    h: f32 = 0,
+    r: f32 = 0,
+};
+
+/// GPU clip-table entry. Field order must match the WGSL `ClipEntry` struct.
+pub const ClipEntry = extern struct {
+    a: RoundClip = .{},
+    b: RoundClip = .{},
+    _p0: f32 = 0,
+    _p1: f32 = 0,
+};
+
+/// The clip state handed down the tree.
+pub const Clip = struct {
+    rect: ClipRect,
+    /// [0] innermost rounded clip, [1] the next one out.
+    round: [2]RoundClip = .{ .{}, .{} },
+
+    pub fn hasRound(self: Clip) bool {
+        return self.round[0].r > 0 or self.round[1].r > 0;
+    }
+
+    /// Whether (x, y) is inside the clip: the rectangle and every rounded clip.
+    /// Used by hit-testing; a point counts when at least half its pixel is covered.
+    pub fn contains(self: Clip, x: f32, y: f32) bool {
+        const c = self.rect;
+        if (x < c.x or x > c.x + c.w or y < c.y or y > c.y + c.h) return false;
+        return roundCoverage(self.round[0], x, y) >= 0.5 and roundCoverage(self.round[1], x, y) >= 0.5;
+    }
+};
+
+pub const unclipped: Clip = .{ .rect = .{ .x = -10000.0, .y = -10000.0, .w = 20000.0, .h = 20000.0 } };
+
+/// Signed distance from `p` (relative to the rect's center) to a rounded rect of
+/// half-size `b` and radius `r`. Same formula as the WGSL `sdf_rrect`.
+fn sdfRRect(px: f32, py: f32, bx: f32, by: f32, r: f32) f32 {
+    const qx = @abs(px) - bx + r;
+    const qy = @abs(py) - by + r;
+    const ox = @max(qx, 0);
+    const oy = @max(qy, 0);
+    return @sqrt(ox * ox + oy * oy) + @min(@max(qx, qy), 0) - r;
+}
+
+/// Antialiased coverage (0..1) of point (x, y) by a rounded clip — the CPU mirror
+/// of the shader's `round_cov`, so tests and hit-testing see what is drawn.
+pub fn roundCoverage(rc: RoundClip, x: f32, y: f32) f32 {
+    if (rc.r <= 0) return 1;
+    const r = @min(rc.r, @min(rc.w, rc.h) * 0.5);
+    const d = sdfRRect(x - (rc.x + rc.w * 0.5), y - (rc.y + rc.h * 0.5), rc.w * 0.5, rc.h * 0.5, r);
+    return std.math.clamp(0.5 - d, 0, 1);
+}
+
+/// The clip a node's CHILDREN draw under. A node without `overflow_hidden` passes
+/// its parent's clip through; one with it intersects its padding box, and with a
+/// `radius` also pushes a rounded clip. The single source of truth for both the
+/// box bake and the text pass.
+pub fn clipForChildren(store: *const props.PropertyStore, node_id: reg.NodeId, g: reg.Geometry, parent: Clip) Clip {
+    if (!store.modifierFlag(node_id, .overflow_hidden)) return parent;
+    const bw = styleDim(store, node_id, .border_width);
+    const bt = sideDim(store, node_id, .border_top, bw);
+    const br = sideDim(store, node_id, .border_right, bw);
+    const bb = sideDim(store, node_id, .border_bottom, bw);
+    const bl = sideDim(store, node_id, .border_left, bw);
+    const inner = ClipRect{
+        .x = g.x + bl,
+        .y = g.y + bt,
+        .w = @max(g.width - bl - br, 0),
+        .h = @max(g.height - bt - bb, 0),
+    };
+    var out = parent;
+    out.rect = intersectRect(parent.rect, inner);
+    const radius = styleDim(store, node_id, .radius);
+    const inner_r = radius - @max(@max(bt, br), @max(bb, bl));
+    if (inner_r > 0 and inner.w > 0 and inner.h > 0) {
+        out.round[1] = out.round[0];
+        out.round[0] = .{ .x = inner.x, .y = inner.y, .w = inner.w, .h = inner.h, .r = inner_r };
+    }
+    return out;
+}
+
+/// The per-frame table of rounded clips; index 0 is "no rounded clip".
+pub const ClipTable = std.array_list.Managed(ClipEntry);
+
+/// The GPU `clip_id` for `c`: 0 when it has no rounded clip (or no table to
+/// record into), else the index of its entry, added if new.
+pub fn internClip(table: ?*ClipTable, c: Clip) f32 {
+    if (!c.hasRound()) return 0;
+    const t = table orelse return 0;
+    if (t.items.len == 0) t.append(.{}) catch return 0;
+    const e = ClipEntry{ .a = c.round[0], .b = c.round[1] };
+    for (t.items[1..], 1..) |it, i| {
+        if (std.meta.eql(it.a, e.a) and std.meta.eql(it.b, e.b)) return @floatFromInt(i);
+    }
+    t.append(e) catch return 0;
+    return @floatFromInt(t.items.len - 1);
+}
+
+fn styleDim(store: *const props.PropertyStore, id: reg.NodeId, key: props.StyleKey) f32 {
+    if (store.getStyle(id, key)) |v| {
+        if (v == .dimension) return v.dimension.value;
+    }
+    return 0;
+}
+
+fn sideDim(store: *const props.PropertyStore, id: reg.NodeId, key: props.StyleKey, fallback: f32) f32 {
+    if (store.getStyle(id, key)) |v| {
+        if (v == .dimension) return v.dimension.value;
+    }
+    return fallback;
+}
 
 fn intersectRect(a: ClipRect, b: ClipRect) ClipRect {
     const ax1 = a.x;
@@ -179,6 +320,9 @@ pub const SortablePath = struct {
 };
 
 const BakeContext = struct {
+    /// Rounded-clip table this bake interns into (null: no rounded clipping data,
+    /// e.g. a unit test that only inspects rectangles).
+    clips: ?*ClipTable,
     registry: *reg.UIRegistry,
     store: *const props.PropertyStore,
     allocator: std.mem.Allocator,
@@ -203,7 +347,7 @@ const BakeContext = struct {
 fn bakeNodeRecursive(
     ctx: BakeContext,
     node_id: reg.NodeId,
-    current_clip: ClipRect,
+    clip_in: Clip,
     current_z: f32,
     depth: usize,
 ) !void {
@@ -212,16 +356,10 @@ fn bakeNodeRecursive(
     const node = node_opt.?;
     const g = node.geometry;
 
-    var next_clip = current_clip;
-    // If the node has overflow_hidden, it becomes the new clip rect for its children
-    if (ctx.store.modifierFlag(node_id, .overflow_hidden)) {
-        next_clip = intersectRect(current_clip, .{
-            .x = g.x,
-            .y = g.y,
-            .w = g.width,
-            .h = g.height,
-        });
-    }
+    // This node draws under `clip_in`; its children under `next_clip`.
+    const current_clip = clip_in.rect;
+    const clip_id = internClip(ctx.clips, clip_in);
+    const next_clip = clipForChildren(ctx.store, node_id, g, clip_in);
 
     var prim = RectPrimitive{
         .x = g.x,
@@ -232,6 +370,7 @@ fn bakeNodeRecursive(
         .clip_rect_y = current_clip.y,
         .clip_rect_w = current_clip.w,
         .clip_rect_h = current_clip.h,
+        .clip_id = clip_id,
     };
 
     const z_val = if (ctx.store.getStyle(node_id, .z_index)) |val| val.number else current_z;
@@ -244,6 +383,7 @@ fn bakeNodeRecursive(
         .z_index = z_val,
         .draw_order = my_order,
         .clip_rect = current_clip,
+        .round = clip_in.round,
     });
 
     switch (node.node_type) {
@@ -347,6 +487,7 @@ fn bakeNodeRecursive(
                         .clip_rect_y = current_clip.y,
                         .clip_rect_w = current_clip.w,
                         .clip_rect_h = current_clip.h,
+                        .clip_id = clip_id,
                         .opacity = opacity,
                         .src_path = src.string,
                     };
@@ -390,6 +531,7 @@ fn bakeNodeRecursive(
                             .clip_rect_y = current_clip.y,
                             .clip_rect_w = current_clip.w,
                             .clip_rect_h = current_clip.h,
+                            .clip_id = clip_id,
                             .z_index = z_val,
                         },
                         .z_index = z_val,
@@ -488,6 +630,7 @@ fn bakeNodeRecursive(
                 .clip_rect_y = current_clip.y,
                 .clip_rect_w = current_clip.w,
                 .clip_rect_h = current_clip.h,
+                .clip_id = clip_id,
                 .color_a = 0.0, // transparent fill: only the border shows
                 .border_top = rw,
                 .border_right = rw,
@@ -526,6 +669,8 @@ pub fn bakeRegistry(
     img_out: *std.array_list.Managed(ImagePrimitive),
     path_out: *std.array_list.Managed(PathSegPrim),
     hit_out: *std.array_list.Managed(HitNode),
+    /// Rounded-clip table for the GPU (index 0 = none); null skips it.
+    clip_out: ?*ClipTable,
     focused_node: ?reg.NodeId,
     /// Focus-ring color for this window; null uses `default_focus_ring_color`.
     ring_color: ?[4]f32,
@@ -534,7 +679,11 @@ pub fn bakeRegistry(
     focus_highlight_mode: core_events.FocusHighlightMode,
     allocator: std.mem.Allocator,
 ) !void {
-    const initial_clip = ClipRect{ .x = -10000.0, .y = -10000.0, .w = 20000.0, .h = 20000.0 };
+    const initial_clip = unclipped;
+    if (clip_out) |t| {
+        t.clearRetainingCapacity();
+        try t.append(.{}); // index 0: no rounded clip
+    }
 
     var sortable_rects = std.array_list.Managed(SortableRect).init(allocator);
     defer sortable_rects.deinit();
@@ -558,6 +707,7 @@ pub fn bakeRegistry(
         .sortable_imgs = &sortable_imgs,
         .sortable_paths = &sortable_paths,
         .hit_list = &hit_list_nodes,
+        .clips = clip_out,
         .focused_node = focused_node,
         .focus_ring_color = ring_color orelse default_focus_ring_color,
         .focus_highlight_mode = focus_highlight_mode,
@@ -647,7 +797,7 @@ test "Primitive baking" {
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
 
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 2), prims.items.len);
     try std.testing.expectEqual(@as(f32, 6.0), prims.items[1].border_radius); // second box has border-radius
@@ -697,7 +847,7 @@ test "A path node emits stroke segments at its z, styled, offset by geometry; no
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
 
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
 
     // Exactly one stroke segment, no rect body for the path node (root + 2 boxes = 3).
     try std.testing.expectEqual(@as(usize, 1), paths.items.len);
@@ -736,7 +886,7 @@ test "Flatten failure or empty path emits nothing, and unstyled path defaults to
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 1), paths.items.len);
     try std.testing.expectEqual(@as(f32, 0.5), paths.items[0].half_width); // 1px default
@@ -776,7 +926,7 @@ test "Uniform border_width seeds all sides; per-side keys override just their ed
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), prims.items.len);
 
     // prims are baked root-first, then children in order.
@@ -819,7 +969,7 @@ test "A box with no background bakes transparent, not an opaque slab" {
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
 
     // The card keeps its explicit fill; the unstyled wrapper lets it show through
     // instead of tiling the theme's base color over it.
@@ -856,7 +1006,7 @@ test "an image node bakes a transparent box behind the texture, unless it has an
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
 
     // prims[0] = root, prims[1] = bare image's box, prims[2] = boxed image's box.
     // A bare image would otherwise paint an opaque near-white slab that shows
@@ -896,7 +1046,7 @@ test "Focus ring is baked only for the focused focusable node" {
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), prims.items.len);
     }
 
@@ -911,7 +1061,7 @@ test "Focus ring is baked only for the focused focusable node" {
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, btn, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, null, .keyboard, std.testing.allocator);
 
         try std.testing.expectEqual(@as(usize, 3), prims.items.len);
         const btn_geo = registry.getNode(btn).?.geometry;
@@ -940,7 +1090,7 @@ test "Focus ring is baked only for the focused focusable node" {
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
         const magenta = [4]f32{ 1.0, 0.0, 1.0, 1.0 };
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, btn, magenta, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, magenta, .keyboard, std.testing.allocator);
 
         var ring: ?RectPrimitive = null;
         for (prims.items) |p| {
@@ -992,7 +1142,7 @@ test "Focus ring only paints in .keyboard highlight mode, never .pointer" {
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, btn, null, .pointer, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, null, .pointer, std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 2), prims.items.len);
         try std.testing.expect(!hasRing(prims.items));
     }
@@ -1007,7 +1157,7 @@ test "Focus ring only paints in .keyboard highlight mode, never .pointer" {
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, btn, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, btn, null, .keyboard, std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 3), prims.items.len);
         try std.testing.expect(hasRing(prims.items));
     }
@@ -1024,7 +1174,7 @@ fn countRingsAround(registry: *reg.UIRegistry, store: *props.PropertyStore, focu
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(registry, store, &prims, &images, &paths, &hits, focused, null, .keyboard, std.testing.allocator);
+    try bakeRegistry(registry, store, &prims, &images, &paths, &hits, null, focused, null, .keyboard, std.testing.allocator);
     const tg = registry.getNode(target).?.geometry;
     var n: usize = 0;
     for (prims.items) |p| {
@@ -1154,7 +1304,7 @@ test ".virtual_focus_target redirects the ring to a live descendant (roving/aria
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, container, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, container, null, .keyboard, std.testing.allocator);
         try std.testing.expect(hasRingAround(prims.items, registry.getNode(container).?.geometry));
         try std.testing.expect(!hasRingAround(prims.items, registry.getNode(row).?.geometry));
     }
@@ -1171,7 +1321,7 @@ test ".virtual_focus_target redirects the ring to a live descendant (roving/aria
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, container, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, container, null, .keyboard, std.testing.allocator);
         try std.testing.expect(hasRingAround(prims.items, registry.getNode(row).?.geometry));
         try std.testing.expect(!hasRingAround(prims.items, registry.getNode(container).?.geometry));
     }
@@ -1187,7 +1337,7 @@ test ".virtual_focus_target redirects the ring to a live descendant (roving/aria
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, container, null, .keyboard, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, container, null, .keyboard, std.testing.allocator);
         try std.testing.expect(hasRingAround(prims.items, registry.getNode(container).?.geometry));
     }
 }
@@ -1221,7 +1371,7 @@ test "BUG: bake does not recurse past MAX_TREE_DEPTH (deep tree can't overflow t
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
 
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
 
     // Each box bakes one rect prim. With the bound, only nodes at depth ≤ cap are
     // visited, so the count is bounded regardless of how deep the tree goes. Pre-fix
@@ -1273,7 +1423,7 @@ test "A blurred shadow bakes as its own prim: flagged, offset, spread-inflated" 
     defer paths.deinit();
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
-    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+    try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
 
     // Shadow first, body second — the shadow must paint underneath.
     try std.testing.expectEqual(@as(usize, 2), prims.items.len);
@@ -1328,7 +1478,168 @@ test "Blur 0 with an offset still casts a (hard-edged) shadow; a shadow going no
         defer paths.deinit();
         var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
         defer hits.deinit();
-        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, .pointer, std.testing.allocator);
+        try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator);
         try std.testing.expectEqual(c.prims, prims.items.len);
     }
+}
+
+// ── Rounded clipping ──────────────────────────────────────────────────────────
+
+test "roundCoverage: inside 1, outside the corner arc 0, antialiased on the edge, r=0 is no clip" {
+    const rc = RoundClip{ .x = 0, .y = 0, .w = 100, .h = 60, .r = 10 };
+    try std.testing.expectEqual(@as(f32, 1), roundCoverage(rc, 50, 30));
+    try std.testing.expectEqual(@as(f32, 1), roundCoverage(rc, 50, 0.6)); // straight edge, inside
+    try std.testing.expectEqual(@as(f32, 0), roundCoverage(rc, 1, 1)); // cut corner
+    try std.testing.expectEqual(@as(f32, 0), roundCoverage(rc, 99, 59));
+    // On the arc itself (distance 10 from the corner center): half covered.
+    const on_arc = 10 - 10 / @sqrt(@as(f32, 2));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), roundCoverage(rc, on_arc, on_arc), 0.01);
+    try std.testing.expectEqual(@as(f32, 1), roundCoverage(.{ .x = 0, .y = 0, .w = 10, .h = 10, .r = 0 }, -50, -50));
+    // A radius larger than half the short side is clamped, like the box SDF.
+    try std.testing.expectEqual(@as(f32, 1), roundCoverage(.{ .x = 0, .y = 0, .w = 100, .h = 20, .r = 50 }, 50, 10));
+}
+
+const ClipFixture = struct {
+    registry: reg.UIRegistry,
+    store: props.PropertyStore,
+    prims: std.array_list.Managed(RectPrimitive),
+    images: std.array_list.Managed(ImagePrimitive),
+    paths: std.array_list.Managed(PathSegPrim),
+    hits: std.array_list.Managed(HitNode),
+    clips: ClipTable,
+
+    fn init(self: *ClipFixture) void {
+        const a = std.testing.allocator;
+        self.registry = reg.UIRegistry.init(a);
+        self.store = props.PropertyStore.init(a);
+        self.prims = .init(a);
+        self.images = .init(a);
+        self.paths = .init(a);
+        self.hits = .init(a);
+        self.clips = .init(a);
+    }
+    fn deinit(self: *ClipFixture) void {
+        self.clips.deinit();
+        self.hits.deinit();
+        self.paths.deinit();
+        self.images.deinit();
+        self.prims.deinit();
+        self.store.deinit();
+        self.registry.deinit();
+    }
+    fn box(self: *ClipFixture, parent: ?reg.NodeId, w: f32, h: f32) !reg.NodeId {
+        const id = try self.registry.createNode(.box);
+        try self.store.registerNode(id);
+        if (parent) |p| self.registry.appendChild(p, id);
+        try self.store.setLayout(id, .width, .{ .dimension = .{ .value = w, .unit = .px } });
+        try self.store.setLayout(id, .height, .{ .dimension = .{ .value = h, .unit = .px } });
+        // A per-node red channel tells same-geometry prims apart (`primOf`).
+        try self.store.setStyle(id, .background, .{ .color = .{ .r = @as(f32, @floatFromInt(id + 1)) / 64.0, .g = 0, .b = 0, .a = 1 } });
+        return id;
+    }
+    fn roundClip(self: *ClipFixture, id: reg.NodeId, r: f32) !void {
+        try self.store.setModifier(id, .overflow_hidden, .{ .number = 1 });
+        try self.store.setStyle(id, .radius, .{ .dimension = .{ .value = r, .unit = .px } });
+    }
+    fn bake(self: *ClipFixture, root: reg.NodeId) !void {
+        var engine = layout.LayoutEngine.init(&self.registry, &self.store, null);
+        engine.solve(root, 0, 0, 800, 600);
+        try bakeRegistry(&self.registry, &self.store, &self.prims, &self.images, &self.paths, &self.hits, &self.clips, null, null, .pointer, std.testing.allocator);
+    }
+    /// The body prim drawn for node `id` (matched by geometry).
+    fn primOf(self: *ClipFixture, id: reg.NodeId) RectPrimitive {
+        const g = self.registry.getNode(id).?.geometry;
+        for (self.prims.items) |p| {
+            const red = @as(f32, @floatFromInt(id + 1)) / 64.0;
+            if (p.x == g.x and p.y == g.y and p.width == g.width and p.height == g.height and p.is_shadow == 0 and p.color_r == red) return p;
+        }
+        unreachable;
+    }
+    fn entryOf(self: *ClipFixture, id: reg.NodeId) ClipEntry {
+        return self.clips.items[@intFromFloat(self.primOf(id).clip_id)];
+    }
+};
+
+test "Rounded clip: a radius + overflowHidden box clips its child to the rounded shape" {
+    var f: ClipFixture = undefined;
+    f.init();
+    defer f.deinit();
+    const card = try f.box(null, 200, 100);
+    try f.roundClip(card, 8);
+    const child = try f.box(card, 200, 100);
+    try f.bake(card);
+
+    // The card itself draws unclipped (it is clipped by ITS parent, not itself).
+    try std.testing.expectEqual(@as(f32, 0), f.primOf(card).clip_id);
+    // The child carries the card's rounded clip …
+    const e = f.entryOf(child);
+    try std.testing.expectEqual(RoundClip{ .x = 0, .y = 0, .w = 200, .h = 100, .r = 8 }, e.a);
+    try std.testing.expectEqual(@as(f32, 0), e.b.r);
+    // … so its corner pixel is not covered, and the parent's background shows.
+    try std.testing.expectEqual(@as(f32, 0), roundCoverage(e.a, 0.5, 0.5));
+    try std.testing.expectEqual(@as(f32, 1), roundCoverage(e.a, 100, 50));
+    // Index 0 is always the "no rounded clip" entry.
+    try std.testing.expectEqual(@as(f32, 0), f.clips.items[0].a.r);
+}
+
+test "Rounded clip: a bordered box clips children to the border's inner edge" {
+    var f: ClipFixture = undefined;
+    f.init();
+    defer f.deinit();
+    const card = try f.box(null, 200, 100);
+    try f.roundClip(card, 12);
+    try f.store.setStyle(card, .border_width, .{ .dimension = .{ .value = 4, .unit = .px } });
+    const child = try f.box(card, 300, 300); // overflows: clipped to the padding box
+    try f.bake(card);
+    const e = f.entryOf(child);
+    try std.testing.expectEqual(RoundClip{ .x = 4, .y = 4, .w = 192, .h = 92, .r = 8 }, e.a);
+    // And the rectangle clip is the padding box too, not the border box.
+    try std.testing.expectEqual(@as(f32, 4), f.primOf(child).clip_rect_x);
+    try std.testing.expectEqual(@as(f32, 92), f.primOf(child).clip_rect_h);
+}
+
+test "Rounded clip: nested clips intersect — two slots, innermost first; a third keeps only its rectangle" {
+    var f: ClipFixture = undefined;
+    f.init();
+    defer f.deinit();
+    const outer = try f.box(null, 300, 300);
+    try f.roundClip(outer, 20);
+    const square = try f.box(outer, 300, 300);
+    try f.store.setModifier(square, .overflow_hidden, .{ .number = 1 }); // no radius
+    const mid = try f.box(square, 200, 200);
+    try f.roundClip(mid, 10);
+    const inner = try f.box(mid, 100, 100);
+    try f.roundClip(inner, 6);
+    const leaf = try f.box(inner, 100, 100);
+    try f.bake(outer);
+
+    // Under the square box: still the outer rounded clip (a square clip adds none).
+    try std.testing.expectEqual(@as(f32, 20), f.entryOf(mid).a.r);
+    // Under `mid`: mid innermost, outer next.
+    const em = f.entryOf(inner);
+    try std.testing.expectEqual(@as(f32, 10), em.a.r);
+    try std.testing.expectEqual(@as(f32, 20), em.b.r);
+    // Under `inner`: inner + mid; the outer's rounding is dropped (its rect stays).
+    const el = f.entryOf(leaf);
+    try std.testing.expectEqual(@as(f32, 6), el.a.r);
+    try std.testing.expectEqual(@as(f32, 10), el.b.r);
+    // Equal rounded clips share one table entry: `square` and `mid` both draw under
+    // the outer rounding only (the square box adds just a rectangle).
+    try std.testing.expectEqual(f.primOf(square).clip_id, f.primOf(mid).clip_id);
+    try std.testing.expect(f.primOf(mid).clip_id != 0);
+    try std.testing.expectEqual(@as(usize, 4), f.clips.items.len); // none + 3 distinct
+}
+
+test "Rounded clip: hit-testing ignores a child in a clipped corner" {
+    var f: ClipFixture = undefined;
+    f.init();
+    defer f.deinit();
+    const card = try f.box(null, 200, 100);
+    try f.roundClip(card, 20);
+    const child = try f.box(card, 200, 100);
+    try f.bake(card);
+    // Corner: the child is drawn nowhere there, so the card gets the hit.
+    try std.testing.expectEqual(card, core_events.hitTest(f.hits.items, &f.registry, &f.store, 1, 1).?);
+    // Inside: the child.
+    try std.testing.expectEqual(child, core_events.hitTest(f.hits.items, &f.registry, &f.store, 100, 50).?);
 }
