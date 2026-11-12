@@ -275,6 +275,17 @@ stale derived values. Fine bindings: `bindStyle`/`bindLayout`/`bindText`/`bindLi
 Known limitation (by design, author error): dependency cycles are not supported; a build
 that writes a signal it reads is the same class of error.
 
+## Layout box model
+
+`src/layout/flexbox.zig` has one source of truth for a box's content box:
+`LayoutEngine.insets(id)` = padding + `borders(id)` per side, where `borders` reads
+`border_width` and lets each `border_top/_right/_bottom/_left` override its edge (the
+same precedence the renderer paints with). Every site that sizes or places children —
+`measureChildrenPass`, `measureChildrenExtent`, `placeChildren`, the flex-grow
+re-measure — goes through it, on both axes, so `%` width and `%` height can't drift
+apart again. Absolute children use the padding box (`borders` only). Border keys are
+layout-dirtying in `PropertyStore.setStyle`, since they move the content box.
+
 ## C-ABI Boundary
 
 `src/c_api.zig` is a thin layer with no framework logic; `include/celeris.h` is the

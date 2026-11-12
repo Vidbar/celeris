@@ -182,14 +182,22 @@ pub const LayoutEngine = struct {
     /// has an explicit height but children still need their sizes resolved.
     fn measureChildrenPass(self: *LayoutEngine, parent_id: reg.NodeId) void {
         const parent = self.registry.getNode(parent_id) orelse return;
-        const pad_left = self.getDim(parent_id, .padding_left);
-        const pad_right = self.getDim(parent_id, .padding_right);
-        const border_w = self.getStyleDim(parent_id, .border_width);
-        const available_w = @max(parent.geometry.width - pad_left - pad_right - border_w * 2, 0);
+        // Flow children resolve against the CONTENT box, absolute children against
+        // the PADDING box (CSS 10.1) — both on both axes.
+        const ins = self.insets(parent_id);
+        const bor = self.borders(parent_id);
+        const content_w = @max(parent.geometry.width - ins.horizontal(), 0);
+        const content_h = @max(parent.geometry.height - ins.vertical(), 0);
+        const padbox_w = @max(parent.geometry.width - bor.horizontal(), 0);
+        const padbox_h = @max(parent.geometry.height - bor.vertical(), 0);
 
         var child_id = parent.first_child;
         while (child_id != reg.NULL_NODE) {
-            _ = self.measure(child_id, available_w, parent.geometry.height);
+            if (self.isAbsolute(child_id)) {
+                _ = self.measure(child_id, padbox_w, padbox_h);
+            } else {
+                _ = self.measure(child_id, content_w, content_h);
+            }
             child_id = self.registry.getNode(child_id).?.next_sibling;
         }
     }
@@ -197,12 +205,9 @@ pub const LayoutEngine = struct {
     fn measureChildrenExtent(self: *LayoutEngine, parent_id: reg.NodeId, parent_avail_w: f32) struct { w: f32, h: f32 } {
         const parent = self.registry.getNode(parent_id) orelse return .{ .w = 0, .h = 0 };
 
-        const pad_top = self.getDim(parent_id, .padding_top);
-        const pad_bottom = self.getDim(parent_id, .padding_bottom);
-        const pad_left = self.getDim(parent_id, .padding_left);
-        const pad_right = self.getDim(parent_id, .padding_right);
-        const border_w = self.getStyleDim(parent_id, .border_width);
-        const available_w = @max(parent_avail_w - pad_left - pad_right - border_w * 2, 0);
+        const ins = self.insets(parent_id);
+        const bor = self.borders(parent_id);
+        const available_w = @max(parent_avail_w - ins.horizontal(), 0);
 
         const is_row = self.isRow(parent_id);
         const is_wrap = self.getFlexWrap(parent_id);
@@ -228,7 +233,11 @@ pub const LayoutEngine = struct {
                 // by whether its parent happened to carry an explicit height (the only
                 // other path, `measureChildrenPass`, measures every child). That is what
                 // kept TooltipHost's panel invisible.
-                _ = self.measure(child_id, parent.geometry.width, parent.geometry.height);
+                _ = self.measure(
+                    child_id,
+                    @max(parent.geometry.width - bor.horizontal(), 0),
+                    @max(parent.geometry.height - bor.vertical(), 0),
+                );
             } else {
                 const size = self.measure(child_id, available_w, std.math.floatMax(f32));
                 const m_top = self.getDim(child_id, .margin_top);
@@ -260,8 +269,8 @@ pub const LayoutEngine = struct {
         max_main = @max(max_main, line_main);
         total_cross += line_cross;
 
-        const padding_main = if (is_row) pad_left + pad_right + border_w * 2 else pad_top + pad_bottom + border_w * 2;
-        const padding_cross = if (is_row) pad_top + pad_bottom + border_w * 2 else pad_left + pad_right + border_w * 2;
+        const padding_main = if (is_row) ins.horizontal() else ins.vertical();
+        const padding_cross = if (is_row) ins.vertical() else ins.horizontal();
 
         return if (is_row)
             .{ .w = max_main + padding_main, .h = total_cross + padding_cross }
@@ -452,14 +461,11 @@ pub const LayoutEngine = struct {
         const pw = parent.geometry.width;
         const ph = parent.geometry.height;
 
-        const pad_left = self.getDim(parent_id, .padding_left);
-        const pad_top = self.getDim(parent_id, .padding_top);
-        const pad_right = self.getDim(parent_id, .padding_right);
-        const pad_bottom = self.getDim(parent_id, .padding_bottom);
-        const border_w = self.getStyleDim(parent_id, .border_width);
+        const ins = self.insets(parent_id);
+        const bor = self.borders(parent_id);
 
-        const avail_w = @max(pw - pad_left - pad_right - border_w * 2, 0);
-        const avail_h = @max(ph - pad_top - pad_bottom - border_w * 2, 0);
+        const avail_w = @max(pw - ins.horizontal(), 0);
+        const avail_h = @max(ph - ins.vertical(), 0);
 
         const is_row = self.isRow(parent_id);
         const is_wrap = self.getFlexWrap(parent_id);
@@ -480,12 +486,13 @@ pub const LayoutEngine = struct {
             if (!self.isAbsolute(child_id)) {
                 flow_children.append(child_id) catch break;
             } else {
-                // Absolute: relative to parent origin
+                // Absolute: relative to the parent's PADDING box (inside the
+                // border, CSS 10.1) — the same box `measureChildren*` sized it against.
                 const m_top = self.getDim(child_id, .margin_top);
                 const m_left = self.getDim(child_id, .margin_left);
                 const left = self.getDim(child_id, .left);
                 const top = self.getDim(child_id, .top);
-                self.place(child_id, px + left + m_left, py + top + m_top);
+                self.place(child_id, px + bor.l + left + m_left, py + bor.t + top + m_top);
             }
             child_id = self.registry.getNode(child_id).?.next_sibling;
         }
@@ -610,16 +617,15 @@ pub const LayoutEngine = struct {
                         // height needs no recompute.
                         if (fg > 0 and self.registry.getNode(cid).?.node_type == .box) {
                             const child = self.registry.getNode(cid).?;
-                            const c_pad_l = self.getDim(cid, .padding_left);
-                            const c_pad_r = self.getDim(cid, .padding_right);
-                            const c_bw = self.getStyleDim(cid, .border_width);
-                            const inner_w = @max(child.geometry.width - c_pad_l - c_pad_r - c_bw * 2, 0);
+                            const c_ins = self.insets(cid);
+                            const inner_w = @max(child.geometry.width - c_ins.horizontal(), 0);
+                            const inner_h = @max(child.geometry.height - c_ins.vertical(), 0);
                             // Mark children dirty so they re-measure with new width
                             var gc_id = child.first_child;
                             while (gc_id != reg.NULL_NODE) {
                                 if (self.registry.getNode(gc_id)) |gc| {
                                     gc.layout_dirty = true;
-                                    _ = self.measure(gc_id, inner_w, child.geometry.height);
+                                    _ = self.measure(gc_id, inner_w, inner_h);
                                 }
                                 gc_id = self.registry.getNode(gc_id).?.next_sibling;
                             }
@@ -721,7 +727,7 @@ pub const LayoutEngine = struct {
             }
 
             // Justify Content
-            const origin_main = if (is_row) px + pad_left + border_w else py + pad_top + border_w;
+            const origin_main = if (is_row) px + ins.l else py + ins.t;
             var cursor = origin_main;
             var dynamic_gap = explicit_gap;
 
@@ -789,7 +795,7 @@ pub const LayoutEngine = struct {
                 const child_align = self.alignSelf(cid) orelse align_val;
 
                 if (is_row) {
-                    const cross_origin = py + pad_top + border_w + cross_cursor;
+                    const cross_origin = py + ins.t + cross_cursor;
                     var cross_pos: f32 = cross_origin + m_top;
                     switch (child_align) {
                         .flex_start => {},
@@ -820,7 +826,7 @@ pub const LayoutEngine = struct {
                     self.place(cid, cursor, cross_pos);
                     cursor += child.geometry.width + m_right + dynamic_gap;
                 } else {
-                    const cross_origin = px + pad_left + border_w + cross_cursor;
+                    const cross_origin = px + ins.l + cross_cursor;
                     var cross_pos: f32 = cross_origin + m_left;
                     switch (child_align) {
                         // baseline has no column meaning → treat as flex_start.
@@ -889,6 +895,54 @@ pub const LayoutEngine = struct {
             if (p == .dimension and p.dimension.unit == .px) return p.dimension.value;
         }
         return 0.0;
+    }
+
+    /// Per-side lengths of a box's border or padding+border ring.
+    pub const Insets = struct {
+        l: f32 = 0,
+        t: f32 = 0,
+        r: f32 = 0,
+        b: f32 = 0,
+        pub fn horizontal(self: Insets) f32 {
+            return self.l + self.r;
+        }
+        pub fn vertical(self: Insets) f32 {
+            return self.t + self.b;
+        }
+    };
+
+    /// The border ring that takes layout space. A per-side border
+    /// (`border_top`/`_right`/`_bottom`/`_left`) overrides `border_width` for that
+    /// side only — the same precedence the renderer paints with. Every border
+    /// takes space, like CSS: there is no paint-only border.
+    pub fn borders(self: *const LayoutEngine, node_id: reg.NodeId) Insets {
+        const all = self.getStyleDim(node_id, .border_width);
+        return .{
+            .l = self.sideBorder(node_id, .border_left, all),
+            .t = self.sideBorder(node_id, .border_top, all),
+            .r = self.sideBorder(node_id, .border_right, all),
+            .b = self.sideBorder(node_id, .border_bottom, all),
+        };
+    }
+
+    /// Padding + border: the single source of truth for a box's content box.
+    /// Flow children are sized and placed inside `geometry` shrunk by this, on
+    /// BOTH axes — so a `100%` width and a `100%` height mean the same thing.
+    pub fn insets(self: *const LayoutEngine, node_id: reg.NodeId) Insets {
+        const bor = self.borders(node_id);
+        return .{
+            .l = bor.l + self.getDim(node_id, .padding_left),
+            .t = bor.t + self.getDim(node_id, .padding_top),
+            .r = bor.r + self.getDim(node_id, .padding_right),
+            .b = bor.b + self.getDim(node_id, .padding_bottom),
+        };
+    }
+
+    fn sideBorder(self: *const LayoutEngine, node_id: reg.NodeId, key: props.StyleKey, fallback: f32) f32 {
+        if (self.store.getStyle(node_id, key)) |p| {
+            if (p == .dimension and p.dimension.unit == .px) return p.dimension.value;
+        }
+        return fallback;
     }
 
     fn getStyleDim(self: *const LayoutEngine, node_id: reg.NodeId, key: props.StyleKey) f32 {
@@ -3355,4 +3409,200 @@ test "Flexbox — a reused text node that loses line_height on rebuild re-measur
 
     try std.testing.expectApproxEqAbs(@as(f32, 2 * text_mod.lineHeight(16)), registry.getNode(t2).?.geometry.height, 0.01);
     try std.testing.expectApproxEqAbs(text_mod.LINE_HEIGHT_FACTOR, registry.getNode(t2).?.text_layout.?.line_height_factor, 0.0001);
+}
+
+// ── Box model: one content box for both axes (`insets()`) ─────────────────────
+
+fn boxModelNode(r: *reg.UIRegistry, s: *props.PropertyStore, parent: ?reg.NodeId) !reg.NodeId {
+    const id = try r.createNode(.box);
+    try s.registerNode(id);
+    if (parent) |p| r.appendChild(p, id);
+    return id;
+}
+
+fn pxv(v: f32) props.PropValue {
+    return .{ .dimension = .{ .value = v, .unit = .px } };
+}
+
+fn pctv(v: f32) props.PropValue {
+    return .{ .dimension = .{ .value = v, .unit = .percent } };
+}
+
+test "Box model — 100% height resolves against the content box (padding)" {
+    var r = reg.UIRegistry.init(std.testing.allocator);
+    defer r.deinit();
+    var s = props.PropertyStore.init(std.testing.allocator);
+    defer s.deinit();
+
+    const root = try boxModelNode(&r, &s, null);
+    try s.setLayout(root, .width, pxv(400));
+    try s.setLayout(root, .height, pxv(578));
+    for ([_]props.LayoutKey{ .padding_top, .padding_right, .padding_bottom, .padding_left }) |k| try s.setLayout(root, k, pxv(6));
+    const child = try boxModelNode(&r, &s, root);
+    try s.setLayout(child, .width, pctv(100));
+    try s.setLayout(child, .height, pctv(100));
+
+    var e = LayoutEngine.init(&r, &s, null);
+    e.solve(root, 0, 0, 400, 578);
+    const g = r.getNode(child).?.geometry;
+    try std.testing.expectApproxEqAbs(@as(f32, 566), g.height, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 388), g.width, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 6), g.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 6), g.x, 0.01);
+}
+
+test "Box model — 100% height inside a bordered box stays inside the border" {
+    var r = reg.UIRegistry.init(std.testing.allocator);
+    defer r.deinit();
+    var s = props.PropertyStore.init(std.testing.allocator);
+    defer s.deinit();
+
+    const root = try boxModelNode(&r, &s, null);
+    try s.setLayout(root, .width, pxv(200));
+    try s.setLayout(root, .height, pxv(100));
+    try s.setStyle(root, .border_width, pxv(1));
+    const child = try boxModelNode(&r, &s, root);
+    try s.setLayout(child, .width, pctv(100));
+    try s.setLayout(child, .height, pctv(100));
+
+    var e = LayoutEngine.init(&r, &s, null);
+    e.solve(root, 0, 0, 200, 100);
+    const g = r.getNode(child).?.geometry;
+    try std.testing.expectApproxEqAbs(@as(f32, 1), g.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 98), g.height, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 198), g.width, 0.01);
+    try std.testing.expect(g.y + g.height <= 100 - 1 + 0.01);
+}
+
+test "Box model — a per-side border insets the content like border_width on that side" {
+    var r = reg.UIRegistry.init(std.testing.allocator);
+    defer r.deinit();
+    var s = props.PropertyStore.init(std.testing.allocator);
+    defer s.deinit();
+
+    const root = try boxModelNode(&r, &s, null);
+    const side = try boxModelNode(&r, &s, root);
+    try s.setLayout(side, .width, pxv(200));
+    try s.setLayout(side, .height, pxv(100));
+    try s.setStyle(side, .border_left, pxv(2));
+    const side_kid = try boxModelNode(&r, &s, side);
+    try s.setLayout(side_kid, .height, pctv(100));
+
+    const all = try boxModelNode(&r, &s, root);
+    try s.setLayout(all, .width, pxv(200));
+    try s.setLayout(all, .height, pxv(100));
+    try s.setStyle(all, .border_width, pxv(2));
+    const all_kid = try boxModelNode(&r, &s, all);
+    try s.setLayout(all_kid, .height, pctv(100));
+
+    var e = LayoutEngine.init(&r, &s, null);
+    e.solve(root, 0, 0, 400, 400);
+    const sg = r.getNode(side).?.geometry;
+    const sk = r.getNode(side_kid).?.geometry;
+    const ag = r.getNode(all).?.geometry;
+    const ak = r.getNode(all_kid).?.geometry;
+    // Both inset 2px on the left …
+    try std.testing.expectApproxEqAbs(ak.x - ag.x, sk.x - sg.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 2), sk.x - sg.x, 0.01);
+    // … and the per-side box insets ONLY the left.
+    try std.testing.expectApproxEqAbs(@as(f32, 198), sk.width, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 100), sk.height, 0.01);
+    try std.testing.expectApproxEqAbs(sg.y, sk.y, 0.01);
+}
+
+test "Box model — a per-side border overrides border_width for that side only" {
+    var r = reg.UIRegistry.init(std.testing.allocator);
+    defer r.deinit();
+    var s = props.PropertyStore.init(std.testing.allocator);
+    defer s.deinit();
+
+    const root = try boxModelNode(&r, &s, null);
+    try s.setLayout(root, .width, pxv(100));
+    try s.setLayout(root, .height, pxv(100));
+    try s.setStyle(root, .border_width, pxv(1));
+    try s.setStyle(root, .border_bottom, pxv(4));
+    const child = try boxModelNode(&r, &s, root);
+    try s.setLayout(child, .height, pctv(100));
+
+    var e = LayoutEngine.init(&r, &s, null);
+    e.solve(root, 0, 0, 100, 100);
+    const g = r.getNode(child).?.geometry;
+    try std.testing.expectApproxEqAbs(@as(f32, 1), g.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 95), g.height, 0.01); // 100 - 1 top - 4 bottom
+    try std.testing.expectApproxEqAbs(@as(f32, 98), g.width, 0.01);
+}
+
+test "Box model — an absolute child resolves against the padding box" {
+    var r = reg.UIRegistry.init(std.testing.allocator);
+    defer r.deinit();
+    var s = props.PropertyStore.init(std.testing.allocator);
+    defer s.deinit();
+
+    const root = try boxModelNode(&r, &s, null);
+    try s.setLayout(root, .width, pxv(200));
+    try s.setLayout(root, .height, pxv(100));
+    try s.setStyle(root, .border_width, pxv(3));
+    for ([_]props.LayoutKey{ .padding_top, .padding_right, .padding_bottom, .padding_left }) |k| try s.setLayout(root, k, pxv(10));
+    const abs = try boxModelNode(&r, &s, root);
+    try s.setLayout(abs, .position, .{ .keyword = .absolute });
+    try s.setLayout(abs, .width, pctv(100));
+    try s.setLayout(abs, .height, pctv(100));
+
+    var e = LayoutEngine.init(&r, &s, null);
+    e.solve(root, 0, 0, 200, 100);
+    const g = r.getNode(abs).?.geometry;
+    // Inside the border, ignoring padding (CSS 10.1).
+    try std.testing.expectApproxEqAbs(@as(f32, 3), g.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 3), g.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 194), g.width, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 94), g.height, 0.01);
+}
+
+test "Box model — changing padding or a border between solves re-sizes a 100% child" {
+    var r = reg.UIRegistry.init(std.testing.allocator);
+    defer r.deinit();
+    var s = props.PropertyStore.init(std.testing.allocator);
+    defer s.deinit();
+    s.setRegistry(&r);
+
+    const root = try boxModelNode(&r, &s, null);
+    try s.setLayout(root, .width, pxv(200));
+    try s.setLayout(root, .height, pxv(100));
+    const child = try boxModelNode(&r, &s, root);
+    try s.setLayout(child, .height, pctv(100));
+
+    var e = LayoutEngine.init(&r, &s, null);
+    e.solve(root, 0, 0, 200, 100);
+    try std.testing.expectApproxEqAbs(@as(f32, 100), r.getNode(child).?.geometry.height, 0.01);
+
+    // Same box size, new padding: the cached child must not keep its old height.
+    try s.setLayout(root, .padding_top, pxv(8));
+    try s.setLayout(root, .padding_bottom, pxv(8));
+    e.solve(root, 0, 0, 200, 100);
+    try std.testing.expectApproxEqAbs(@as(f32, 84), r.getNode(child).?.geometry.height, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), r.getNode(child).?.geometry.y, 0.01);
+
+    // A border set later is a layout change too, not paint-only.
+    try s.setStyle(root, .border_top, pxv(2));
+    e.solve(root, 0, 0, 200, 100);
+    try std.testing.expectApproxEqAbs(@as(f32, 82), r.getNode(child).?.geometry.height, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 10), r.getNode(child).?.geometry.y, 0.01);
+}
+
+test "Box model — 100% height in a content-sized parent stays finite" {
+    var r = reg.UIRegistry.init(std.testing.allocator);
+    defer r.deinit();
+    var s = props.PropertyStore.init(std.testing.allocator);
+    defer s.deinit();
+
+    const root = try boxModelNode(&r, &s, null);
+    try s.setLayout(root, .width, pxv(200));
+    try s.setLayout(root, .padding_top, pxv(5));
+    const child = try boxModelNode(&r, &s, root);
+    try s.setLayout(child, .height, pctv(100));
+
+    var e = LayoutEngine.init(&r, &s, null);
+    e.solve(root, 0, 0, 200, std.math.floatMax(f32));
+    try std.testing.expect(std.math.isFinite(r.getNode(child).?.geometry.height));
+    try std.testing.expect(std.math.isFinite(r.getNode(root).?.geometry.height));
 }

@@ -807,8 +807,9 @@ pub const UIBuilder = struct {
     }
 
     /// Per-side border widths (px). Each overrides `borderWidth` for that edge, so a
-    /// single-edge rule is `borderTop(id, 2)` with no uniform border set. Paint only —
-    /// unlike `borderWidth` these don't inset the content box.
+    /// single-edge rule is `borderTop(id, 2)` with no uniform border set. Like
+    /// `borderWidth`, each side takes layout space (CSS box model): the content
+    /// box is inset by that edge's width, so children never paint over it.
     pub fn borderTop(self: *UIBuilder, id: NodeId, w: f32) !void {
         try self.store.setStyle(id, .border_top, dimPx(w));
     }

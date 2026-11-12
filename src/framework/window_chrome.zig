@@ -183,7 +183,8 @@ pub const WindowChrome = struct {
         const controls = try b.openNodeKeyed(.box, null);
         try b.flexRow(controls);
         try b.height(controls, 100, .percent);
-        try b.alignItems(controls, .center);
+        // Stretch: each button fills the caption's content box (above the divider).
+        try b.alignItems(controls, .stretch);
 
         const max_glyph = if (self.queryMaximized()) icons.chrome_restore else icons.chrome_maximize;
         const max_label = if (self.queryMaximized()) self.control_labels.restore else self.control_labels.maximize;
@@ -208,7 +209,8 @@ pub const WindowChrome = struct {
         const b = ctx.builder;
         const btn = try b.openNodeKeyed(.box, null);
         try b.width(btn, 46, .px);
-        try b.height(btn, self.height, .px);
+        // No height: `controls` stretches it to the caption's content box, so with
+        // a divider (a bottom border that takes 1px) the hover fill stops above it.
         try b.alignItems(btn, .center);
         try b.justifyContent(btn, .center);
         try wireHit(b, btn, true, true);
@@ -484,6 +486,22 @@ test "WindowChrome: content_fill makes the content as wide as the drag area" {
     const area = h.geom(bar.drag_area);
     try testing.expect(area.width > 0);
     try testing.expectApproxEqAbs(area.width, h.geom(bar.content_box).width, 0.5);
+}
+
+test "WindowChrome: the divider takes layout space, so nothing paints over it" {
+    var h = @import("test_support.zig").Harness.init(testing.allocator);
+    defer h.deinit();
+    h.wire();
+
+    const bar = try mountChrome(&h.registry, &h.store, &h.router, &h.mounts, .{ .height = 40 });
+    const bar_node = h.registry.getNode(bar.drag_area).?.parent;
+    h.solve(0, 800, 40);
+    const bar_g = h.geom(bar_node);
+    // Drag area and caption buttons stop at the 1px bottom divider.
+    for ([_]reg.NodeId{ bar.drag_area, bar.min_btn, bar.close_btn }) |id| {
+        const g = h.geom(id);
+        try testing.expectApproxEqAbs(bar_g.y + bar_g.height - 1, g.y + g.height, 0.01);
+    }
 }
 
 test "WindowChrome: with content_fill, a press on the content still drags the window" {

@@ -9,6 +9,32 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### BREAKING
+
+- Box model: one content box for both axes. A `%` **height** now resolves against
+  the parent's content box (height minus vertical padding and borders), the same as
+  `%` width already did. Before, a `height(100, .percent)` child of a padded or
+  bordered box got the full border-box height and overflowed by padding + border
+  (a `SplitPane` with `fill = true` in a box with `padding 6` overflowed 12px).
+  If you compensated by hand (subtracting padding from a height), remove it.
+- Per-side borders (`borderTop` / `borderRight` / `borderBottom` / `borderLeft`)
+  now take layout space like `borderWidth`: the content is inset by that edge
+  instead of painting over the line. A box that relied on a child covering its
+  border loses that much space on that side. A per-side value overrides
+  `borderWidth` for its edge in layout, as it already did when painting.
+- Absolute children resolve `%` sizes and `left` / `top` against the parent's
+  padding box (inside the border), as in CSS; before, they used the border box.
+
+### Fixed
+
+- Changing a border (`borderWidth` or a side) at runtime now relayouts; it was
+  paint-only, so the content box stayed stale until something else relayouted
+  (e.g. a text input whose focus border toggles).
+- `WindowChrome`: with `divider` on, the caption buttons' hover fill and the drag
+  area stop above the 1px divider instead of covering it.
+
 ## 0.1.15 — 2026-11-12
 
 ### Fixed

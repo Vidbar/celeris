@@ -130,8 +130,8 @@ pub const StyleKey = enum {
     text_align,
     border_width,
     border_color,
-    /// Per-side border widths (px). Unset sides fall back to `border_width`. Paint
-    /// only — thin decorations (dividers, a tab underline) that don't shift layout.
+    /// Per-side border widths (px). Unset sides fall back to `border_width`. Like
+    /// `border_width`, each side takes layout space: it insets the content box.
     border_top,
     border_right,
     border_bottom,
@@ -501,8 +501,11 @@ pub const PropertyStore = struct {
             if (self.registry) |r| {
                 // font_size changes the measured text size, so it must invalidate
                 // layout (and ancestors), not just paint — otherwise the cached
-                // text dimensions go stale. Other style keys are paint-only.
-                if (key == .font_size or key == .font_role or key == .letter_spacing or key == .line_height or key == .text_wrap) {
+                // text dimensions go stale. Borders take layout space (they inset the
+                // content box), so they relayout too. Other style keys are paint-only.
+                if (key == .font_size or key == .font_role or key == .letter_spacing or key == .line_height or key == .text_wrap or
+                    key == .border_width or key == .border_top or key == .border_right or key == .border_bottom or key == .border_left)
+                {
                     r.global_layout_dirty = true;
                     r.global_render_dirty = true;
                     if (r.getNode(node_id)) |n| n.text_dirty = true; // font size changes shaping

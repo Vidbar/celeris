@@ -1157,8 +1157,24 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
   node's size; grow and shrink never take it past them (`.px` or `.percent` of the
   parent).
 - `try b.positionAbsolute(node, left, top)` — takes the node out of the flex flow and
-  places it at `left` / `top` px from its parent's origin. The parent keeps no room for
-  it; combine with `zIndex` to draw it above siblings.
+  places it at `left` / `top` px from its parent's **padding box** (inside the border,
+  ignoring padding — CSS's containing block). Its `%` sizes resolve against that same
+  box. The parent keeps no room for it; combine with `zIndex` to draw it above siblings.
+
+**Box model** (one model for every box, as in CSS with `box-sizing: border-box`):
+- A declared `width` / `height` is the **border box**: border and padding are inside it.
+- The **content box** is that size minus padding and borders on each side. Borders
+  always take layout space — `borderWidth` and the per-side `borderTop` / `borderRight`
+  / `borderBottom` / `borderLeft` alike (a per-side value overrides `borderWidth` for
+  its edge only).
+- Flow children are placed in the content box, and a `%` width **or height** resolves
+  against it — both axes behave the same. A box 578px tall with `padding(6, …)` gives a
+  `height(100, .percent)` child 566px; inside a `borderWidth(1)` box the child starts at
+  y+1 and ends above the bottom border.
+- A `%` height whose parent has no definite height (it sizes to its content) resolves
+  to 0 — give the parent a height, `flexGrow`, or let `alignItems(.stretch)` fill it.
+- To fill a padded or bordered box, `height(100, .percent)` (or `.stretch` on the cross
+  axis) is enough; never subtract the padding by hand.
 - `try b.scrollOffsetY(node, -150)` / `scrollOffsetX` — shifts all of the node's
   children by that many px (negative moves them up / left, i.e. scrolls down / right).
   Render-only: no layout solve, so it is cheap to animate. Pair it with
@@ -1192,9 +1208,10 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
   the shorter sides never reach the second color.
 - `try b.borderTop(node, 2)` / `borderRight` / `borderBottom` / `borderLeft` — border width
   for one edge (px), overriding the uniform `borderWidth` on that edge, so a single
-  bottom rule is `borderBottom(node, 1)` plus a `borderColor`. **Paint only:** unlike
-  `borderWidth`, they don't push the content inward; add padding if text would touch
-  the line.
+  bottom rule is `borderBottom(node, 1)` plus a `borderColor`. Like `borderWidth`, each
+  side **takes layout space**: the content box is inset by that edge, so children
+  (backgrounds, hover fills, a `100%` child) stop at the line instead of painting over
+  it. See *Box model* above.
 - `try b.borderStyle(node, .dashed)` — dashed border (`.solid` is the default). Dashes
   only render on boxes without `radius`; a rounded box always draws a solid border.
 
