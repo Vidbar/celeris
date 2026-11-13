@@ -33,9 +33,11 @@ listed here as well.
   that completes a double click.
 - A right click now focuses the nearest focusable ancestor of the hit node
   before dispatching, like a left click (a miss leaves the focus alone).
-- `TreeView` look: rows have a 4 px gap between icon and label, are vertically
-  centered (no 2 px top padding), and an unfocused tree paints its selection
-  with the dimmer `inactive_selected_bg`.
+- `TreeView` look: rows have a 4 px gap between icon and label and 1 px of
+  vertical padding (it holds the focus outline) instead of 2 px at the top, and
+  an unfocused tree paints its selection with the dimmer `inactive_selected_bg`.
+- `TreeView` with a scroll bridge scrolls to the selected row only when the
+  selection changes; a hover or focus change no longer scrolls it back.
 
 ## 0.3.0 — 2026-11-13
 

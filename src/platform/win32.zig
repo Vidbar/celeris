@@ -1301,6 +1301,10 @@ pub fn pollSystemEvents(ctx: ?*anyopaque, input_cb: ?platform.InputCallback) boo
                 cb(ctx, .{ .native_handle = .{ .win32 = .{ .hwnd = msg.hwnd, .hinst = null } }, .event_type = .ime_preedit, .text = "" });
             }
         }
+        // F10 (Shift+F10 = context menu) was delivered to the app above. Letting
+        // DefWindowProc see it too would enter the window's menu loop on key-up
+        // (SC_KEYMENU) and steal the next keystrokes from the app's own popup.
+        if ((msg.message == 0x0104 or msg.message == 0x0105) and msg.wParam == 0x79) continue;
         _ = TranslateMessage(&msg);
         _ = DispatchMessageW(&msg);
     }
