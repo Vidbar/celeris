@@ -120,6 +120,9 @@ pub const AppOptions = struct {
 /// Upper bound on live windows, matching the engine's own pool.
 pub const MAX_WINDOWS = 16;
 
+/// Longest window title, in UTF-8 bytes (the platform backends' limit too).
+pub const TITLE_MAX_BYTES = 255;
+
 var g_hosts: [MAX_WINDOWS]?*WindowHost = [_]?*WindowHost{null} ** MAX_WINDOWS;
 
 /// Monotonic counter behind `WindowHost.generation`.
@@ -169,7 +172,11 @@ pub const WindowHost = struct {
     // rewrite them and rebuild, which is the fix for the frozen caption.
     show_sys_bar: bool = false,
     bar_style: AppBarStyle = .classic,
+    /// The window's title: what the classic bar draws and what the OS shows.
+    /// Borrowed from `options.title` at creation; after `setTitle` it points
+    /// into `title_storage`, the host's own copy.
     bar_title: []const u8 = "",
+    title_storage: [TITLE_MAX_BYTES]u8 = undefined,
     bar_content: ?component.Child = null,
     bar_height: f32 = window_chrome.DEFAULT_HEIGHT,
     bar_divider: bool = true,
@@ -195,6 +202,17 @@ pub const WindowHost = struct {
 
     fn slot(self: *const WindowHost) usize {
         return @intCast(self.engine_id - 1);
+    }
+
+    /// Copies `title` (cut to `TITLE_MAX_BYTES` on a UTF-8 boundary) into the
+    /// host, retitles the OS window, and rebuilds only when the classic bar is
+    /// actually drawing the title. `title` may alias the current title.
+    fn setTitle(self: *WindowHost, title: []const u8) void {
+        const t = platform.utf8Truncate(title, self.title_storage.len);
+        std.mem.copyForwards(u8, self.title_storage[0..t.len], t);
+        self.bar_title = self.title_storage[0..t.len];
+        c_api.celeris_window_set_title(self.engine_id, self.bar_title.ptr, self.bar_title.len);
+        if (self.show_sys_bar and self.bar_style == .classic and !self.closing) self.rebuild();
     }
 
     /// Window actions the component tree reaches through `ctx.dragRegion`.
@@ -594,6 +612,23 @@ pub const WindowHandle = struct {
         h.rebuild();
     }
 
+    /// Retitles the window at runtime: the OS title (taskbar, Alt+Tab) and the
+    /// classic bar's title. The string is copied (cut to 255 bytes on a UTF-8
+    /// boundary), so a temporary buffer is fine. UI thread only; from another
+    /// thread, `postTask` it. For a title that follows state, call it from an
+    /// effect — see "Window title" in docs/FRAMEWORK_API.md.
+    pub fn setTitle(self: WindowHandle, new_title: []const u8) void {
+        const h = self.live() orelse return;
+        h.setTitle(new_title);
+    }
+
+    /// The current title (the host's copy — never read back from the OS).
+    /// Valid until the next `setTitle`. Empty for a closed window.
+    pub fn title(self: WindowHandle) []const u8 {
+        const h = self.live() orelse return "";
+        return h.bar_title;
+    }
+
     /// Re-runs the window's root build. Rarely needed — signal writes already
     /// re-run the subtrees that read them.
     pub fn rebuild(self: WindowHandle) void {
@@ -790,6 +825,19 @@ pub const window = struct {
         const h = primaryHost() orelse return;
         h.show_sys_bar = visible;
         h.rebuild();
+    }
+
+    /// Retitles the main window (see `WindowHandle.setTitle`). No-op before
+    /// `runApp` has created the window.
+    pub fn setTitle(new_title: []const u8) void {
+        const h = primaryHost() orelse return;
+        h.setTitle(new_title);
+    }
+
+    /// The main window's current title; empty before `runApp`.
+    pub fn title() []const u8 {
+        const h = primaryHost() orelse return "";
+        return h.bar_title;
     }
 
     /// The primary display's work area (screen minus taskbar), logical px.
@@ -1249,6 +1297,48 @@ test "A host's caption config is per-window state, not frozen at creation" {
     try std.testing.expectEqual(@as(f32, 0), host.bar_height);
     window.setAppBarVisible(false);
     try std.testing.expect(!host.show_sys_bar);
+}
+
+test "setTitle copies the title into the host and keeps it past the caller's buffer" {
+    const a = std.testing.allocator;
+    var r = events.EventRouter.init(a);
+    defer r.deinit();
+    // engine_id with no engine behind it: the C-ABI call is a no-op, exactly
+    // like a headless window, so this checks the host's state on its own.
+    var host = WindowHost{ .allocator = a, .router = &r, .engine_id = 1, .is_primary = true, .bar_title = "Albesi", .generation = 5 };
+    g_hosts[0] = &host;
+    defer g_hosts[0] = null;
+
+    try std.testing.expectEqualStrings("Albesi", window.title());
+
+    var tmp: [32]u8 = undefined;
+    const s = try std.fmt.bufPrint(&tmp, "{s} - Albesi", .{"proyecto ñ"});
+    window.setTitle(s);
+    @memset(&tmp, 'X'); // the caller's buffer dies; the title must not
+    try std.testing.expectEqualStrings("proyecto ñ - Albesi", window.title());
+    try std.testing.expectEqualStrings("proyecto ñ - Albesi", host.bar_title);
+
+    // Re-setting from its own current value (aliasing) is fine.
+    window.setTitle(window.title()[0..8]);
+    try std.testing.expectEqualStrings("proyecto", window.title());
+
+    // A handle retitles its own window; too-long titles are cut on a boundary.
+    const handle = WindowHandle{ .host = &host, .engine_id = 1, .generation = 5 };
+    var long: [300]u8 = undefined;
+    @memset(long[0..254], 'a');
+    long[254] = 0xC3; // "é" straddles byte 255
+    long[255] = 0xA9;
+    @memset(long[256..], 'b');
+    handle.setTitle(&long);
+    try std.testing.expectEqual(@as(usize, 254), handle.title().len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(handle.title()));
+
+    // A stale handle neither writes nor reads.
+    host.generation = 6;
+    handle.setTitle("stale");
+    try std.testing.expectEqualStrings("", handle.title());
+    host.generation = 5;
+    try std.testing.expectEqual(@as(usize, 254), handle.title().len);
 }
 
 test "Close() from a handler of the same window defers the teardown past the dispatch" {

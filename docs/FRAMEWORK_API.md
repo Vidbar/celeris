@@ -607,7 +607,7 @@ Opening it from a press that also triggers a rebuild is fine.
 ```zig
 // setup (once):  self.ctx_menu = try fw.menu.Menu.init(gpa, "node_ctx");
 //                try self.ctx_menu.addItem("Delete", "delete");
-//                self.ctx_menu.on_select = onMenuSelect;
+//                self.ctx_menu.on_select = fw.events.makeHandler(self, onMenuSelect);
 pub fn build(self: *App, ctx: *fw.component.BuildContext) !void {
     try ctx.box(.{ .width = fw.component.pct(100), .height = fw.component.pct(100), .direction = .column }, .{
         Caption{},                  // 40px custom caption
@@ -618,7 +618,31 @@ pub fn build(self: *App, ctx: *fw.component.BuildContext) !void {
 fn onNodeRightClick(self: *App, ev: fw.events.Event) void {
     self.ctx_menu.popupWindow(ev.x, ev.y, .pointer);
 }
+fn onMenuSelect(self: *App, ev: fw.events.Event) void {
+    self.commands.run(ev.id); // ev.id = the chosen item's action_id
+}
 ```
+
+**Selection: `on_select`.** It is an ordinary `events.Handler`, so it carries
+your own context. That is how a host reaches its state (a command registry, a
+document model) without globals. Build it with `ctx.handler(self, f)` inside
+`build()`, or with `fw.events.makeHandler(self, f)` anywhere else (menus are
+usually wired once, in `init`). What it delivers:
+
+- One synthesized event per selection: `ev.name == "select"`, `ev.id` = the item's
+  `action_id`, `ev.node_id` = its row. It is the same whether the item was
+  clicked or chosen with Enter.
+- Only the **root** menu's handler fires, including for items chosen inside a
+  submenu. A submenu's own `on_select` is never called.
+- The menu chain is already closed when the handler runs. The handler may reopen
+  it or open a dialog. It must not `deinit` the menu synchronously, because the same
+  click is still being dispatched. Defer that with `postTask`.
+- The handler's payload must outlive the menu.
+
+A selection is a one-shot command, not state, so there is no lifted
+`?*Signal` for it: choosing the same item twice must run the command twice.
+State that a menu *shows* (checkmarks, enabled items) is lifted as usual, through
+`checked_signal` / `enabled_signal`.
 
 ## Event Handlers
 
@@ -885,6 +909,40 @@ The caption is per-window state, changeable at runtime (it used to be frozen at 
 ```zig
 fw.window.setAppBarHeight(44);
 fw.window.setAppBarVisible(false);
+```
+
+#### Window title
+
+`AppOptions.title` / `WindowOptions.title` set the title at creation.
+`fw.window.setTitle` (or `handle.setTitle` for a secondary window) changes it later.
+It updates both the OS title (taskbar, Alt+Tab, the Wayland decoration) and the
+classic bar's title:
+
+```zig
+fw.window.setTitle("project - Albesi");
+const now = fw.window.title();   // the framework's copy, valid until the next setTitle
+```
+
+- **The string is copied**, so a temporary buffer (`bufPrint` into a stack array)
+  is fine.
+- **Length:** titles are cut to 255 bytes, always on a UTF-8 character boundary.
+- **Encoding:** non-ASCII text works on both platforms (UTF-16 on Win32, UTF-8
+  through libdecor).
+- **Threading:** like every window call, it runs on the UI thread; from a worker,
+  `postTask` it.
+- **The C ABI** has the same call: `celeris_window_set_title(engine_id, title, len)`.
+
+`setTitle` is an imperative call, like every other window setter. A title that
+**follows state** is an effect over your own signals, not a special option:
+
+```zig
+fn syncTitle(self: *App) void {
+    var buf: [256]u8 = undefined;
+    const t = std.fmt.bufPrint(&buf, "{s} - Albesi", .{self.folder_name.get()}) catch "Albesi";
+    fw.window.setTitle(t);
+}
+// once, e.g. in init / the first build:
+_ = try self.scope.createEffect(self, syncTitle);   // re-runs whenever folder_name changes
 ```
 
 ### Secondary windows

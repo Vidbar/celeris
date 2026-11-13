@@ -38,7 +38,7 @@ extern "C" {
 
 /* C-ABI version of this header / build. Compare against celeris_abi_version() at
  * load time; a mismatch means the .dll/.so doesn't match this header. */
-#define CELERIS_ABI_VERSION 7u
+#define CELERIS_ABI_VERSION 8u
 uint32_t celeris_abi_version(void);
 
 /* ── Diagnostics: zone profiler ───────────────────────────────────────────────
@@ -407,6 +407,10 @@ int32_t celeris_window_get_bounds(int32_t engine_id, int32_t *x, int32_t *y,
 void celeris_window_set_always_on_top(int32_t engine_id, bool on);
 /* Shows/hides a window without destroying it — its component tree survives. */
 void celeris_window_set_visible(int32_t engine_id, bool visible);
+/* Sets the OS window title (taskbar, Alt+Tab, decoration) from UTF-8 `title`
+ * (`len` bytes, no NUL needed). Copied; cut to 255 bytes on a character
+ * boundary; invalid bytes become U+FFFD. UI thread only. No-op when headless. */
+void celeris_window_set_title(int32_t engine_id, const char *title, size_t len);
 /* The platform handle (HWND on Windows), or NULL when headless. Escape hatch. */
 void *celeris_window_native_handle(int32_t engine_id);
 /* Schedules celeris_deinit for the top of the next loop iteration. This is what

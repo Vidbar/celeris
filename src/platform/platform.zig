@@ -141,6 +141,9 @@ pub const PlatformWindow = struct {
         /// Shows/hides the window without destroying it. Hiding the primary
         /// window is how an app swaps itself for a compact overlay.
         setVisible: ?*const fn (ptr: *anyopaque, visible: bool) void = null,
+        /// Sets the OS window title (taskbar, Alt+Tab, decoration). UTF-8; the
+        /// backend truncates to its own limit on a character boundary.
+        setTitle: ?*const fn (ptr: *anyopaque, title: []const u8) void = null,
     };
 
     pub fn deinit(self: *PlatformWindow) void {
@@ -198,6 +201,10 @@ pub const PlatformWindow = struct {
 
     pub fn setVisible(self: *PlatformWindow, visible: bool) void {
         if (self.vtable.setVisible) |f| f(self.ptr, visible);
+    }
+
+    pub fn setTitle(self: *PlatformWindow, title: []const u8) void {
+        if (self.vtable.setTitle) |f| f(self.ptr, title);
     }
 };
 
@@ -292,4 +299,36 @@ pub fn setCursor(cursor: CursorType) void {
 /// no-op (the IME is always available and gated by which control has focus).
 pub fn setImeActive(active: bool) void {
     Impl.setImeActive(active);
+}
+
+/// Longest prefix of `s` that is at most `max_bytes` long and does not end in
+/// the middle of a UTF-8 sequence. Backends copy titles into fixed buffers; a
+/// plain byte cut could split a multibyte character and hand the OS invalid
+/// UTF-8. Only the cut point is adjusted — the rest of `s` is not validated.
+pub fn utf8Truncate(s: []const u8, max_bytes: usize) []const u8 {
+    if (s.len <= max_bytes) return s;
+    var n = max_bytes;
+    // Back off while the byte at the cut is a continuation byte (10xxxxxx): the
+    // cut would land inside the sequence that byte belongs to.
+    while (n > 0 and (s[n] & 0xC0) == 0x80) n -= 1;
+    return s[0..n];
+}
+
+test "utf8Truncate keeps short strings and never splits a multibyte character" {
+    const t = std.testing;
+    try t.expectEqualStrings("abc", utf8Truncate("abc", 10));
+    try t.expectEqualStrings("ab", utf8Truncate("abc", 2));
+    // "ñ" is 2 bytes (C3 B1): a cut after its first byte backs off before it.
+    try t.expectEqualStrings("a", utf8Truncate("añ", 2));
+    try t.expectEqualStrings("añ", utf8Truncate("añb", 3));
+    // A 4-byte emoji straddling the limit is dropped whole.
+    try t.expectEqualStrings("x", utf8Truncate("x\u{1F600}", 3));
+    // At the real title limit (255): 254 ASCII + "é" (2 bytes) → the é is dropped.
+    var buf: [256]u8 = undefined;
+    @memset(buf[0..254], 'a');
+    buf[254] = 0xC3;
+    buf[255] = 0xA9;
+    const out = utf8Truncate(&buf, 255);
+    try t.expectEqual(@as(usize, 254), out.len);
+    try t.expect(std.unicode.utf8ValidateSlice(out));
 }

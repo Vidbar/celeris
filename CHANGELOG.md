@@ -9,6 +9,38 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### BREAKING
+
+- `fw.menu.Menu.on_select` is now `?events.Handler` (was
+  `?*const fn (*Menu, []const u8) void`), so a selection reaches the host's own
+  state without globals. The handler receives a synthesized `select` event with
+  `ev.id` = the chosen item's `action_id`, identical for mouse and keyboard (Enter).
+  As before, only the root menu's handler fires, including for submenu items.
+  Migration: `menu.on_select = onSel;` with `fn onSel(_: *Menu, id: []const u8)`
+  becomes `menu.on_select = fw.events.makeHandler(self, onSel);` with
+  `fn onSel(self: *App, ev: fw.events.Event)`, reading `ev.id`.
+
+### Added
+
+- `fw.events.makeHandler(payload, f)`: builds an `events.Handler` outside
+  `build()` (`ctx.handler` is the same function).
+- Runtime window title: `fw.window.setTitle` / `fw.window.title()` and
+  `WindowHandle.setTitle` / `.title()`. Each updates the OS title and the classic
+  bar. The title is copied and cut to 255 bytes on a UTF-8 boundary. C ABI:
+  `celeris_window_set_title(engine_id, title, len)`; `CELERIS_ABI_VERSION` is now 8.
+
+### Fixed
+
+- Windows: the window class, window, and message loop now use the wide (W) Win32
+  API. Titles outside the system code page (e.g. `日本語`, emoji) were mangled
+  before. Typed characters outside it were too: `WM_CHAR` arrived as code-page
+  bytes, and IME results in non-Latin scripts as DBCS bytes. Characters outside
+  the BMP now arrive as one `char_input` (the surrogate pair is combined).
+- Window titles longer than 255 bytes were cut mid-character, handing the OS
+  invalid UTF-8; they are now cut on a character boundary (Win32 and Wayland).
+
 ## 0.2.1 — 2026-11-12
 
 ### Fixed

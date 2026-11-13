@@ -266,21 +266,7 @@ pub const BuildContext = struct {
     /// promise — the replacement for string action-ids in user code.
     pub fn handler(self: *BuildContext, payload: anytype, comptime f: anytype) Handler {
         _ = self;
-        const P = @TypeOf(payload);
-        const Wrap = struct {
-            fn call(erased: ?*anyopaque, ev: events.Event) void {
-                if (P == void) {
-                    f({}, ev);
-                } else {
-                    const typed: P = @ptrCast(@alignCast(erased));
-                    f(typed, ev);
-                }
-            }
-        };
-        return .{
-            .ptr = if (P == void) null else @ptrCast(payload),
-            .call = Wrap.call,
-        };
+        return events.makeHandler(payload, f);
     }
 
     /// `on_resize` for a node opened with the raw builder (`openNodeKeyed`) rather

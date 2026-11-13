@@ -856,9 +856,10 @@ pub export fn celeris_last_error() [*:0]const u8 {
 /// changes bump it; breaking changes are a new major. v3 adds the folder picker
 /// (celeris_pick_directory) and thread-safe repaint (celeris_request_redraw);
 /// v5 adds the CELERIS_EVENT_RESIZE event type; v6 adds the `line_height` style
-/// key and celeris_get_caret_metrics_ex / celeris_get_char_index_at_ex.
+/// key and celeris_get_caret_metrics_ex / celeris_get_char_index_at_ex; v8 adds
+/// celeris_window_set_title.
 pub export fn celeris_abi_version() u32 {
-    return 7;
+    return 8;
 }
 
 // ─── Diagnostics: zone profiler ────────────────────────────────────────────────
@@ -1019,6 +1020,15 @@ pub export fn celeris_window_set_visible(engine_id: i32, visible: bool) void {
     if (getEngine(engine_id)) |engine| {
         if (engine.window) |*win| win.setVisible(visible);
     }
+}
+
+/// Sets the OS window title from UTF-8 (`len` bytes; no NUL needed). The
+/// backend copies it, cuts it to 255 bytes on a character boundary, and maps
+/// invalid bytes to U+FFFD. A null `title` is the empty title. No-op headless.
+pub export fn celeris_window_set_title(engine_id: i32, title: ?[*]const u8, len: usize) void {
+    const engine = getEngine(engine_id) orelse return;
+    const t: []const u8 = if (title) |p| p[0..len] else "";
+    if (engine.window) |*win| win.setTitle(t);
 }
 
 /// The platform handle backing this window (HWND on Windows), or null when the
@@ -1604,7 +1614,7 @@ fn firstActiveEngine() ?*EngineState {
 /// the first active engine — that fallback is what the optional handle is for. An
 /// event that DOES name a window but matches no engine is dropped: guessing is
 /// always wrong once a second window exists, and it is not a hypothetical. Windows
-/// fires WM_SIZE from inside `CreateWindowExA`, before the new window has been
+/// fires WM_SIZE from inside `CreateWindowExW`, before the new window has been
 /// recorded on its engine (its pool slot isn't even active yet), so the guess
 /// resized the *main* window to the overlay's 460x56 and left its layout there.
 fn engineForHandle(handle: ?platform_mod.NativeWindowHandle) ?*EngineState {

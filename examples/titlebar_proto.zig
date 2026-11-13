@@ -17,55 +17,121 @@ const std = @import("std");
 const celeris = @import("celeris");
 const fw = celeris.framework;
 
-// ── Demo menu state (module-level, like a real host's app state) ──────────────
-// `Menu.on_select` only hands the callback the menu itself + the chosen
-// action_id (framework.menu.Menu.on_select), not host context — a real host
-// closes over its own state some other way (a global, a context struct
-// threaded through main()); globals are the simplest thing that demonstrates
-// the reactive checked/enabled wiring here.
-var g_grid_checked: fw.signals.Signal(bool) = undefined;
-var g_advanced_checked: fw.signals.Signal(bool) = undefined;
-var g_rec_start_enabled: fw.signals.Signal(bool) = undefined;
-var g_rec_stop_enabled: fw.signals.Signal(bool) = undefined;
-var g_status: [128]u8 = undefined;
-var g_status_len: usize = 0;
+// ── Demo state ──────────────────────────────────────────────────────────────
+// Lives in `Demo` (the app instance), not in globals: every menu's `on_select`
+// is an `events.Handler` whose payload is `*Demo`, so the selection reaches the
+// host's own state directly — the same way a host would route ids into its own
+// command registry.
+const Demo = struct {
+    const titles_start = 3; // "Celeris", the startup title
+    grid_checked: fw.signals.Signal(bool),
+    advanced_checked: fw.signals.Signal(bool),
+    rec_start_enabled: fw.signals.Signal(bool),
+    rec_stop_enabled: fw.signals.Signal(bool),
+    status: [128]u8 = undefined,
+    status_len: usize = 0,
+    status_id: fw.component.NodeId = 0,
+    title_idx: usize = titles_start,
 
-fn setStatus(s: []const u8) void {
-    g_status_len = @min(s.len, g_status.len);
-    @memcpy(g_status[0..g_status_len], s[0..g_status_len]);
-}
-
-fn onMenuSelect(_: *fw.menu.Menu, action_id: []const u8) void {
-    if (std.mem.eql(u8, action_id, "view.grid")) {
-        g_grid_checked.set(!g_grid_checked.get());
-        setStatus(if (g_grid_checked.get()) "Grid on" else "Grid off");
-    } else if (std.mem.eql(u8, action_id, "rec.advanced")) {
-        g_advanced_checked.set(!g_advanced_checked.get());
-        setStatus(if (g_advanced_checked.get()) "Advanced mode on" else "Advanced mode off");
-    } else if (std.mem.eql(u8, action_id, "rec.start")) {
-        g_rec_start_enabled.set(false);
-        g_rec_stop_enabled.set(true);
-        setStatus("Recording started");
-    } else if (std.mem.eql(u8, action_id, "rec.stop")) {
-        g_rec_start_enabled.set(true);
-        g_rec_stop_enabled.set(false);
-        setStatus("Recording stopped");
-    } else if (std.mem.eql(u8, action_id, "proj.new")) {
-        setStatus("New project");
-    } else if (std.mem.eql(u8, action_id, "proj.save")) {
-        setStatus("Project saved");
-    } else if (std.mem.eql(u8, action_id, "proj.exit")) {
-        setStatus("Exit (demo, does not close the app)");
-    } else if (std.mem.eql(u8, action_id, "recent.a")) {
-        setStatus("Opening demo_project.cel");
-    } else if (std.mem.eql(u8, action_id, "recent.b")) {
-        setStatus("Opening recording_2026.cel");
-    } else if (std.mem.eql(u8, action_id, "run.exec")) {
-        setStatus("Running");
-    } else if (std.mem.eql(u8, action_id, "view.dark")) {
-        setStatus("Dark mode (visual demo)");
+    fn init(allocator: std.mem.Allocator) Demo {
+        var d: Demo = .{
+            .grid_checked = fw.signals.Signal(bool).init(allocator, false),
+            .advanced_checked = fw.signals.Signal(bool).init(allocator, false),
+            .rec_start_enabled = fw.signals.Signal(bool).init(allocator, true),
+            .rec_stop_enabled = fw.signals.Signal(bool).init(allocator, false),
+        };
+        d.setStatus("Ready");
+        return d;
     }
-}
+
+    fn deinit(self: *Demo) void {
+        self.grid_checked.deinit();
+        self.advanced_checked.deinit();
+        self.rec_start_enabled.deinit();
+        self.rec_stop_enabled.deinit();
+    }
+
+    fn setStatus(self: *Demo, s: []const u8) void {
+        self.status_len = @min(s.len, self.status.len);
+        @memcpy(self.status[0..self.status_len], s[0..self.status_len]);
+    }
+
+    fn onMenuSelect(self: *Demo, ev: fw.events.Event) void {
+        const id = ev.id; // the chosen item's action_id
+        if (std.mem.eql(u8, id, "view.grid")) {
+            self.grid_checked.set(!self.grid_checked.get());
+            self.setStatus(if (self.grid_checked.get()) "Grid on" else "Grid off");
+        } else if (std.mem.eql(u8, id, "rec.advanced")) {
+            self.advanced_checked.set(!self.advanced_checked.get());
+            self.setStatus(if (self.advanced_checked.get()) "Advanced mode on" else "Advanced mode off");
+        } else if (std.mem.eql(u8, id, "rec.start")) {
+            self.rec_start_enabled.set(false);
+            self.rec_stop_enabled.set(true);
+            self.setStatus("Recording started");
+        } else if (std.mem.eql(u8, id, "rec.stop")) {
+            self.rec_start_enabled.set(true);
+            self.rec_stop_enabled.set(false);
+            self.setStatus("Recording stopped");
+        } else if (std.mem.eql(u8, id, "proj.new")) {
+            self.setStatus("New project");
+        } else if (std.mem.eql(u8, id, "proj.rename")) {
+            // Manual check for `fw.window.setTitle`: watch the taskbar / Alt+Tab
+            // entry. The titles include non-ASCII text on purpose (UTF-16 on
+            // Win32, UTF-8 through libdecor on Wayland).
+            const titles = [_][]const u8{ "demo_project - Celeris", "Diseño ñandú - Celeris", "日本語 \u{1F4C1} - Celeris", "Celeris" };
+            self.title_idx = (self.title_idx + 1) % titles.len;
+            fw.window.setTitle(titles[self.title_idx]);
+            self.setStatus("Window retitled (check the taskbar)");
+        } else if (std.mem.eql(u8, id, "proj.save")) {
+            self.setStatus("Project saved");
+        } else if (std.mem.eql(u8, id, "proj.exit")) {
+            self.setStatus("Exit (demo, does not close the app)");
+        } else if (std.mem.eql(u8, id, "recent.a")) {
+            self.setStatus("Opening demo_project.cel");
+        } else if (std.mem.eql(u8, id, "recent.b")) {
+            self.setStatus("Opening recording_2026.cel");
+        } else if (std.mem.eql(u8, id, "run.exec")) {
+            self.setStatus("Running");
+        } else if (std.mem.eql(u8, id, "view.dark")) {
+            self.setStatus("Dark mode (visual demo)");
+        }
+    }
+
+    pub fn build(self: *Demo, ctx: *fw.component.BuildContext) !void {
+        const b = ctx.builder;
+        const t = b.theme;
+
+        const col = try b.openBox();
+        try b.flexColumn(col);
+        try b.alignItems(col, .center);
+        try b.justifyContent(col, .center);
+        try b.gap(col, 12);
+        try b.width(col, 100, .percent);
+        try b.height(col, 100, .percent);
+
+        const h = try b.addText("44px custom title bar");
+        try b.fontSize(h, 24);
+        try b.fontBold(h, true);
+        try b.textColor(h, t.text.r, t.text.g, t.text.b);
+
+        const sub = try b.addText("app-composed caption . drag . window controls . embedded MenuBar");
+        try b.fontSize(sub, 14);
+        try b.textColor(sub, t.text_secondary.r, t.text_secondary.g, t.text_secondary.b);
+
+        // Monospace line — exercises the mono role end to end.
+        const mono = try b.addText("options.app_bar = childOf(Caption, &caption)");
+        try b.fontSize(mono, 14);
+        try b.fontMono(mono, true);
+        try b.textColor(mono, t.accent.r, t.accent.g, t.accent.b);
+
+        const status = try b.addText(self.status[0..self.status_len]);
+        self.status_id = status;
+        try b.fontSize(status, 13);
+        try b.textColor(status, t.text_secondary.r, t.text_secondary.g, t.text_secondary.b);
+
+        b.close(); // col
+    }
+};
 
 /// The caption's contents: a bold wordmark, a rounded pill, and — the point of
 /// this example — a `MenuBar` to the right of them, transparent and at
@@ -129,95 +195,51 @@ const Caption = struct {
     pub fn deinit(_: *Caption) void {}
 };
 
-const Demo = struct {
-    status_id: fw.component.NodeId = 0,
-
-    pub fn build(self: *Demo, ctx: *fw.component.BuildContext) !void {
-        const b = ctx.builder;
-        const t = b.theme;
-
-        const col = try b.openBox();
-        try b.flexColumn(col);
-        try b.alignItems(col, .center);
-        try b.justifyContent(col, .center);
-        try b.gap(col, 12);
-        try b.width(col, 100, .percent);
-        try b.height(col, 100, .percent);
-
-        const h = try b.addText("44px custom title bar");
-        try b.fontSize(h, 24);
-        try b.fontBold(h, true);
-        try b.textColor(h, t.text.r, t.text.g, t.text.b);
-
-        const sub = try b.addText("app-composed caption . drag . window controls . embedded MenuBar");
-        try b.fontSize(sub, 14);
-        try b.textColor(sub, t.text_secondary.r, t.text_secondary.g, t.text_secondary.b);
-
-        // Monospace line — exercises the mono role end to end.
-        const mono = try b.addText("options.app_bar = childOf(Caption, &caption)");
-        try b.fontSize(mono, 14);
-        try b.fontMono(mono, true);
-        try b.textColor(mono, t.accent.r, t.accent.g, t.accent.b);
-
-        const status = try b.addText(g_status[0..g_status_len]);
-        self.status_id = status;
-        try b.fontSize(status, 13);
-        try b.textColor(status, t.text_secondary.r, t.text_secondary.g, t.text_secondary.b);
-
-        b.close(); // col
-    }
-};
-
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
 
     var router = fw.events.EventRouter.init(allocator);
     defer router.deinit();
 
-    g_grid_checked = fw.signals.Signal(bool).init(allocator, false);
-    defer g_grid_checked.deinit();
-    g_advanced_checked = fw.signals.Signal(bool).init(allocator, false);
-    defer g_advanced_checked.deinit();
-    g_rec_start_enabled = fw.signals.Signal(bool).init(allocator, true);
-    defer g_rec_start_enabled.deinit();
-    g_rec_stop_enabled = fw.signals.Signal(bool).init(allocator, false);
-    defer g_rec_stop_enabled.deinit();
-    setStatus("Ready");
+    var app = Demo.init(allocator);
+    defer app.deinit();
+    const on_select = fw.events.makeHandler(&app, Demo.onMenuSelect);
 
     // ── Menus ───────────────────────────────────────────────────────────────
     const project_menu = try fw.menu.Menu.init(allocator, "project_menu");
     defer project_menu.deinit();
-    project_menu.on_select = onMenuSelect;
+    project_menu.on_select = on_select;
     try project_menu.addItemEx(.{ .label = "New", .action_id = "proj.new", .shortcut = "Ctrl+N" });
 
     const recent_menu = try fw.menu.Menu.init(allocator, "recent_menu");
     defer recent_menu.deinit();
-    recent_menu.on_select = onMenuSelect;
+    recent_menu.on_select = on_select;
     try recent_menu.addItem("demo_project.cel", "recent.a");
     try recent_menu.addItem("recording_2026.cel", "recent.b");
     try project_menu.addSubmenu("Recent", recent_menu);
 
     try project_menu.addItemEx(.{ .label = "Save", .action_id = "proj.save", .shortcut = "Ctrl+S" });
+    try project_menu.addItem("Rename window", "proj.rename");
     try project_menu.addSeparator();
     try project_menu.addItemEx(.{ .label = "Exit", .action_id = "proj.exit", .shortcut = "Ctrl+Q" });
 
     const recording_menu = try fw.menu.Menu.init(allocator, "recording_menu");
     defer recording_menu.deinit();
-    recording_menu.on_select = onMenuSelect;
-    try recording_menu.addItemEx(.{ .label = "Start recording", .action_id = "rec.start", .enabled_signal = &g_rec_start_enabled });
-    try recording_menu.addItemEx(.{ .label = "Stop recording", .action_id = "rec.stop", .enabled_signal = &g_rec_stop_enabled });
+    recording_menu.on_select = on_select;
+    try recording_menu.addItemEx(.{ .label = "Start recording", .action_id = "rec.start", .enabled_signal = &app.rec_start_enabled });
+    try recording_menu.addItemEx(.{ .label = "Stop recording", .action_id = "rec.stop", .enabled_signal = &app.rec_stop_enabled });
     try recording_menu.addSeparator();
-    try recording_menu.addItemEx(.{ .label = "Advanced mode", .action_id = "rec.advanced", .checked_signal = &g_advanced_checked });
+    try recording_menu.addItemEx(.{ .label = "Advanced mode", .action_id = "rec.advanced", .checked_signal = &app.advanced_checked });
 
     const run_menu = try fw.menu.Menu.init(allocator, "run_menu");
     defer run_menu.deinit();
-    run_menu.on_select = onMenuSelect;
+    run_menu.on_select = on_select;
     try run_menu.addItemEx(.{ .label = "Run", .action_id = "run.exec", .shortcut = "F5" });
 
     const view_menu = try fw.menu.Menu.init(allocator, "view_menu");
     defer view_menu.deinit();
-    view_menu.on_select = onMenuSelect;
-    try view_menu.addItemEx(.{ .label = "Grid", .action_id = "view.grid", .checked_signal = &g_grid_checked });
+    view_menu.on_select = on_select;
+    try view_menu.addItemEx(.{ .label = "Grid", .action_id = "view.grid", .checked_signal = &app.grid_checked });
     try view_menu.addItemEx(.{ .label = "Dark mode", .action_id = "view.dark" });
     // Long label on purpose: exercises the content-measured panel width
     // (the fixed 200px PANEL_W would clip or crowd this).
@@ -230,7 +252,6 @@ pub fn main() !void {
     try menu_bar.addMenu("Run", run_menu);
     try menu_bar.addMenu("View", view_menu);
 
-    var app = Demo{};
     // Caller-owned: the slot must outlive runApp.
     var caption = Caption{
         .label = "Celeris",

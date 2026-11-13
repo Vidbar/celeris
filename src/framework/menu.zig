@@ -6,8 +6,9 @@
 //! a `Menu` controller (like `Dropdown`): items are added up front, `popup(x,y)`
 //! opens it at a point, and selection flows through the normal `clickable`
 //! action-id path — clicking an item fires a `click` event carrying that item's
-//! `action_id`, which the host receives via the structured C-ABI callback (and a
-//! Zig host can also use `on_select`). A full-window transparent backdrop catches
+//! `action_id`, which the host receives via the structured C-ABI callback. A Zig
+//! host uses `on_select` (an `events.Handler` carrying its own context), which
+//! fires for mouse AND keyboard selection. A full-window transparent backdrop catches
 //! outside clicks to dismiss.
 //!
 //! Built once (like Dropdown): the backdrop + panel + rows always exist; `is_open`
@@ -94,9 +95,19 @@ pub const Menu = struct {
     /// Focusable action id of the panel ("<id>__panel"). Focus lands here while
     /// the menu is open so key_down routes to the menu. Owned.
     focus_id: []u8,
-    /// Called when an item is chosen, with that item's action_id (Zig hosts). C
-    /// hosts get the same as a `click` event through the structured callback.
-    on_select: ?*const fn (*Menu, []const u8) void = null,
+    /// Fired when a leaf item is chosen — by mouse or by keyboard (Enter), in
+    /// this menu or in any of its submenus (only the ROOT menu's handler fires).
+    /// The event is synthesized, identical for both input paths:
+    /// `name = "select"`, `id` = the chosen item's `action_id`, `node_id` = its
+    /// row. Build it with `ctx.handler(self, onMenuSelect)`; `ptr` must outlive
+    /// the menu. The menu is already closed when the handler runs, so the handler
+    /// may reopen it or open a dialog. It must not `deinit` the menu
+    /// synchronously (the same click is still being dispatched to the menu's
+    /// backdrop) — defer that with `application.postTask`. This is the authoritative
+    /// selection channel: the raw `click` a C-ABI host sees on the structured
+    /// callback exists for mouse selections only (Enter arrives there as a
+    /// `key_down` on the panel).
+    on_select: ?events.Handler = null,
 
     items: std.array_list.Managed(MenuItem),
 
@@ -394,11 +405,24 @@ pub const Menu = struct {
             return;
         }
         if (!std.mem.eql(u8, ev.name, "click")) return;
-        // Close the whole chain from the root, then fire the root's on_select
-        // (the host sets it on the menu it opened).
+        self.fireSelect(idx);
+    }
+
+    /// The single selection path (mouse click and Enter): closes the whole chain
+    /// from the root, then fires the root's `on_select` with a synthesized
+    /// "select" event. Everything needed is copied to locals before `close()`
+    /// and nothing touches `self`/the root after the call, so a handler that
+    /// reopens the menu sees it in a clean state.
+    fn fireSelect(self: *Menu, idx: usize) void {
         const r = self.rootMenu();
+        const h = r.on_select;
+        const ev: events.Event = .{
+            .name = "select",
+            .id = self.items.items[idx].action_id,
+            .node_id = if (idx < self.row_ids.items.len) self.row_ids.items[idx] else 0,
+        };
         r.close();
-        if (r.on_select) |cb| cb(r, it.action_id);
+        if (h) |handler| handler.call(handler.ptr, ev);
     }
 
     // ── Keyboard navigation (model logic; host wires it to key events) ──────────
@@ -444,9 +468,7 @@ pub const Menu = struct {
             sub.highlighted.set(sub.firstEnabled());
             return;
         }
-        const r = self.rootMenu();
-        r.close();
-        if (r.on_select) |cb| cb(r, it.action_id);
+        self.fireSelect(@intCast(hi));
     }
 
     /// The deepest open submenu under this menu (or this menu itself) — the one
@@ -1042,12 +1064,123 @@ const Probe = struct {
     var last: [32]u8 = undefined;
     var last_len: usize = 0;
     var calls: u32 = 0;
-    fn onSelect(_: *Menu, action: []const u8) void {
-        std.mem.copyForwards(u8, &last, action);
-        last_len = action.len;
+    const handler: events.Handler = .{ .ptr = null, .call = onSelect };
+    fn onSelect(_: ?*anyopaque, ev: events.Event) void {
+        std.mem.copyForwards(u8, &last, ev.id);
+        last_len = ev.id.len;
         calls += 1;
     }
 };
+
+/// Instance-state host (no statics): proves each menu delivers to its OWN host.
+const Host = struct {
+    calls: u32 = 0,
+    last: [32]u8 = undefined,
+    last_len: usize = 0,
+    last_name: []const u8 = "",
+    last_node: reg.NodeId = 0,
+    fn onSelect(self: *Host, ev: events.Event) void {
+        std.mem.copyForwards(u8, &self.last, ev.id);
+        self.last_len = ev.id.len;
+        self.last_name = ev.name;
+        self.last_node = ev.node_id;
+        self.calls += 1;
+    }
+    fn action(self: *const Host) []const u8 {
+        return self.last[0..self.last_len];
+    }
+};
+
+test "Menu: two menus with two hosts each deliver to their own host" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+
+    const a = try Menu.init(testing.allocator, "menu_a");
+    defer a.deinit();
+    try a.addItem("New", "file.new");
+    const b = try Menu.init(testing.allocator, "menu_b");
+    defer b.deinit();
+    try b.addItem("Zoom", "view.zoom");
+
+    var host_a: Host = .{};
+    var host_b: Host = .{};
+    a.on_select = ctx.handler(&host_a, Host.onSelect);
+    b.on_select = ctx.handler(&host_b, Host.onSelect);
+
+    const app_root = try bld.openBox();
+    try a.build(&ctx);
+    try b.build(&ctx);
+    bld.close();
+    _ = app_root;
+
+    a.popup(0, 0, .pointer);
+    clickRow(&env, a, 0);
+    b.popup(0, 0, .pointer);
+    clickRow(&env, b, 0);
+
+    try testing.expectEqual(@as(u32, 1), host_a.calls);
+    try testing.expectEqual(@as(u32, 1), host_b.calls);
+    try testing.expectEqualStrings("file.new", host_a.action());
+    try testing.expectEqualStrings("view.zoom", host_b.action());
+}
+
+test "Menu: mouse and keyboard selection deliver the identical select event" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    const m = try buildTestMenu(&env);
+    defer m.deinit();
+
+    var mouse: Host = .{};
+    m.on_select = events.makeHandler(&mouse, Host.onSelect);
+    m.popup(0, 0, .pointer);
+    clickRow(&env, m, 1); // Copy
+
+    var kbd: Host = .{};
+    m.on_select = events.makeHandler(&kbd, Host.onSelect);
+    m.popup(0, 0, .pointer);
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.down.code() });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.down.code() });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.enter.code() });
+
+    try testing.expectEqual(@as(u32, 1), mouse.calls);
+    try testing.expectEqual(@as(u32, 1), kbd.calls);
+    try testing.expectEqualStrings("select", mouse.last_name);
+    try testing.expectEqualStrings("select", kbd.last_name);
+    try testing.expectEqualStrings("copy", mouse.action());
+    try testing.expectEqualStrings("copy", kbd.action());
+    try testing.expectEqual(m.row_ids.items[1], mouse.last_node);
+    try testing.expectEqual(mouse.last_node, kbd.last_node);
+}
+
+test "Menu: on_select handler may reopen the menu (reentrancy)" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    const m = try buildTestMenu(&env);
+    defer m.deinit();
+
+    const Reopen = struct {
+        var fired: bool = false;
+        fn f(menu: *Menu, ev: events.Event) void {
+            // Already closed when the handler runs.
+            fired = std.mem.eql(u8, ev.id, "cut") and !menu.isOpen();
+            menu.popup(40, 40, .pointer);
+        }
+    };
+    Reopen.fired = false;
+    m.on_select = events.makeHandler(m, Reopen.f);
+    m.popup(0, 0, .pointer);
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.down.code() });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.enter.code() });
+    try testing.expect(Reopen.fired);
+    try testing.expect(m.isOpen());
+    try testing.expectEqual(@as(i32, -1), m.highlighted.peek());
+}
 
 test "Menu: closed panel has zero height; popup positions + opens it" {
     var env = ts.Harness.init(testing.allocator);
@@ -1105,7 +1238,7 @@ test "Menu: clicking an item fires on_select with its action id and closes" {
 
     Probe.calls = 0;
     Probe.last_len = 0;
-    m.on_select = Probe.onSelect;
+    m.on_select = Probe.handler;
 
     m.popup(10, 10, .pointer);
     clickRow(&env, m, 1); // Copy
@@ -1150,7 +1283,7 @@ test "Menu: enabled_signal is live and symmetric — re-enabling a built-disable
     try testing.expectEqual(@as(i32, -1), m.firstEnabled());
 
     Probe.calls = 0;
-    m.on_select = Probe.onSelect;
+    m.on_select = Probe.handler;
     m.popup(10, 10, .pointer);
     clickRow(&env, m, 0);
     try testing.expectEqual(@as(u32, 0), Probe.calls);
@@ -1185,7 +1318,7 @@ test "Menu: a press bubbling to the backdrop does NOT dismiss; only a click (mou
 
     Probe.calls = 0;
     Probe.last_len = 0;
-    m.on_select = Probe.onSelect;
+    m.on_select = Probe.handler;
 
     m.popup(10, 10, .pointer);
     try testing.expect(m.isOpen());
@@ -1243,7 +1376,7 @@ test "Menu: submenu opens to the side on hover/click; leaf selection closes the 
     try root.addSubmenu("Recent", sub);
 
     Probe.calls = 0;
-    root.on_select = Probe.onSelect;
+    root.on_select = Probe.handler;
 
     const app_root0 = try bld.openBox();
     try root.build(&ctx);
@@ -1400,7 +1533,7 @@ test "Menu: keyboard nav skips separators + disabled, wraps, and activates" {
     const m = try buildTestMenu(&env);
     defer m.deinit();
 
-    m.on_select = Probe.onSelect;
+    m.on_select = Probe.handler;
     m.popup(0, 0, .pointer);
 
     // items idx: 0 Cut, 1 Copy, 2 sep, 3 Paste(disabled), 4 sep, 5 Select All.
@@ -1461,7 +1594,7 @@ test "Menu: key_down on the panel drives nav — ↓↓ Enter selects, Escape cl
 
     Probe.calls = 0;
     Probe.last_len = 0;
-    m.on_select = Probe.onSelect;
+    m.on_select = Probe.handler;
 
     // The panel is focusable so the focus scope can land on it.
     try testing.expectEqualStrings("ctx__panel", env.store.getModifier(m.panel_id, .focusable).?.string);
@@ -1554,7 +1687,7 @@ test "Menu: →/← open and close the highlighted submenu; Enter inside selects
     try root.addSubmenu("Recent", sub); // index 1
 
     Probe.calls = 0;
-    root.on_select = Probe.onSelect;
+    root.on_select = Probe.handler;
 
     // Overlays are built UNDER the app root, as in real use — top-level builds
     // would positionally alias root's and sub's nodes (the builder reuses the

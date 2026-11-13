@@ -176,6 +176,29 @@ pub const Handler = struct {
     call: *const fn (?*anyopaque, Event) void,
 };
 
+/// Builds a `Handler` from a payload pointer (or `{}` for none) and a comptime
+/// `fn (@TypeOf(payload), Event) void`. Allocation-free. `ctx.handler` is this
+/// same function; use this one where there is no `BuildContext` — e.g. wiring a
+/// `Menu.on_select` in `main`/`init`, outside `build()`. `payload` must outlive
+/// every place the handler is stored.
+pub fn makeHandler(payload: anytype, comptime f: anytype) Handler {
+    const P = @TypeOf(payload);
+    const Wrap = struct {
+        fn call(erased: ?*anyopaque, ev: Event) void {
+            if (P == void) {
+                f({}, ev);
+            } else {
+                const typed: P = @ptrCast(@alignCast(erased));
+                f(typed, ev);
+            }
+        }
+    };
+    return .{
+        .ptr = if (P == void) null else @ptrCast(payload),
+        .call = Wrap.call,
+    };
+}
+
 /// The event kinds a node handler can be registered for. Mapped from engine event
 /// names by `kindFromName`. `value_changed` is emitted by widgets internally (not
 /// by the OS), so it has no name mapping.

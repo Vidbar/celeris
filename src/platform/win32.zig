@@ -11,9 +11,9 @@ const LPARAM = windows.LONG_PTR;
 const LRESULT = windows.LONG_PTR;
 const WINAPI: std.builtin.CallingConvention = .winapi;
 
-extern "user32" fn DefWindowProcA(h: HWND, m: UINT, w: WPARAM, l: LPARAM) callconv(WINAPI) LRESULT;
+extern "user32" fn DefWindowProcW(h: HWND, m: UINT, w: WPARAM, l: LPARAM) callconv(WINAPI) LRESULT;
 extern "user32" fn PostQuitMessage(n: i32) callconv(WINAPI) void;
-extern "user32" fn RegisterClassExA(p: *const anyopaque) callconv(WINAPI) u16;
+extern "user32" fn RegisterClassExW(p: *const anyopaque) callconv(WINAPI) u16;
 extern "user32" fn GetKeyState(nVirtKey: i32) callconv(WINAPI) i16;
 
 /// Shift/Ctrl/Alt state as of the message being processed (GetKeyState is
@@ -26,10 +26,10 @@ fn keyMods() struct { shift: bool, ctrl: bool, alt: bool } {
         .alt = (GetKeyState(0x12) & hi) != 0, // VK_MENU
     };
 }
-extern "user32" fn CreateWindowExA(
+extern "user32" fn CreateWindowExW(
     ex: u32,
-    cls: ?[*:0]const u8,
-    title: ?[*:0]const u8,
+    cls: ?[*:0]const u16,
+    title: ?[*:0]const u16,
     style: u32,
     x: i32,
     y: i32,
@@ -41,9 +41,10 @@ extern "user32" fn CreateWindowExA(
     param: ?*anyopaque,
 ) callconv(WINAPI) ?HWND;
 extern "user32" fn ShowWindow(hwnd: HWND, cmd: i32) callconv(WINAPI) i32;
-extern "user32" fn PeekMessageA(msg: *anyopaque, hwnd: ?HWND, min: UINT, max: UINT, remove: UINT) callconv(WINAPI) i32;
+extern "user32" fn PeekMessageW(msg: *anyopaque, hwnd: ?HWND, min: UINT, max: UINT, remove: UINT) callconv(WINAPI) i32;
+extern "user32" fn SetWindowTextW(hwnd: HWND, text: [*:0]const u16) callconv(WINAPI) windows.BOOL;
 extern "user32" fn TranslateMessage(msg: *const anyopaque) callconv(WINAPI) i32;
-extern "user32" fn DispatchMessageA(msg: *const anyopaque) callconv(WINAPI) LRESULT;
+extern "user32" fn DispatchMessageW(msg: *const anyopaque) callconv(WINAPI) LRESULT;
 extern "user32" fn DestroyWindow(hwnd: HWND) callconv(WINAPI) windows.BOOL;
 extern "user32" fn ReleaseCapture() callconv(WINAPI) windows.BOOL;
 extern "user32" fn SetCapture(hwnd: HWND) callconv(WINAPI) ?HWND;
@@ -549,7 +550,7 @@ pub fn getScale(ptr: *anyopaque) f32 {
     return 1.0;
 }
 
-const WNDCLASSEXA = extern struct {
+const WNDCLASSEXW = extern struct {
     cbSize: u32,
     style: u32,
     lpfnWndProc: *const fn (HWND, UINT, WPARAM, LPARAM) callconv(WINAPI) LRESULT,
@@ -559,8 +560,8 @@ const WNDCLASSEXA = extern struct {
     hIcon: ?*anyopaque,
     hCursor: ?*anyopaque,
     hbrBackground: ?*anyopaque,
-    lpszMenuName: ?[*:0]const u8,
-    lpszClassName: [*:0]const u8,
+    lpszMenuName: ?[*:0]const u16,
+    lpszClassName: [*:0]const u16,
     hIconSm: ?*anyopaque,
 };
 const MSG = extern struct {
@@ -603,7 +604,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(WINAPI) LRESU
                 }
             }
         }
-        return DefWindowProcA(hwnd, msg, wp, lp);
+        return DefWindowProcW(hwnd, msg, wp, lp);
     } else if (msg == 0x0010) { // WM_CLOSE
         // A secondary window (overlay) hands the close back to the engine and
         // swallows the message: the engine tears down its component tree and only
@@ -761,7 +762,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM) callconv(WINAPI) LRESU
             }
         }
     }
-    return DefWindowProcA(hwnd, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 pub const Win32Window = struct {
@@ -905,7 +906,114 @@ pub const Win32Window = struct {
         // SW_SHOWNOACTIVATE (4), not SW_SHOW: same reasoning as setBounds.
         _ = ShowWindow(hwnd, if (visible) 4 else 0); // 0 = SW_HIDE
     }
+
+    fn setTitle(ptr: *anyopaque, title: []const u8) void {
+        const self: *Win32Window = @ptrCast(@alignCast(ptr));
+        const hwnd = self.hwnd orelse return;
+        var buf: [TITLE_MAX_BYTES + 1]u16 = undefined;
+        _ = SetWindowTextW(hwnd, titleToWide(title, &buf));
+    }
 };
+
+/// High surrogate of a WM_CHAR pair waiting for its low half (0 = none).
+var g_pending_high_surrogate: u16 = 0;
+
+/// Feeds one UTF-16 code unit from WM_CHAR. Returns the code point to deliver,
+/// or null while a high surrogate waits for its pair. An unpaired surrogate
+/// (either half alone) is dropped rather than delivered as an invalid code point.
+fn combineUtf16(pending: *u16, unit: u16) ?u21 {
+    if (unit >= 0xD800 and unit <= 0xDBFF) {
+        pending.* = unit;
+        return null;
+    }
+    if (unit >= 0xDC00 and unit <= 0xDFFF) {
+        const hi = pending.*;
+        pending.* = 0;
+        if (hi == 0) return null;
+        return 0x10000 + ((@as(u21, hi) - 0xD800) << 10) + (@as(u21, unit) - 0xDC00);
+    }
+    pending.* = 0;
+    return unit;
+}
+
+test "combineUtf16 pairs surrogates and drops lone halves" {
+    var p: u16 = 0;
+    try std.testing.expectEqual(@as(?u21, 'a'), combineUtf16(&p, 'a'));
+    try std.testing.expectEqual(@as(?u21, 0xF1), combineUtf16(&p, 0xF1));
+    try std.testing.expectEqual(@as(?u21, null), combineUtf16(&p, 0xD83D));
+    try std.testing.expectEqual(@as(?u21, 0x1F600), combineUtf16(&p, 0xDE00));
+    try std.testing.expectEqual(@as(?u21, null), combineUtf16(&p, 0xDE00)); // lone low
+    _ = combineUtf16(&p, 0xD83D);
+    try std.testing.expectEqual(@as(?u21, 'b'), combineUtf16(&p, 'b')); // lone high dropped
+    try std.testing.expectEqual(@as(u16, 0), p);
+}
+
+/// Title limit in UTF-8 bytes (matches the Linux backend's buffer).
+const TITLE_MAX_BYTES = 255;
+
+/// UTF-8 → NUL-terminated UTF-16 in `out`, cut on a character boundary at
+/// `TITLE_MAX_BYTES`. A UTF-16 string never has more code units than the UTF-8
+/// it came from has bytes, so `out` always fits. Invalid UTF-8 (from a C host)
+/// becomes U+FFFD per bad byte instead of failing.
+fn titleToWide(utf8: []const u8, out: *[TITLE_MAX_BYTES + 1]u16) [*:0]const u16 {
+    const s = platform.utf8Truncate(utf8, TITLE_MAX_BYTES);
+    var i: usize = 0;
+    var n: usize = 0;
+    while (i < s.len) {
+        // A bad lead byte, a truncated sequence or an undecodable one (overlong,
+        // surrogate half) each consume ONE byte as U+FFFD.
+        var step: usize = 1;
+        var cp: u21 = 0xFFFD;
+        if (std.unicode.utf8ByteSequenceLength(s[i])) |len| {
+            if (i + len <= s.len) {
+                if (std.unicode.utf8Decode(s[i .. i + len])) |c| {
+                    cp = c;
+                    step = len;
+                } else |_| {}
+            }
+        } else |_| {}
+        if (cp >= 0x10000) {
+            const v = cp - 0x10000;
+            out[n] = @intCast(0xD800 + (v >> 10));
+            out[n + 1] = @intCast(0xDC00 + (v & 0x3FF));
+            n += 2;
+        } else {
+            out[n] = @intCast(cp);
+            n += 1;
+        }
+        i += step;
+    }
+    out[n] = 0;
+    return @ptrCast(out);
+}
+
+test "titleToWide: ASCII, BMP, astral (surrogate pair) and invalid bytes" {
+    var buf: [TITLE_MAX_BYTES + 1]u16 = undefined;
+    const w = titleToWide("Diseño - Albesi", &buf);
+    try std.testing.expectEqual(@as(u16, 0xF1), w[4]);
+    try std.testing.expectEqual(@as(u16, 0), w[15]);
+
+    const e = titleToWide("a\u{1F600}", &buf);
+    try std.testing.expectEqual(@as(u16, 'a'), e[0]);
+    try std.testing.expectEqual(@as(u16, 0xD83D), e[1]);
+    try std.testing.expectEqual(@as(u16, 0xDE00), e[2]);
+    try std.testing.expectEqual(@as(u16, 0), e[3]);
+
+    const bad = titleToWide("a\xFFb", &buf);
+    try std.testing.expectEqual(@as(u16, 0xFFFD), bad[1]);
+    try std.testing.expectEqual(@as(u16, 'b'), bad[2]);
+    try std.testing.expectEqual(@as(u16, 0), bad[3]);
+
+    // Longest input: 255 multibyte bytes never overflow the buffer.
+    var long: [600]u8 = undefined;
+    var k: usize = 0;
+    while (k + 2 <= long.len) : (k += 2) {
+        long[k] = 0xC3;
+        long[k + 1] = 0xB1; // ñ
+    }
+    const l = titleToWide(&long, &buf);
+    try std.testing.expectEqual(@as(u16, 0), l[127]); // 254 bytes / 2 = 127 chars
+}
 
 const vtable = platform.PlatformWindow.VTable{
     .deinit = Win32Window.deinit,
@@ -920,6 +1028,7 @@ const vtable = platform.PlatformWindow.VTable{
     .getBounds = Win32Window.getBounds,
     .setAlwaysOnTop = Win32Window.setAlwaysOnTop,
     .setVisible = Win32Window.setVisible,
+    .setTitle = Win32Window.setTitle,
 };
 
 /// SPI_GETWORKAREA — the primary monitor minus the taskbar, in logical px.
@@ -946,7 +1055,10 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
     const scale: f32 = if (sys_dpi > 0) @as(f32, @floatFromInt(sys_dpi)) / 96.0 else 1.0;
 
     const hInst = GetModuleHandleA(null);
-    const cls = "CelerisWindow";
+    // Wide (W) class, window and message pump throughout: an ANSI window routes
+    // WM_SETTEXT/WM_CHAR through the system code page, which mangles any title
+    // or typed character outside it.
+    const cls = std.unicode.utf8ToUtf16LeStringLiteral("CelerisWindow");
 
     // The owner HWND, if this is a child/modal window.
     const parent_hwnd: ?HWND = if (config.parent) |p| switch (p) {
@@ -954,16 +1066,11 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
         else => null,
     } else null;
 
-    // CreateWindowExA needs a NUL-terminated title; copy into a stack buffer
-    // (titles are short — truncate rather than allocate).
-    var title_buf: [256]u8 = undefined;
-    const tn = @min(config.title.len, title_buf.len - 1);
-    @memcpy(title_buf[0..tn], config.title[0..tn]);
-    title_buf[tn] = 0;
-    const title_z: [*:0]const u8 = @ptrCast(&title_buf);
+    var title_buf: [TITLE_MAX_BYTES + 1]u16 = undefined;
+    const title_z = titleToWide(config.title, &title_buf);
 
-    _ = RegisterClassExA(&WNDCLASSEXA{
-        .cbSize = @sizeOf(WNDCLASSEXA),
+    _ = RegisterClassExW(&WNDCLASSEXW{
+        .cbSize = @sizeOf(WNDCLASSEXW),
         .style = 0x0003,
         .lpfnWndProc = wndProc,
         .cbClsExtra = 0,
@@ -992,7 +1099,7 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
     const win_w = phys_w + 2 * frame;
     const win_h = phys_h + frame;
 
-    // Requested position is logical; CreateWindowExA wants physical. Null keeps the
+    // Requested position is logical; CreateWindowExW wants physical. Null keeps the
     // historical default spot.
     // The outer rect includes the invisible left frame; shift it so the *visible*
     // window lands at x (matching setBounds).
@@ -1004,7 +1111,7 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
     // the app the user is actually driving.
     const ex_style: u32 = if (config.always_on_top) 0x00000008 | 0x08000000 else 0;
 
-    const hwnd = CreateWindowExA(ex_style, cls, title_z, style_flags, pos_x, pos_y, win_w, win_h, parent_hwnd, null, hInst, null) orelse return error.CreateWindowFailed;
+    const hwnd = CreateWindowExW(ex_style, cls, title_z, style_flags, pos_x, pos_y, win_w, win_h, parent_hwnd, null, hInst, null) orelse return error.CreateWindowFailed;
 
     // Corner rounding and frame border before the first paint, so the window never
     // flashes square or with a mismatched edge.
@@ -1063,7 +1170,7 @@ pub fn pollSystemEvents(ctx: ?*anyopaque, input_cb: ?platform.InputCallback) boo
     }
 
     var msg: MSG = undefined;
-    while (PeekMessageA(&msg, null, 0, 0, 1) != 0) {
+    while (PeekMessageW(&msg, null, 0, 0, 1) != 0) {
         if (msg.message == 0x0012) return false; // WM_QUIT
 
         if (input_cb) |cb| {
@@ -1117,9 +1224,17 @@ pub fn pollSystemEvents(ctx: ?*anyopaque, input_cb: ?platform.InputCallback) boo
                     0x0101 => .key_up,
                     else => .char_input,
                 };
-                const key_code: u32 = @intCast(msg.wParam);
+                var key_code: u32 = @intCast(msg.wParam);
+                // A W window delivers WM_CHAR as UTF-16 code units: a character
+                // outside the BMP (emoji, some CJK) arrives as two messages.
+                // char_input carries a code point, so pair them here.
+                const deliver = if (ev_type == .char_input) blk: {
+                    const r = combineUtf16(&g_pending_high_surrogate, @truncate(key_code));
+                    if (r) |cp| key_code = cp;
+                    break :blk r != null;
+                } else true;
                 const km = keyMods();
-                cb(ctx, .{ .native_handle = .{ .win32 = .{ .hwnd = msg.hwnd, .hinst = null } }, .event_type = ev_type, .key_code = key_code, .shift_held = km.shift, .ctrl_held = km.ctrl, .alt_held = km.alt });
+                if (deliver) cb(ctx, .{ .native_handle = .{ .win32 = .{ .hwnd = msg.hwnd, .hinst = null } }, .event_type = ev_type, .key_code = key_code, .shift_held = km.shift, .ctrl_held = km.ctrl, .alt_held = km.alt });
             } else if (msg.message == 0x020A or msg.message == 0x020E) { // WM_MOUSEWHEEL / WM_MOUSEHWHEEL
                 const ulWParam = @as(usize, @bitCast(msg.wParam));
                 const delta: i16 = @bitCast(@as(u16, @truncate(ulWParam >> 16)));
@@ -1182,7 +1297,7 @@ pub fn pollSystemEvents(ctx: ?*anyopaque, input_cb: ?platform.InputCallback) boo
             }
         }
         _ = TranslateMessage(&msg);
-        _ = DispatchMessageA(&msg);
+        _ = DispatchMessageW(&msg);
     }
     return true;
 }

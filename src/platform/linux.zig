@@ -939,12 +939,25 @@ fn winMinimize(ptr: *anyopaque) void {
     const win: *Window = @ptrCast(@alignCast(ptr));
     if (win.frame) |f| c.libdecor_frame_set_minimized(f);
 }
+/// Copies `title` into the window's NUL-terminated buffer, cut on a UTF-8
+/// boundary, and hands it to libdecor (which forwards it to xdg_toplevel and
+/// redraws its own decoration title).
+fn applyTitle(win: *Window, title: []const u8) void {
+    const t = platform.utf8Truncate(title, win.title_buf.len - 1);
+    @memcpy(win.title_buf[0..t.len], t);
+    win.title_buf[t.len] = 0;
+    if (win.frame) |f| c.libdecor_frame_set_title(f, @ptrCast(&win.title_buf));
+}
+fn winSetTitle(ptr: *anyopaque, title: []const u8) void {
+    applyTitle(@ptrCast(@alignCast(ptr)), title);
+}
 const vtable = platform.PlatformWindow.VTable{
     .deinit = winDeinit,
     .startDrag = winStartDrag,
     .close = winClose,
     .maximize = winMaximize,
     .minimize = winMinimize,
+    .setTitle = winSetTitle,
 };
 
 /// Wayland gives clients no say over their position on screen, and no global
@@ -1011,11 +1024,8 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
     win.frame = c.libdecor_decorate(conn.decor, win.surface, &frame_iface, @ptrCast(win)) orelse return error.DecorateFailed;
     c.libdecor_frame_set_app_id(win.frame, "celeris");
 
-    // NUL-terminate the title for the C API (titles are short → per-window buffer).
-    const tn = @min(config.title.len, win.title_buf.len - 1);
-    @memcpy(win.title_buf[0..tn], config.title[0..tn]);
-    win.title_buf[tn] = 0;
-    c.libdecor_frame_set_title(win.frame, @ptrCast(&win.title_buf));
+    // NUL-terminated per-window buffer, cut on a UTF-8 boundary.
+    applyTitle(win, config.title);
 
     // Owner relationship: a child/dialog is parented to its owner's frame so the
     // compositor stacks/positions it correctly. (True modal input-blocking is
