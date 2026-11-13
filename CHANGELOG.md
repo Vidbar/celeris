@@ -9,7 +9,7 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
-## Unreleased
+## 0.4.0 — 2026-11-13
 
 ### Added
 
@@ -39,6 +39,9 @@ listed here as well.
   an unfocused tree paints its selection with the dimmer `inactive_selected_bg`.
 - `TreeView` with a scroll bridge scrolls to the selected row only when the
   selection changes; a hover or focus change no longer scrolls it back.
+
+No BREAKING changes. `CELERIS_ABI_VERSION` unchanged (8): `click` now fills
+`key_code` (it was always 0), and the event layout is the same.
 
 ## 0.3.0 — 2026-11-13
 
