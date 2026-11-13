@@ -1218,10 +1218,15 @@ pub fn pollSystemEvents(ctx: ?*anyopaque, input_cb: ?platform.InputCallback) boo
                 // care not to double-fire on our own ReleaseCapture). Deferred; the
                 // SetCapture/ReleaseCapture pair above already fixes the common
                 // pointer-left-the-window stuck-drag.
-            } else if (msg.message == 0x0100 or msg.message == 0x0101 or msg.message == 0x0102) {
+            } else if (msg.message == 0x0100 or msg.message == 0x0101 or msg.message == 0x0102 or
+                // WM_SYSKEYDOWN/UP for F10 only: Windows reports F10 (and Shift+F10,
+                // the keyboard context-menu chord) as a system key. Other system
+                // keys (Alt chords, Alt+F4) keep going only to DefWindowProc.
+                ((msg.message == 0x0104 or msg.message == 0x0105) and msg.wParam == 0x79))
+            {
                 const ev_type: platform.InputEventType = switch (msg.message) {
-                    0x0100 => .key_down,
-                    0x0101 => .key_up,
+                    0x0100, 0x0104 => .key_down,
+                    0x0101, 0x0105 => .key_up,
                     else => .char_input,
                 };
                 var key_code: u32 = @intCast(msg.wParam);

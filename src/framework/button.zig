@@ -67,6 +67,12 @@ pub const Button = struct {
     /// no wrapper box needed.
     border_width: ?f32 = null,
     border_color: ?theme_mod.Color = null,
+    /// Main-axis placement of the label/`content` inside the button — the same
+    /// `justify` a `boxNode` takes. `.start` is a left-aligned header/list-style
+    /// button. Visible only when the button is wider than its content (it fills
+    /// its column by default; a `.hug` button has no slack). The whole box stays
+    /// the click/hover target either way.
+    justify: component.Justify = .center,
 
     // State (auto-created in onMount; preserved across rebuilds).
     hovered: signals.Signal(bool) = undefined,
@@ -104,7 +110,7 @@ pub const Button = struct {
             .padding = self.padding orelse EdgeInsets.symmetric(16, 6),
             .direction = .row,
             .@"align" = .center,
-            .justify = .center,
+            .justify = self.justify,
             .radius = t.radius_base,
             .focusable = !self.disabled,
             .role = "button",
@@ -647,29 +653,13 @@ test "Button renders slotted content instead of the label; click still works" {
     try testing.expectEqual(@as(u32, 1), Sink.clicks);
 }
 
-/// Loads a real font so the layout engine measures text instead of falling back to
-/// its headless approximation. Skips the test where no font is available.
-fn loadVMetricsFont(alloc: std.mem.Allocator) ![]u8 {
-    const candidates = [_][]const u8{
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    };
-    var threaded = std.Io.Threaded.init(alloc, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    for (candidates) |p| {
-        if (std.Io.Dir.cwd().readFileAlloc(io, p, alloc, .unlimited)) |data| return data else |_| {}
-    }
-    return error.SkipZigTest;
-}
-
 test "A Button's label is optically centered in the *button* box, padding and anchors included" {
     // The end-to-end check the per-slot test can't make: it walks the real widget —
     // button root → mount anchor → text node — and asks where the ink lands relative
     // to the button's own box, so a stray padding, an anchor that doesn't center, or
     // a border would show up here as asymmetry.
     const a = testing.allocator;
-    const ttf = try loadVMetricsFont(a);
+    const ttf = try @import("test_support.zig").loadSystemFont(a);
     defer a.free(ttf);
     var atlas = try text_mod.FontAtlas.init(a, ttf, 72.0);
     defer atlas.deinit();
@@ -725,4 +715,44 @@ fn firstTextNode(registry: *reg.UIRegistry, store: *props.PropertyStore, root: r
         if (firstTextNode(registry, store, child)) |found| return found;
     }
     return null;
+}
+
+test "Button justify: .start puts the label at the button's x; the default still centers it" {
+    const a = testing.allocator;
+    const flexbox = @import("../layout/flexbox.zig");
+    const ttf = try @import("test_support.zig").loadSystemFont(a);
+    defer a.free(ttf);
+    var atlas = try text_mod.FontAtlas.init(a, ttf, 72.0);
+    defer atlas.deinit();
+    for ([_]component.Justify{ .start, .center }) |j| {
+        var registry = reg.UIRegistry.init(a);
+        defer registry.deinit();
+        var store = props.PropertyStore.init(a);
+        defer store.deinit();
+        store.setRegistry(&registry);
+        var router = events.EventRouter.init(a);
+        defer router.deinit();
+        var mounts = component.MountTable.init(a);
+        defer mounts.deinit();
+        registry.addNodeRemovedListener(&mounts, component.MountTable.nodeRemovedListener);
+
+        _ = try mountButton(&registry, &store, &router, &mounts, .{
+            .label = "DOCUMENTS",
+            .padding = EdgeInsets{},
+            .justify = j,
+        });
+        var engine = flexbox.LayoutEngine.init(&registry, &store, &atlas);
+        engine.solve(0, 0, 0, 200, 100);
+
+        const anchor = registry.getNode(0).?.first_child;
+        const btn_id = registry.getNode(anchor).?.first_child;
+        const btn = registry.getNode(btn_id).?.geometry;
+        try testing.expectApproxEqAbs(@as(f32, 200), btn.width, 0.01); // full width: all of it clickable
+        const txt = registry.getNode(firstTextNode(&registry, &store, btn_id).?).?.geometry;
+        try testing.expect(txt.width > 0 and txt.width < 200);
+        switch (j) {
+            .start => try testing.expectApproxEqAbs(btn.x, txt.x, 0.01),
+            else => try testing.expectApproxEqAbs(btn.x + (btn.width - txt.width) / 2, txt.x, 0.5),
+        }
+    }
 }

@@ -33,7 +33,7 @@
 //! the visible tree into `flat` (the complete depth-first order) but materializes
 //! only the scroll window `[start, end)` into the DOM, bracketed by two spacers that
 //! reserve the off-window extent (so the container ScrollView's scrollbar spans the
-//! full `flat.len * ROW_H`). A memoized `start_sig` fires the window-rebuild effect
+//! full `flat.len * row_height`). A memoized `start_sig` fires the window-rebuild effect
 //! once per row boundary crossed. Keyboard nav and ensure-visible index `flat` (the
 //! full list); `row_map` is the windowed subset. Without the scroll bridge the
 //! widget materializes every visible row (standalone behavior, unchanged).
@@ -51,6 +51,7 @@ const events = @import("events.zig");
 const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
 const theme_mod = @import("theme.zig");
+const text_render = @import("../render/text.zig");
 
 pub const TreeNodeType = enum { branch, leaf };
 
@@ -63,6 +64,10 @@ pub const TreeNode = struct {
     decorator: ?[]const u8 = null,
     decorator_color: ?[3]u8 = null,
     icon: ?[]const u8 = null,
+    /// This node's icon color (e.g. folders vs file types). Null falls back to
+    /// the tree's `colors.icon`, then the theme (warning for branches, accent
+    /// for leaves).
+    icon_color: ?theme_mod.Color = null,
 
     children: std.array_list.Managed(TreeNode),
 };
@@ -84,13 +89,21 @@ const RowInfo = struct { node_id: usize, row: reg.NodeId, name: reg.NodeId, care
 /// on every `buildBody`, so it stays valid between structural changes.
 const FlatRow = struct { node: *TreeNode, depth: usize };
 
-/// Row height in px — the fixed vertical step used both to lay out each row and to
-/// compute a row's position for ensure-visible / windowing.
-const ROW_H: f32 = 22;
-
 /// Rows kept above/below the viewport so a fast scroll doesn't flash blank before
 /// the next window rebuild (same role as `VirtualList.overdraw`).
 const OVERDRAW: usize = 4;
+
+/// Width of the focused-row outline (a border always present on every row,
+/// transparent unless focused — so it never shifts the row's content).
+const FOCUS_OUTLINE_W: f32 = 1;
+
+fn colorValue(c: theme_mod.Color) props.PropValue {
+    return props.PropValue.rgbA(c.r, c.g, c.b, @as(f32, @floatFromInt(c.a)) / 255.0);
+}
+
+fn setColor(store: *props.PropertyStore, id: reg.NodeId, c: theme_mod.Color) !void {
+    try store.setStyle(id, .color, colorValue(c));
+}
 
 /// Reconciliation keys for the window spacers, far above any realistic row count so
 /// they never collide with the per-row keys (the absolute flat index).
@@ -156,6 +169,50 @@ pub const TreeView = struct {
     /// opens the file here. A double click on a branch row with
     /// `toggle_on_row_click` also toggles it twice (once per click), net unchanged.
     on_activate: ?events.Handler = null,
+    /// Single-click activation (an IDE's "preview" open). When true, a single
+    /// click on a leaf also fires `on_activate`, with event name "preview"; the
+    /// double click and Enter keep firing it as "activate" (pin). The click that
+    /// completes a double click does not fire a second "preview". Branch clicks
+    /// keep toggling.
+    activate_on_click: bool = false,
+    /// Fired (event name "context_menu") on a right click and on Shift+F10 / the
+    /// menu key. `ev.item_id` is the row's node id (null for a right click on
+    /// empty space); `ev.x`/`ev.y` are window coordinates ready for
+    /// `Menu.popupWindow` — the pointer for a click, the focused row's
+    /// bottom-left for the keyboard. The row becomes the focused row (and the
+    /// tree takes keyboard focus) before the handler runs; whether it is also
+    /// selected is `context_menu_selects`.
+    on_context_menu: ?events.Handler = null,
+    /// Whether a right click also selects the row. False (the default) is the
+    /// desktop-IDE behavior: the clicked row only gets the focus outline and the
+    /// current selection stays. True: the row is selected first (file-manager style).
+    context_menu_selects: bool = false,
+    /// Reveal request (two-way, caller-owned): write a node id to scroll its row
+    /// into view with the minimum scroll (a row already visible stays put); the
+    /// widget writes null back once handled. The row must be visible in the tree:
+    /// expand its ancestors first (with `controlled_expansion`, the caller does,
+    /// then bumps `data_rev`). Needs the scroll bridge (`scroll_offset` +
+    /// `viewport_height`); otherwise the request is consumed with no effect.
+    reveal: ?*signals.Signal(?usize) = null,
+
+    // ── Metrics (logical px) ──
+    /// Row height. Raised to the label's line height when `font_size`/`text_style`
+    /// would not fit, so a large font never clips.
+    row_height: f32 = 22,
+    /// Horizontal step per depth level.
+    indent: f32 = 14,
+    /// Row padding. `l` is the space before a top-level caret (depth adds
+    /// `indent` per level), `r` the space after the label/decorator.
+    row_padding: component.EdgeInsets = .{ .l = 10, .r = 8 },
+    /// Space between the icon and the label.
+    icon_gap: f32 = 4,
+    /// Row text style (label, caret, icon, decorator). Null = engine default text.
+    text_style: ?theme_mod.TextStyle = null,
+    /// Overrides only the size of `text_style` (or of the default text).
+    font_size: ?f32 = null,
+    /// Row colors; unset fields come from `theme.list`, then the base theme
+    /// tokens (see `theme.ListColors`).
+    colors: theme_mod.ListColors = .{},
 
     // State (auto-created in onMount; preserved across rebuilds). The internal
     // selection/hover signals are the fallback when the caller passes none.
@@ -198,9 +255,29 @@ pub const TreeView = struct {
     start_sig: ?*signals.Computed(usize) = null,
     window_primed: bool = false,
 
+    // Focus. `focus_state` is the keyboard cursor row (separate from the
+    // selection: a right click moves it without selecting). It is only meaningful
+    // while `sel_at_focus` still equals the selection: a selection change made
+    // after the cursor moved (a click, the caller writing `selected`) carries the
+    // cursor with it — see `focusedNode`. `has_focus` mirrors whether the tree
+    // root holds keyboard focus (root focus/blur events); it switches the
+    // selection colors to the inactive pair and hides the focus outline.
+    focus_state: signals.Signal(?usize) = undefined,
+    sel_at_focus: ?usize = null,
+    has_focus: signals.Signal(bool) = undefined,
+    last_foc: ?usize = null,
+    last_has_focus: bool = false,
+    /// Pointer position of the last right click a row handled, so the root's
+    /// (empty-space) handler, reached by the same event's bubble, does not fire a
+    /// second context menu. Consumed by the root handler.
+    ctx_menu_at: ?[2]f32 = null,
+    reveal_bound: bool = false,
+
     pub fn onMount(self: *TreeView, allocator: std.mem.Allocator) void {
         self.selected_state = signals.Signal(?usize).init(allocator, null);
         self.hovered_state = signals.Signal(?usize).init(allocator, null);
+        self.focus_state = signals.Signal(?usize).init(allocator, null);
+        self.has_focus = signals.Signal(bool).init(allocator, false);
         self.scope = signals.Scope.init(allocator);
         self.row_map = std.array_list.Managed(RowInfo).init(allocator);
         self.flat = std.array_list.Managed(FlatRow).init(allocator);
@@ -214,6 +291,8 @@ pub const TreeView = struct {
         self.scope.deinit();
         self.selected_state.deinit();
         self.hovered_state.deinit();
+        self.focus_state.deinit();
+        self.has_focus.deinit();
         self.row_map.deinit();
         self.flat.deinit();
     }
@@ -234,6 +313,53 @@ pub const TreeView = struct {
     /// Currently hovered node id (non-reactive read).
     pub fn hoveredNode(self: *TreeView) ?usize {
         return self.hovSig().peek();
+    }
+
+    /// The focused row (keyboard cursor), non-reactive: the row last focused by
+    /// a right click or keyboard nav, unless the selection changed since — then
+    /// the selected row.
+    pub fn focusedNode(self: *TreeView) ?usize {
+        return self.resolveFocus(self.selSig().peek(), self.focus_state.peek());
+    }
+
+    fn resolveFocus(self: *const TreeView, sel: ?usize, foc: ?usize) ?usize {
+        if (foc != null and std.meta.eql(sel, self.sel_at_focus)) return foc;
+        return sel;
+    }
+
+    /// Moves the focus cursor to `id` without touching the selection.
+    fn setFocusRow(self: *TreeView, id: usize) void {
+        self.sel_at_focus = self.selSig().peek();
+        if (self.focus_state.peek() != id) self.focus_state.set(id);
+    }
+
+    /// Selects `id` and moves the focus cursor with it (click, keyboard nav).
+    fn selectRow(self: *TreeView, id: usize) void {
+        const sel = self.selSig();
+        self.sel_at_focus = id;
+        if (self.focus_state.peek() != id) self.focus_state.set(id);
+        if (sel.peek() != id) sel.set(id);
+    }
+
+    /// The effective row height (see `row_height`).
+    pub fn rowH(self: *const TreeView) f32 {
+        const style = self.textStyle() orelse return self.row_height;
+        const lh = if (style.line_height) |f| text_render.lineHeightWith(style.size, f) else text_render.lineHeight(style.size);
+        return @max(self.row_height, @ceil(lh));
+    }
+
+    /// `text_style` with `font_size` applied, or null when neither is set.
+    fn textStyle(self: *const TreeView) ?theme_mod.TextStyle {
+        var style = self.text_style orelse (if (self.font_size != null) theme_mod.TextStyle{ .size = 0 } else return null);
+        if (self.font_size) |s| style.size = s;
+        if (style.size <= 0) return null;
+        return style;
+    }
+
+    fn applyTextStyle(self: *const TreeView, b: *builder_mod.UIBuilder, id: reg.NodeId) !void {
+        const style = self.textStyle() orelse return;
+        try b.fontSize(id, style.size);
+        if (style.line_height) |f| try b.lineHeight(id, f);
     }
 
     /// Recursively reports whether `id` exists anywhere in `list` (any depth,
@@ -280,16 +406,16 @@ pub const TreeView = struct {
     /// Number of rows materialized in the window: the visible count plus overdraw on
     /// both sides.
     fn windowLen(self: *const TreeView) usize {
-        const vis: usize = @intFromFloat(@ceil(self.viewport_height / ROW_H));
+        const vis: usize = @intFromFloat(@ceil(self.viewport_height / self.rowH()));
         return vis + 2 * OVERDRAW;
     }
 
     /// First materialized flat index for the current scroll (non-reactive), floored
     /// at 0. `scroll_offset` is `<= 0`, so `-off` is the distance scrolled from the
-    /// top; the first visible row is `floor(-off / ROW_H)`.
+    /// top; the first visible row is `floor(-off / rowH)`.
     fn startIndex(self: *TreeView) usize {
         const off = (self.scroll_offset orelse return 0).peek(); // <= 0
-        const first: i64 = @intFromFloat(@floor(-off / ROW_H));
+        const first: i64 = @intFromFloat(@floor(-off / self.rowH()));
         const s = first - @as(i64, @intCast(OVERDRAW));
         return if (s < 0) 0 else @intCast(s);
     }
@@ -299,7 +425,7 @@ pub const TreeView = struct {
     /// when the window's first index actually changes (a boundary crossing).
     fn computeStart(self: *TreeView) usize {
         const off = (self.scroll_offset orelse return 0).get(); // <= 0
-        const first: i64 = @intFromFloat(@floor(-off / ROW_H));
+        const first: i64 = @intFromFloat(@floor(-off / self.rowH()));
         const s = first - @as(i64, @intCast(OVERDRAW));
         return if (s < 0) 0 else @intCast(s);
     }
@@ -339,8 +465,8 @@ pub const TreeView = struct {
             }
             return; // not a visible row (an ancestor is collapsed)
         };
-        const row_top = @as(f32, @floatFromInt(i)) * ROW_H;
-        const row_bottom = row_top + ROW_H;
+        const row_top = @as(f32, @floatFromInt(i)) * self.rowH();
+        const row_bottom = row_top + self.rowH();
         const off = so.peek(); // <= 0
         if (row_top < -off) {
             so.set(-row_top); // row is above the window → align its top
@@ -366,12 +492,13 @@ pub const TreeView = struct {
         // materialized window (ensure-visible then scrolls them in).
         const rows = self.flat.items;
         if (rows.len == 0) return;
-        const sel = self.selSig();
+        // Navigation starts from the focus cursor (see `focusedNode`), and moves
+        // selection and cursor together.
 
         // Index of the current selection among the visible rows (null if there's
         // no selection or it isn't currently visible).
         const cur: ?usize = blk: {
-            if (sel.peek()) |id| {
+            if (self.focusedNode()) |id| {
                 for (rows, 0..) |fr, i| {
                     if (fr.node.id == id) break :blk i;
                 }
@@ -382,21 +509,21 @@ pub const TreeView = struct {
         switch (events.Key.fromCode(ev.key_code) orelse return) {
             .up => { // ↑
                 const i = cur orelse {
-                    sel.set(rows[0].node.id);
+                    self.selectRow(rows[0].node.id);
                     return;
                 };
-                if (i > 0) sel.set(rows[i - 1].node.id);
+                if (i > 0) self.selectRow(rows[i - 1].node.id);
             },
             .down => { // ↓
                 const i = cur orelse {
-                    sel.set(rows[0].node.id);
+                    self.selectRow(rows[0].node.id);
                     return;
                 };
-                if (i + 1 < rows.len) sel.set(rows[i + 1].node.id);
+                if (i + 1 < rows.len) self.selectRow(rows[i + 1].node.id);
             },
             .right => { // → expand, or descend into the first child
-                const id = sel.peek() orelse {
-                    sel.set(rows[0].node.id);
+                const id = self.focusedNode() orelse {
+                    self.selectRow(rows[0].node.id);
                     return;
                 };
                 const node = findNode(list, id) orelse return;
@@ -404,29 +531,77 @@ pub const TreeView = struct {
                 if (!node.expanded) {
                     self.requestExpansion(node, true);
                 } else if (node.children.items.len > 0) {
-                    sel.set(node.children.items[0].id);
+                    self.selectRow(node.children.items[0].id);
                 }
             },
             .left => { // ← collapse, or step out to the parent
-                const id = sel.peek() orelse {
-                    sel.set(rows[0].node.id);
+                const id = self.focusedNode() orelse {
+                    self.selectRow(rows[0].node.id);
                     return;
                 };
                 const node = findNode(list, id) orelse return;
                 if (node.node_type == .branch and node.expanded) {
                     self.requestExpansion(node, false);
                 } else if (findParentId(list, id)) |pid| {
-                    sel.set(pid);
+                    self.selectRow(pid);
                 }
             },
             .enter => { // Enter — explicit activation: always toggles a branch
-                const id = sel.peek() orelse return;
+                const id = self.focusedNode() orelse return;
                 const node = findNode(list, id) orelse return;
                 if (node.node_type == .leaf) {
                     fireItem(self.on_activate, "activate", id);
                 } else self.toggleNode(node);
             },
+            .apps => self.keyboardContextMenu(),
+            .f10 => if (ev.shift) self.keyboardContextMenu(),
             else => {},
+        }
+    }
+
+    /// Shift+F10 / menu key: the context menu of the focused row, anchored at the
+    /// row's bottom-left (window coordinates) — computed from the tree root's
+    /// geometry and the row's flat index, so it holds for a row outside the
+    /// materialized window too (ensure-visible scrolls it in first).
+    fn keyboardContextMenu(self: *TreeView) void {
+        const id = self.focusedNode() orelse return;
+        const i: usize = blk: {
+            for (self.flat.items, 0..) |fr, idx| {
+                if (fr.node.id == id) break :blk idx;
+            }
+            return;
+        };
+        self.ensureRowVisible(id);
+        var x: f32 = 0;
+        var y: f32 = 0;
+        if (self.store) |st| if (st.registry) |rg| if (rg.getNode(self.root_id)) |n| {
+            x = n.geometry.x;
+            y = n.geometry.y;
+        };
+        const depth: f32 = @floatFromInt(self.flat.items[i].depth);
+        x += self.row_padding.l + depth * self.indent;
+        y += @as(f32, @floatFromInt(i + 1)) * self.rowH();
+        self.fireContextMenu(id, x, y);
+    }
+
+    fn fireContextMenu(self: *TreeView, id: ?usize, x: f32, y: f32) void {
+        const h = self.on_context_menu orelse return;
+        h.call(h.ptr, .{ .name = "context_menu", .id = "", .item_id = id, .x = x, .y = y });
+    }
+
+    /// Root-level events: keyboard focus in/out (switches the selection colors
+    /// and the focus outline) and a right click that no row handled (empty space).
+    fn onRootEvent(self: *TreeView, ev: events.Event) void {
+        if (std.mem.eql(u8, ev.name, "focus")) {
+            if (!self.has_focus.peek()) self.has_focus.set(true);
+        } else if (std.mem.eql(u8, ev.name, "blur")) {
+            if (self.has_focus.peek()) self.has_focus.set(false);
+        } else if (std.mem.eql(u8, ev.name, "right_mouse_down")) {
+            if (self.ctx_menu_at) |at| {
+                self.ctx_menu_at = null;
+                if (at[0] == ev.x and at[1] == ev.y) return; // the row already fired it
+            }
+            self.fireContextMenu(null, ev.x, ev.y);
         }
     }
 
@@ -455,10 +630,18 @@ pub const TreeView = struct {
             }
             // Writing the selection signal re-runs the visuals effect; a toggled
             // branch also needs a structural rebuild for the new rows.
-            self.selSig().set(id);
-            if (node.node_type == .branch and self.toggle_on_row_click) {
-                self.toggleNode(node);
+            self.selectRow(id);
+            if (node.node_type == .branch) {
+                if (self.toggle_on_row_click) self.toggleNode(node);
+            } else if (self.activate_on_click and ev.key_code <= 1) {
+                // key_code is the click count: the 2nd click of a double click was
+                // already answered by double_click ("activate").
+                fireItem(self.on_activate, "preview", id);
             }
+        } else if (std.mem.eql(u8, ev.name, "right_mouse_down")) {
+            self.ctx_menu_at = .{ ev.x, ev.y }; // the root's empty-space handler is next in the bubble
+            if (self.context_menu_selects) self.selectRow(id) else self.setFocusRow(id);
+            self.fireContextMenu(id, ev.x, ev.y);
         } else if (std.mem.eql(u8, ev.name, "double_click")) {
             if (on_caret) return; // rapid caret clicks are disclosure, not activation
             fireItem(self.on_activate, "activate", id);
@@ -548,7 +731,14 @@ pub const TreeView = struct {
         // buildNode). A UIA client / screen reader can then navigate the rows, read
         // their names, and hear expanded/selected state.
         try b.role(root, "tree");
-        if (self.router) |r| try r.onNode(root, .key_down, ctx.handler(self, onKey));
+        try b.rightClickable(root, aid);
+        if (self.router) |r| {
+            try r.onNode(root, .key_down, ctx.handler(self, onKey));
+            const rh = ctx.handler(self, onRootEvent);
+            try r.onNode(root, .focus, rh);
+            try r.onNode(root, .blur, rh);
+            try r.onNode(root, .right_click, rh);
+        }
 
         try self.buildBody(b);
 
@@ -568,6 +758,23 @@ pub const TreeView = struct {
         // Row highlights are a fine-grained render-only effect (created once,
         // re-applied untracked after a structural rebuild) — same as Button.
         try component.bindVisuals(self, &self.scope, &self.bound, updateVisuals);
+
+        // Reveal requests: an effect on the caller's signal (created once).
+        if (self.reveal != null and !self.reveal_bound) {
+            self.reveal_bound = true;
+            _ = try self.scope.createEffect(self, onReveal);
+        }
+    }
+
+    /// The reveal effect: scrolls the requested row into view (minimum scroll),
+    /// then consumes the request by writing null back.
+    fn onReveal(self: *TreeView) void {
+        const sig = self.reveal orelse return;
+        const id = sig.get() orelse return;
+        const prev = signals.untrackedBegin();
+        defer signals.untrackedEnd(prev);
+        self.ensureRowVisible(id);
+        sig.set(null);
     }
 
     /// Builds the visible rows into the currently-open root. Shared by the initial
@@ -599,7 +806,7 @@ pub const TreeView = struct {
 
     /// Materializes only `[start, end)` of `flat`, bracketed by two spacers whose
     /// heights reserve the off-window extent — so the total content height stays
-    /// `flat.len * ROW_H` and the container ScrollView's scrollbar is unaffected.
+    /// `flat.len * rowH()` and the container ScrollView's scrollbar is unaffected.
     /// Rows are keyed by their ABSOLUTE flat index, so a window shift reuses the rows
     /// that remain in range (identity-stable, mirrors `VirtualList`).
     fn buildWindow(self: *TreeView, b: *builder_mod.UIBuilder) !void {
@@ -614,7 +821,7 @@ pub const TreeView = struct {
 
         const top = try b.openNodeKeyed(.box, TOP_SPACER_KEY);
         try b.width(top, 100, .percent);
-        try b.height(top, @as(f32, @floatFromInt(start)) * ROW_H, .px);
+        try b.height(top, @as(f32, @floatFromInt(start)) * self.rowH(), .px);
         b.close();
 
         var i = start;
@@ -625,19 +832,36 @@ pub const TreeView = struct {
 
         const bot = try b.openNodeKeyed(.box, BOTTOM_SPACER_KEY);
         try b.width(bot, 100, .percent);
-        try b.height(bot, @as(f32, @floatFromInt(count - end)) * ROW_H, .px);
+        try b.height(bot, @as(f32, @floatFromInt(count - end)) * self.rowH(), .px);
         b.close();
     }
 
     fn buildNode(self: *TreeView, b: *builder_mod.UIBuilder, node: *TreeNode, depth: usize, key: ?u64) !void {
-        const indent_px: f32 = @floatFromInt(depth * 14 + 10);
+        const pad = self.row_padding;
+        const indent_px = pad.l + @as(f32, @floatFromInt(depth)) * self.indent;
+        const colors = self.theme.list.merged(self.colors);
+        const resolved = self.theme.listColors(self.colors);
 
         const row = try b.openNodeKeyed(.box, key);
         try b.width(row, 100, .percent);
-        try b.height(row, ROW_H, .px);
-        try b.padding(row, 2, 8, 0, indent_px);
+        try b.height(row, self.rowH(), .px);
+        // The focus outline is a 1 px border that is always present (transparent
+        // unless this is the focused row), carved out of the padding — so showing
+        // it never moves the row's content. Heights/widths are border-box.
+        try b.borderWidth(row, FOCUS_OUTLINE_W);
+        try b.borderColorAlpha(row, 0, 0, 0, 0);
+        try b.padding(
+            row,
+            @max(0, pad.t - FOCUS_OUTLINE_W),
+            @max(0, pad.r - FOCUS_OUTLINE_W),
+            @max(0, pad.b - FOCUS_OUTLINE_W),
+            @max(0, indent_px - FOCUS_OUTLINE_W),
+        );
         try b.flexRow(row);
         try b.alignItems(row, .center);
+        // Single-line rows: a label that doesn't fit is clipped at the row's
+        // right edge instead of wrapping (and growing the row).
+        try b.overflowHidden(row);
 
         // Accessibility: expose the row as a "treeitem" whose name is the node text
         // (an explicit aria-label so the chevron/icon glyphs preceding the name in
@@ -654,12 +878,14 @@ pub const TreeView = struct {
         const auto_id = std.fmt.bufPrint(&idbuf, "n{d}", .{row}) catch "n";
         try b.clickable(row, auto_id);
         try b.hoverable(row, auto_id);
+        try b.rightClickable(row, auto_id);
         if (self.router) |r| {
             const h = self.rowHandler();
             try r.onNode(row, .click, h);
             try r.onNode(row, .double_click, h);
             try r.onNode(row, .mouse_enter, h);
             try r.onNode(row, .mouse_leave, h);
+            try r.onNode(row, .right_click, h);
         }
 
         // Chevron. On branches it is its own hit-target: clicking it toggles
@@ -671,6 +897,9 @@ pub const TreeView = struct {
             "";
         const chevron = try b.addText(chevron_str);
         try b.width(chevron, 16, .px);
+        try b.flexShrink(chevron, 0);
+        try b.noWrap(chevron);
+        try self.applyTextStyle(b, chevron);
         if (node.node_type == .branch) {
             var cidbuf: [16]u8 = undefined;
             const caret_id = std.fmt.bufPrint(&cidbuf, "n{d}", .{chevron}) catch "n";
@@ -679,33 +908,40 @@ pub const TreeView = struct {
         } else {
             try b.pointerEventsNone(chevron);
         }
-        const chev_c = b.theme.text_secondary;
-        try b.store.setStyle(chevron, .color, .{ .color = .{ .r = @as(f32, @floatFromInt(chev_c.r)) / 255.0, .g = @as(f32, @floatFromInt(chev_c.g)) / 255.0, .b = @as(f32, @floatFromInt(chev_c.b)) / 255.0, .a = 1.0 } });
+        try setColor(b.store, chevron, resolved.caret);
 
         // Icon.
         const icon_str = if (node.icon) |i| i else "";
         const icon = try b.addText(icon_str);
         try b.width(icon, 16, .px);
+        try b.flexShrink(icon, 0);
+        try b.noWrap(icon);
+        try self.applyTextStyle(b, icon);
         try b.pointerEventsNone(icon);
-        const icon_c = if (node.node_type == .branch) b.theme.warning else b.theme.accent;
-        try b.store.setStyle(icon, .color, .{ .color = .{ .r = @as(f32, @floatFromInt(icon_c.r)) / 255.0, .g = @as(f32, @floatFromInt(icon_c.g)) / 255.0, .b = @as(f32, @floatFromInt(icon_c.b)) / 255.0, .a = 1.0 } });
+        const icon_c = node.icon_color orelse colors.icon orelse
+            (if (node.node_type == .branch) self.theme.warning else self.theme.accent);
+        try setColor(b.store, icon, icon_c);
 
-        // Name (selection color applied by the effect).
+        // Name (selection color applied by the effect). One line, shrinkable to
+        // zero (min-width 0) so the row's overflow clip cuts it at the right edge.
         const name_node = try b.addText(node.name);
         try b.flexGrow(name_node, 1);
+        try b.flexShrink(name_node, 1);
+        try b.minWidth(name_node, 0, .px);
+        try b.noWrap(name_node);
+        try b.marginLeft(name_node, self.icon_gap);
+        try self.applyTextStyle(b, name_node);
         try b.pointerEventsNone(name_node);
 
-        // Decorator (static color).
+        // Decorator (static color). Never shrinks: the label gives way first.
         if (node.decorator) |dec| {
             const dec_node = try b.addText(dec);
+            try b.flexShrink(dec_node, 0);
+            try b.noWrap(dec_node);
+            try self.applyTextStyle(b, dec_node);
             try b.pointerEventsNone(dec_node);
             if (node.decorator_color) |color| {
-                try b.store.setStyle(dec_node, .color, .{ .color = .{
-                    .r = @as(f32, @floatFromInt(color[0])) / 255.0,
-                    .g = @as(f32, @floatFromInt(color[1])) / 255.0,
-                    .b = @as(f32, @floatFromInt(color[2])) / 255.0,
-                    .a = 1.0,
-                } });
+                try setColor(b.store, dec_node, .{ .r = color[0], .g = color[1], .b = color[2] });
             }
         }
 
@@ -772,49 +1008,74 @@ pub const TreeView = struct {
         return null;
     }
 
-    /// Paints one row's background (selected > hovered > transparent) and its name
-    /// color. Counts the visit so tests can assert the repaint stayed bounded.
-    fn paintRow(self: *TreeView, info: RowInfo, selected: bool, hovered: bool) void {
+    /// The row state `paintRow` renders.
+    const RowPaint = struct { selected: bool, hovered: bool, focused: bool, active: bool };
+
+    /// Paints one row: background (selected > hovered > transparent; the
+    /// selection uses the inactive pair while the tree lacks keyboard focus),
+    /// label color, and the focus outline (the focused row, only while the tree
+    /// has focus). Counts the visit so tests can assert the repaint stayed bounded.
+    fn paintRow(self: *TreeView, info: RowInfo, st: RowPaint) void {
         const store = self.store orelse return;
-        if (selected) {
-            const s = self.theme.accent;
-            store.setStyle(info.row, .background, props.PropValue.rgbA(s.r, s.g, s.b, 0.35)) catch {};
-        } else if (hovered) {
-            const h = theme_mod.Theme.stateLayer(self.theme.bg_surface, self.theme.text, .hover);
-            store.setStyle(info.row, .background, props.PropValue.rgbA(h.r, h.g, h.b, @as(f32, @floatFromInt(h.a)) / 255.0)) catch {};
-        } else {
-            store.setStyle(info.row, .background, .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } }) catch {};
-        }
-        const name_c = if (selected) self.theme.text else self.theme.text_secondary;
-        store.setStyle(info.name, .color, .{ .color = .{ .r = @as(f32, @floatFromInt(name_c.r)) / 255.0, .g = @as(f32, @floatFromInt(name_c.g)) / 255.0, .b = @as(f32, @floatFromInt(name_c.b)) / 255.0, .a = 1.0 } }) catch {};
+        const c = self.theme.listColors(self.colors);
+        const bg: theme_mod.Color = if (st.selected)
+            (if (st.active) c.selected_bg else c.inactive_selected_bg)
+        else if (st.hovered)
+            c.hover_bg
+        else
+            theme_mod.Color.transparent();
+        store.setStyle(info.row, .background, colorValue(bg)) catch {};
+        const name_c = if (st.selected) (if (st.active) c.selected_text else c.inactive_selected_text) else c.text;
+        store.setStyle(info.name, .color, colorValue(name_c)) catch {};
+        const outline = if (st.focused and st.active) c.focus_outline else theme_mod.Color.transparent();
+        store.setStyle(info.row, .border_color, colorValue(outline)) catch {};
         // Accessibility: mirror selection onto the row's `.checked` flag — the UIA
         // SelectionItem provider derives IsSelected from it, and the property-change
         // funnel raises the corresponding a11y event.
-        store.setModifier(info.row, .checked, .{ .boolean = selected }) catch {};
+        store.setModifier(info.row, .checked, .{ .boolean = st.selected }) catch {};
         self.paint_visits += 1;
     }
 
-    /// Repaints the materialized rows for the current selection/hover — the whole
-    /// window after a structural (re)build (`full_repaint`), else only the ≤4 rows
-    /// whose membership changed. Reads `selected`/`hovered` with `.get()`, so when
-    /// run as the visuals effect it subscribes to both; the scroll-window effect
-    /// calls it untracked (no subscription). Does NOT ensure-visible.
+    /// Repaints the materialized rows for the current selection/hover/focus — the
+    /// whole window after a structural (re)build (`full_repaint`), else only the
+    /// ≤6 rows whose membership changed (plus the selected and focused rows when
+    /// the tree gains/loses keyboard focus). Reads the state signals with `.get()`,
+    /// so when run as the visuals effect it subscribes to them; the scroll-window
+    /// effect calls it untracked (no subscription). Does NOT ensure-visible.
     fn paintRows(self: *TreeView) void {
         if (self.store == null) return;
         const sel = self.selSig().get(); // subscribe to selection changes
         const hov = self.hovSig().get(); // subscribe to hover changes
+        const foc = self.resolveFocus(sel, self.focus_state.get());
+        const active = self.has_focus.get();
         self.paint_visits = 0;
+
+        const state = struct {
+            fn of(id: usize, s: ?usize, h: ?usize, f: ?usize, a: bool) RowPaint {
+                return .{
+                    .selected = s != null and s.? == id,
+                    .hovered = h != null and h.? == id,
+                    .focused = f != null and f.? == id,
+                    .active = a,
+                };
+            }
+        };
 
         if (self.full_repaint) {
             // Fresh rows after a structural (re)build: paint every one.
             for (self.row_map.items) |info| {
-                self.paintRow(info, sel != null and sel.? == info.node_id, hov != null and hov.? == info.node_id);
+                self.paintRow(info, state.of(info.node_id, sel, hov, foc, active));
             }
             self.full_repaint = false;
         } else {
-            // Steady state: only the rows whose selected/hovered membership changed
-            // need repainting — at most the outgoing/incoming selection and hover.
-            const ids = [_]?usize{ self.last_sel, sel, self.last_hov, hov };
+            // Steady state: only the rows whose selected/hovered/focused membership
+            // changed need repainting; a focus-in/out also restyles the selected and
+            // focused rows (inactive selection colors, outline).
+            const ids = [_]?usize{
+                self.last_sel, sel,
+                self.last_hov, hov,
+                self.last_foc, foc,
+            };
             for (ids, 0..) |maybe_id, k| {
                 const id = maybe_id orelse continue;
                 // Skip an id already repainted earlier in this run.
@@ -827,12 +1088,14 @@ pub const TreeView = struct {
                 }
                 if (dup) continue;
                 if (self.rowInfoFor(id)) |info| {
-                    self.paintRow(info, sel != null and sel.? == id, hov != null and hov.? == id);
+                    self.paintRow(info, state.of(id, sel, hov, foc, active));
                 }
             }
         }
         self.last_sel = sel;
         self.last_hov = hov;
+        self.last_foc = foc;
+        self.last_has_focus = active;
     }
 
     /// The visuals effect: repaint the affected rows, then keep the selection visible
@@ -938,7 +1201,7 @@ test "TreeView (mountOwned) expand/collapse is structural; hover/select repaint 
     try testing.expectEqual(@as(usize, 3), tv.row_map.items.len);
     try testing.expectEqual(@as(?usize, 2), tv.selectedNode());
     try testing.expectApproxEqAbs(@as(f32, @floatFromInt(tv.theme.text.r)) / 255.0, store.getStyle(rowFor(tv, 2).name, .color).?.color.r, 0.001);
-    try testing.expectApproxEqAbs(@as(f32, 0.35), store.getStyle(rowFor(tv, 2).row, .background).?.color.a, 0.001); // selected bg = accent tint
+    try testing.expectApproxEqAbs(@as(f32, 0.18), store.getStyle(rowFor(tv, 2).row, .background).?.color.a, 0.001); // selected bg = accent tint, inactive (the tree has no keyboard focus)
 
     // Hover the other leaf → its row gets the stateLayer hover tint.
     _ = router.route(.{ .name = "mouse_enter", .id = "", .node_id = rowFor(tv, 3).row });
@@ -1000,7 +1263,7 @@ test "TreeView hover/selection repaint is bounded, not O(rows)" {
     try testing.expect(tv.paint_visits <= 2);
     try testing.expectEqual(@as(?usize, 30), tv.selectedNode());
     // The selected row carries the accent tint; the previously hovered row is not selected.
-    try testing.expectApproxEqAbs(@as(f32, 0.35), store.getStyle(rowFor(tv, 30).row, .background).?.color.a, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.18), store.getStyle(rowFor(tv, 30).row, .background).?.color.a, 0.001); // unfocused tree: inactive selection
 }
 
 test "TreeView data_rev bump preserves selection when the id survives, clears it when it vanishes" {
@@ -1107,7 +1370,7 @@ test "TreeView drives and reads a caller-owned selection signal" {
     // The caller writing the signal drives the highlight (element-picker path):
     // the visuals effect re-runs and paints row 1 selected (accent tint).
     selected.set(1);
-    try testing.expectApproxEqAbs(@as(f32, 0.35), store.getStyle(rowFor(tv, 1).row, .background).?.color.a, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.18), store.getStyle(rowFor(tv, 1).row, .background).?.color.a, 0.001); // unfocused tree: inactive selection
     try testing.expectApproxEqAbs(@as(f32, 0.0), store.getStyle(rowFor(tv, 2).row, .background).?.color.a, 0.001);
 }
 
@@ -1562,7 +1825,7 @@ test "TreeView virtualized: materializes only the window; a scroll shifts it" {
     try testing.expect(!hasRow(tv, 100));
 
     // Spacers reserve the off-window extent: total content height == 200 rows.
-    try testing.expectApproxEqAbs(@as(f32, 200.0 * ROW_H), sumChildHeights(&store, &registry, tv.root_id), 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 200.0 * tv.rowH()), sumChildHeights(&store, &registry, tv.root_id), 0.5);
 
     // Scroll the shared offset down to ~row 100 (start = floor(2200/22) - 4 = 96):
     // the window rebuilds around row 100 and drops the top rows.
@@ -1571,7 +1834,7 @@ test "TreeView virtualized: materializes only the window; a scroll shifts it" {
     try testing.expect(!hasRow(tv, 0));
     try testing.expect(hasRow(tv, 100));
     // Content height is still the full extent after the shift.
-    try testing.expectApproxEqAbs(@as(f32, 200.0 * ROW_H), sumChildHeights(&store, &registry, tv.root_id), 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 200.0 * tv.rowH()), sumChildHeights(&store, &registry, tv.root_id), 0.5);
 }
 
 test "TreeView virtualized: a window shift REUSES the in-range rows' node ids (row + text)" {
@@ -1875,7 +2138,7 @@ test "TreeView controlled_expansion: caller fills a branch lazily + bumps data_r
     try testing.expectEqual(@as(usize, 4), tv.row_map.items.len);
     try testing.expectEqual(@as(usize, 2), roots.items[0].children.items.len);
     try testing.expectEqual(@as(?usize, 1), tv.selectedNode());
-    try testing.expectApproxEqAbs(@as(f32, 0.35), store.getStyle(rowFor(tv, 1).row, .background).?.color.a, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.18), store.getStyle(rowFor(tv, 1).row, .background).?.color.a, 0.001); // unfocused tree: inactive selection
 }
 
 test "TreeView uncontrolled: expand/collapse handlers fire and expanded still toggles" {
@@ -1981,4 +2244,325 @@ test "TreeView on_activate: double click and Enter on a leaf activate; a single 
     try testing.expectEqualSlices(usize, &.{ 2, 3 }, rec.activates.items);
     try testing.expectEqualSlices(usize, &.{1}, rec.collapses.items);
     try testing.expect(!roots.items[0].expanded);
+}
+
+// ── Explorer requirements: single-line rows, metrics, colors, focus,
+// single-click activation, reveal, context menu ───────────────────────────────
+
+const ts = @import("test_support.zig");
+
+/// Records every widget event a tree fires (name, item id, position).
+const EvRec = struct {
+    const Rec = struct { name: []const u8, item: ?usize, x: f32, y: f32 };
+    list: std.array_list.Managed(Rec),
+
+    fn init(a: std.mem.Allocator) EvRec {
+        return .{ .list = std.array_list.Managed(Rec).init(a) };
+    }
+    fn deinit(self: *EvRec) void {
+        self.list.deinit();
+    }
+    fn on(self: *EvRec, ev: events.Event) void {
+        self.list.append(.{ .name = ev.name, .item = ev.item_id, .x = ev.x, .y = ev.y }) catch unreachable;
+    }
+    fn h(self: *EvRec, ctx: *component.BuildContext) events.Handler {
+        return ctx.handler(self, on);
+    }
+    fn count(self: *const EvRec, name: []const u8) usize {
+        var n: usize = 0;
+        for (self.list.items) |r| {
+            if (std.mem.eql(u8, r.name, name)) n += 1;
+        }
+        return n;
+    }
+};
+
+/// A tree mounted into a fresh harness; `env.solve` runs the real layout.
+const TreeEnv = struct {
+    env: ts.Harness,
+    roots: std.array_list.Managed(TreeNode),
+    rec: EvRec,
+
+    fn init(self: *TreeEnv, a: std.mem.Allocator) void {
+        self.* = .{ .env = ts.Harness.init(a), .roots = std.array_list.Managed(TreeNode).init(a), .rec = EvRec.init(a) };
+        self.env.wire();
+    }
+    fn deinit(self: *TreeEnv) void {
+        self.env.deinit();
+        for (self.roots.items) |*n| deinitNode(n);
+        self.roots.deinit();
+        self.rec.deinit();
+    }
+    fn mount(self: *TreeEnv, init_props: TreeView) !*TreeView {
+        var b = component.UIBuilder.init(&self.env.registry, &self.env.store);
+        var ctx = component.BuildContext{ .builder = &b, .router = &self.env.router, .mounts = &self.env.mounts };
+        const root = try b.openNodeKeyed(.box, null);
+        try b.width(root, 100, .percent);
+        try b.height(root, 100, .percent);
+        try ctx.mountOwned(TreeView, .{
+            .roots = &self.roots,
+            .on_activate = self.rec.h(&ctx),
+            .on_expand = self.rec.h(&ctx),
+            .on_context_menu = self.rec.h(&ctx),
+            .activate_on_click = init_props.activate_on_click,
+            .context_menu_selects = init_props.context_menu_selects,
+            .reveal = init_props.reveal,
+            .scroll_offset = init_props.scroll_offset,
+            .viewport_height = init_props.viewport_height,
+            .row_height = init_props.row_height,
+            .indent = init_props.indent,
+            .row_padding = init_props.row_padding,
+            .icon_gap = init_props.icon_gap,
+            .font_size = init_props.font_size,
+            .colors = init_props.colors,
+        });
+        b.close();
+        const anchor = self.env.registry.getNode(0).?.first_child;
+        return @ptrCast(@alignCast(self.env.mounts.get(anchor).?.component_ptr));
+    }
+    fn child(self: *TreeEnv, parent: reg.NodeId, index: usize) reg.NodeId {
+        var c = self.env.registry.getNode(parent).?.first_child;
+        var i: usize = 0;
+        while (i < index) : (i += 1) c = self.env.registry.getNode(c).?.next_sibling;
+        return c;
+    }
+};
+
+fn expectColor(store: *props.PropertyStore, id: reg.NodeId, key: anytype, c: theme_mod.Color) !void {
+    const v = store.getStyle(id, key).?.color;
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(c.r)) / 255.0, v.r, 0.002);
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(c.g)) / 255.0, v.g, 0.002);
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(c.b)) / 255.0, v.b, 0.002);
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(c.a)) / 255.0, v.a, 0.002);
+}
+
+test "TreeView rows stay single-line at row_height in a 60px pane; the label is clipped, not wrapped" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    var br = branchNode(testing.allocator, 1, "a-folder-with-a-very-long-name-that-cannot-fit", true);
+    try br.children.append(leaf(testing.allocator, 2, "another extremely long file name.document.txt"));
+    try t.roots.append(br);
+    try t.roots.append(leaf(testing.allocator, 3, "short"));
+    const tv = try t.mount(.{ .font_size = 13 });
+    // A real font: the claim is about text wrapping, which headless metrics can't show.
+    const ttf = try ts.loadSystemFont(testing.allocator);
+    defer testing.allocator.free(ttf);
+    var atlas = try text_render.FontAtlas.init(testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+    t.env.solveWith(&atlas, 0, 60, 300);
+
+    try testing.expectApproxEqAbs(@as(f32, 22), tv.rowH(), 0.001);
+    const one_line = text_render.lineHeight(13);
+    for ([_]usize{ 1, 2, 3 }) |id| {
+        const info = rowFor(tv, id);
+        const row = t.env.geom(info.row);
+        try testing.expectApproxEqAbs(@as(f32, 22), row.height, 0.01);
+        try testing.expect(row.width <= 60.01); // the row never grows past the pane
+        const name = t.env.geom(info.name);
+        try testing.expect(name.height <= one_line + 0.01); // one line, no wrap
+        try testing.expect(name.x + name.width <= row.x + row.width + 0.01); // clipped box
+    }
+    // Rows stack at the fixed step: nothing below jumps.
+    try testing.expectApproxEqAbs(t.env.geom(rowFor(tv, 1).row).y + 22, t.env.geom(rowFor(tv, 2).row).y, 0.01);
+    try testing.expectApproxEqAbs(t.env.geom(rowFor(tv, 2).row).y + 22, t.env.geom(rowFor(tv, 3).row).y, 0.01);
+}
+
+test "TreeView metrics: icon_gap, indent and row_padding place the label; a big font raises the row" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    var br = branchNode(testing.allocator, 1, "src", true);
+    try br.children.append(leaf(testing.allocator, 2, "main.zig"));
+    try t.roots.append(br);
+    const tv = try t.mount(.{ .icon_gap = 6, .indent = 8, .row_padding = .{ .l = 3 } });
+    t.env.solve(0, 300, 300);
+
+    for ([_]usize{ 1, 2 }, 0..) |id, depth| {
+        const info = rowFor(tv, id);
+        const row = t.env.geom(info.row);
+        const caret = t.env.geom(t.child(info.row, 0));
+        const icon = t.env.geom(t.child(info.row, 1));
+        const name = t.env.geom(info.name);
+        // The first caret starts at row_padding.l (+ indent per level); the outline
+        // border is carved out of that padding, not added to it.
+        try testing.expectApproxEqAbs(row.x + 3 + 8 * @as(f32, @floatFromInt(depth)), caret.x, 0.01);
+        // The label starts icon_gap px after the icon.
+        try testing.expectApproxEqAbs(icon.x + icon.width + 6, name.x, 0.01);
+    }
+
+    // A font whose line doesn't fit row_height raises the row instead of clipping.
+    tv.font_size = 30;
+    try testing.expect(tv.rowH() >= text_render.lineHeight(30));
+}
+
+test "TreeView colors: every ListColors field and TreeNode.icon_color reach their nodes; focus switches the selection pair" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    const C = theme_mod.Color;
+    var br = branchNode(testing.allocator, 1, "src", true);
+    var lf = leaf(testing.allocator, 2, "main.zig");
+    lf.icon_color = C{ .r = 1, .g = 2, .b = 3 };
+    try br.children.append(lf);
+    try t.roots.append(br);
+    try t.roots.append(leaf(testing.allocator, 3, "b.zig"));
+
+    const colors = theme_mod.ListColors{
+        .text = C{ .r = 10, .g = 0, .b = 0 },
+        .caret = C{ .r = 20, .g = 0, .b = 0 },
+        .icon = C{ .r = 30, .g = 0, .b = 0 },
+        .hover_bg = C{ .r = 40, .g = 0, .b = 0 },
+        .selected_bg = C{ .r = 50, .g = 0, .b = 0 },
+        .selected_text = C{ .r = 60, .g = 0, .b = 0 },
+        .inactive_selected_bg = C{ .r = 70, .g = 0, .b = 0 },
+        .inactive_selected_text = C{ .r = 80, .g = 0, .b = 0 },
+        .focus_outline = C{ .r = 90, .g = 0, .b = 0 },
+    };
+    const tv = try t.mount(.{ .colors = colors });
+    const st = &t.env.store;
+
+    // Static colors set at build: caret, tree icon, per-node icon, label.
+    try expectColor(st, t.child(rowFor(tv, 1).row, 0), .color, colors.caret.?);
+    try expectColor(st, t.child(rowFor(tv, 1).row, 1), .color, colors.icon.?);
+    try expectColor(st, t.child(rowFor(tv, 2).row, 1), .color, C{ .r = 1, .g = 2, .b = 3 });
+    try expectColor(st, rowFor(tv, 3).name, .color, colors.text.?);
+
+    // Hover.
+    t.env.route(.{ .name = "mouse_enter", .id = "", .node_id = rowFor(tv, 3).row });
+    try expectColor(st, rowFor(tv, 3).row, .background, colors.hover_bg.?);
+
+    // Selection without keyboard focus: the inactive pair, no outline.
+    t.env.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 2).row, .key_code = 1 });
+    try expectColor(st, rowFor(tv, 2).row, .background, colors.inactive_selected_bg.?);
+    try expectColor(st, rowFor(tv, 2).name, .color, colors.inactive_selected_text.?);
+    try expectColor(st, rowFor(tv, 2).row, .border_color, C.transparent());
+
+    // The tree takes focus: the active pair plus the 1px outline on the focused row.
+    t.env.route(.{ .name = "focus", .id = "", .node_id = tv.root_id });
+    try expectColor(st, rowFor(tv, 2).row, .background, colors.selected_bg.?);
+    try expectColor(st, rowFor(tv, 2).name, .color, colors.selected_text.?);
+    try expectColor(st, rowFor(tv, 2).row, .border_color, colors.focus_outline.?);
+
+    // Blur: back to inactive, outline hidden.
+    t.env.route(.{ .name = "blur", .id = "", .node_id = tv.root_id });
+    try expectColor(st, rowFor(tv, 2).row, .background, colors.inactive_selected_bg.?);
+    try expectColor(st, rowFor(tv, 2).row, .border_color, C.transparent());
+
+    // Theme-level list colors are the fallback for fields the widget leaves unset.
+    var th = theme_mod.Theme.dark();
+    th.list.selected_bg = C{ .r = 5, .g = 6, .b = 7 };
+    const r = th.listColors(.{ .text = colors.text });
+    try testing.expectEqual(th.list.selected_bg.?, r.selected_bg);
+    try testing.expectEqual(colors.text.?, r.text);
+    try testing.expectEqual(th.focus_ring, r.focus_outline);
+}
+
+test "TreeView activate_on_click: a click on a leaf previews once, a double click pins once, a branch click expands" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    var br = branchNode(testing.allocator, 1, "src", false);
+    try br.children.append(leaf(testing.allocator, 4, "x.zig"));
+    try t.roots.append(br);
+    try t.roots.append(leaf(testing.allocator, 3, "b.zig"));
+    const tv = try t.mount(.{ .activate_on_click = true });
+
+    // One click on a leaf: one "preview".
+    t.env.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 3).row, .key_code = 1 });
+    try testing.expectEqual(@as(usize, 1), t.rec.count("preview"));
+    try testing.expectEqual(@as(usize, 0), t.rec.count("activate"));
+    try testing.expectEqual(@as(?usize, 3), t.rec.list.items[0].item);
+
+    // A double click as the engine delivers it: click(1), double_click(2), click(2).
+    t.rec.list.clearRetainingCapacity();
+    t.env.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 3).row, .key_code = 1 });
+    t.env.route(.{ .name = "double_click", .id = "", .node_id = rowFor(tv, 3).row, .key_code = 2 });
+    t.env.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 3).row, .key_code = 2 });
+    try testing.expectEqual(@as(usize, 1), t.rec.count("preview"));
+    try testing.expectEqual(@as(usize, 1), t.rec.count("activate"));
+
+    // A branch click toggles (fires on_expand), never activates.
+    t.rec.list.clearRetainingCapacity();
+    t.env.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 1).row, .key_code = 1 });
+    try testing.expectEqual(@as(usize, 1), t.rec.count("expand"));
+    try testing.expectEqual(@as(usize, 0), t.rec.count("preview"));
+    try testing.expect(t.roots.items[0].expanded);
+}
+
+test "TreeView reveal: scrolls a row below the viewport just into view, leaves a visible row alone, consumes the request" {
+    const a = testing.allocator;
+    var reveal = signals.Signal(?usize).init(a, null);
+    defer reveal.deinit();
+    var scroll_offset = signals.Signal(f32).init(a, 0);
+    defer scroll_offset.deinit();
+    var t: TreeEnv = undefined;
+    t.init(a);
+    defer t.deinit();
+    var k: usize = 0;
+    while (k < 30) : (k += 1) try t.roots.append(leaf(a, k, "row"));
+    _ = try t.mount(.{ .reveal = &reveal, .scroll_offset = &scroll_offset, .viewport_height = 100 });
+
+    // Row 10 (bottom at 242) below a 100px viewport: its bottom aligns with the
+    // bottom of the viewport, the minimum scroll.
+    reveal.set(10);
+    try testing.expectApproxEqAbs(@as(f32, -142), scroll_offset.peek(), 0.001);
+    try testing.expectEqual(@as(?usize, null), reveal.peek()); // consumed
+
+    // Row 8 (176..198) is already visible in [142, 242]: nothing moves.
+    reveal.set(8);
+    try testing.expectApproxEqAbs(@as(f32, -142), scroll_offset.peek(), 0.001);
+    try testing.expectEqual(@as(?usize, null), reveal.peek());
+}
+
+test "TreeView context menu: a right click focuses the row, keeps the selection, and reports id + window position" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    try t.roots.append(leaf(testing.allocator, 1, "a.zig"));
+    try t.roots.append(leaf(testing.allocator, 2, "b.zig"));
+    const tv = try t.mount(.{});
+    t.env.solve(0, 300, 300);
+    t.env.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 1).row, .key_code = 1 });
+
+    // Right click on row 2, as the engine bubbles it: the row, then the root.
+    t.env.route(.{ .name = "right_mouse_down", .id = "", .node_id = rowFor(tv, 2).row, .x = 40, .y = 30 });
+    t.env.route(.{ .name = "right_mouse_down", .id = "", .node_id = tv.root_id, .x = 40, .y = 30 });
+    try testing.expectEqual(@as(usize, 1), t.rec.count("context_menu"));
+    const ev = t.rec.list.items[0];
+    try testing.expectEqual(@as(?usize, 2), ev.item);
+    try testing.expectEqual(@as(f32, 40), ev.x);
+    try testing.expectEqual(@as(f32, 30), ev.y);
+    try testing.expectEqual(@as(?usize, 1), tv.selectedNode()); // selection kept
+    try testing.expectEqual(@as(?usize, 2), tv.focusedNode()); // focus moved
+
+    // Empty space (only the root sees it): item_id null.
+    t.env.route(.{ .name = "right_mouse_down", .id = "", .node_id = tv.root_id, .x = 50, .y = 250 });
+    try testing.expectEqual(@as(usize, 2), t.rec.count("context_menu"));
+    try testing.expectEqual(@as(?usize, null), t.rec.list.items[1].item);
+
+    // Shift+F10 opens it for the focused row, at the bottom-left of that row.
+    t.env.route(.{ .name = "key_down", .id = "", .node_id = tv.root_id, .key_code = events.Key.f10.code(), .shift = true });
+    try testing.expectEqual(@as(usize, 3), t.rec.count("context_menu"));
+    const kev = t.rec.list.items[2];
+    const row2 = t.env.geom(rowFor(tv, 2).row);
+    try testing.expectEqual(@as(?usize, 2), kev.item);
+    try testing.expectApproxEqAbs(row2.y + row2.height, kev.y, 0.01);
+    try testing.expectApproxEqAbs(row2.x + 10, kev.x, 0.01);
+    // The menu key does the same; plain F10 does not.
+    keyDown(&t.env.router, tv.root_id, .apps);
+    keyDown(&t.env.router, tv.root_id, .f10);
+    try testing.expectEqual(@as(usize, 4), t.rec.count("context_menu"));
+}
+
+test "TreeView context_menu_selects: a right click selects the row first" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    try t.roots.append(leaf(testing.allocator, 1, "a.zig"));
+    try t.roots.append(leaf(testing.allocator, 2, "b.zig"));
+    const tv = try t.mount(.{ .context_menu_selects = true });
+    t.env.route(.{ .name = "right_mouse_down", .id = "", .node_id = rowFor(tv, 2).row, .x = 1, .y = 1 });
+    try testing.expectEqual(@as(?usize, 2), tv.selectedNode());
+    try testing.expectEqual(@as(?usize, 2), t.rec.list.items[0].item);
 }

@@ -148,7 +148,7 @@ typedef enum CelerisEventType {
     CELERIS_EVENT_MOUSE_ENTER,
     CELERIS_EVENT_MOUSE_LEAVE,
     CELERIS_EVENT_GLOBAL_MOUSE_DOWN,
-    CELERIS_EVENT_CLICK,
+    CELERIS_EVENT_CLICK,            /* key_code = click count (1, 2 on the 2nd click of a double click, ...) */
     CELERIS_EVENT_FOCUS,
     CELERIS_EVENT_BLUR,
     CELERIS_EVENT_KEY_DOWN,

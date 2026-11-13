@@ -141,6 +141,9 @@ pub const Key = enum(u32) {
     y = 0x59,
     z = 0x5A,
     meta = 0x5B, // Windows / Super key (VK_LWIN)
+    /// The context-menu key (VK_APPS; XK_Menu on X11). Shift+F10 is its standard
+    /// chord; widgets that open a context menu from the keyboard accept both.
+    apps = 0x5D,
     f1 = 0x70,
     f2 = 0x71,
     f3 = 0x72,

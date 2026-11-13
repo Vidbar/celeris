@@ -45,6 +45,7 @@ pub const Alt_L: u32 = 0xffe9;
 pub const Alt_R: u32 = 0xffea;
 pub const Super_L: u32 = 0xffeb;
 pub const Super_R: u32 = 0xffec;
+pub const Menu: u32 = 0xff67;
 
 /// Engine key code for an XKB keysym; 0 when the key has no mapping.
 pub fn toVk(sym: u32) u32 {
@@ -59,6 +60,7 @@ pub fn toVk(sym: u32) u32 {
         Control_L, Control_R => .ctrl,
         Alt_L, Alt_R => .alt,
         Super_L, Super_R => .meta,
+        Menu => .apps,
         Home, KP_Home => .home,
         End, KP_End => .end,
         Page_Up, KP_Page_Up => .page_up,
@@ -103,7 +105,7 @@ test "keysym editing keys, letters, digits and F-keys" {
         .{ .sym = 'z', .key = .z },               .{ .sym = 'C', .key = .c },
         .{ .sym = '0', .key = .@"0" },            .{ .sym = '9', .key = .@"9" },
         .{ .sym = F1, .key = .f1 },               .{ .sym = F12, .key = .f12 },
-        .{ .sym = F1 + 4, .key = .f5 },
+        .{ .sym = F1 + 4, .key = .f5 },           .{ .sym = Menu, .key = .apps },
     };
     for (cases) |cs| try std.testing.expectEqual(@as(?Key, cs.key), Key.fromCode(toVk(cs.sym)));
     try std.testing.expectEqual(@as(u32, 0), toVk('!'));

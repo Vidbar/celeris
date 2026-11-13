@@ -24,6 +24,57 @@ pub const Color = struct {
     }
 };
 
+/// Row colors of list-like widgets (TreeView today; any row list may read it).
+/// Every field is an optional override: null derives the color from the theme's
+/// base tokens (`Theme.listColors`), so a theme or a widget sets only what it
+/// changes — `.{ .selected_bg = c }` keeps every other default. Precedence is
+/// widget `colors` > `Theme.list` > derived.
+///
+/// Selection and focus are separate states, as in desktop toolkits: the
+/// *selected* row carries the selection colors (`selected_*` while the widget
+/// has keyboard focus, `inactive_selected_*` otherwise); the *focused* row (the
+/// keyboard cursor) gets a 1 px `focus_outline` while the widget has focus.
+pub const ListColors = struct {
+    /// Row label.
+    text: ?Color = null,
+    /// Disclosure caret of branch rows.
+    caret: ?Color = null,
+    /// Row icon (a per-item color, e.g. `TreeNode.icon_color`, wins).
+    icon: ?Color = null,
+    /// Background of the row under the pointer.
+    hover_bg: ?Color = null,
+    /// Selected row while the widget has keyboard focus.
+    selected_bg: ?Color = null,
+    selected_text: ?Color = null,
+    /// Selected row while the widget does not have keyboard focus.
+    inactive_selected_bg: ?Color = null,
+    inactive_selected_text: ?Color = null,
+    /// 1 px outline of the focused row while the widget has keyboard focus.
+    focus_outline: ?Color = null,
+
+    /// Fields set in `over` replace the ones in `self`.
+    pub fn merged(self: ListColors, over: ListColors) ListColors {
+        var out = self;
+        inline for (std.meta.fields(ListColors)) |f| {
+            if (@field(over, f.name)) |v| @field(out, f.name) = v;
+        }
+        return out;
+    }
+};
+
+/// `ListColors` with every field resolved (see `Theme.listColors`).
+pub const ResolvedListColors = struct {
+    text: Color,
+    caret: Color,
+    icon: Color,
+    hover_bg: Color,
+    selected_bg: Color,
+    selected_text: Color,
+    inactive_selected_bg: Color,
+    inactive_selected_text: Color,
+    focus_outline: Color,
+};
+
 pub const TextStyle = struct {
     size: f32,
     weight: enum { regular, medium, bold } = .regular,
@@ -123,6 +174,11 @@ pub const Theme = struct {
     /// darken on light), matching the M3 policy in themeFromSeed.
     is_dark: bool = true,
 
+    // ── Lists ───────────────────────────────────────────────────────────────
+    /// Row colors for list-like widgets. All null by default: derived from the
+    /// tokens above (see `listColors`).
+    list: ListColors = .{},
+
     // ── Typography ──────────────────────────────────────────────────────────
     typography: Typography = .{},
 
@@ -143,6 +199,26 @@ pub const Theme = struct {
             };
         }
     };
+
+    /// Resolves list row colors: `over` (a widget's `colors`) > `self.list` >
+    /// derived from the base tokens. The derived values are the TreeView colors
+    /// Celeris has always painted (accent at 35% for the selection, the M3 hover
+    /// state layer), plus a dimmer accent for the inactive selection and the
+    /// theme's `focus_ring` for the focused-row outline.
+    pub fn listColors(self: Theme, over: ListColors) ResolvedListColors {
+        const c = self.list.merged(over);
+        return .{
+            .text = c.text orelse self.text_secondary,
+            .caret = c.caret orelse self.text_secondary,
+            .icon = c.icon orelse self.accent,
+            .hover_bg = c.hover_bg orelse stateLayer(self.bg_surface, self.text, .hover),
+            .selected_bg = c.selected_bg orelse self.accent.withAlpha(0.35),
+            .selected_text = c.selected_text orelse self.text,
+            .inactive_selected_bg = c.inactive_selected_bg orelse self.accent.withAlpha(0.18),
+            .inactive_selected_text = c.inactive_selected_text orelse self.text,
+            .focus_outline = c.focus_outline orelse self.focus_ring,
+        };
+    }
 
     /// Composes the content color `on` over `base` with the M3 opacity for the
     /// given interaction state. sRGB alpha-over in u8 space (sufficient for

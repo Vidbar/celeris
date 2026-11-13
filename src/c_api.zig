@@ -2145,9 +2145,33 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
         // rebuilds the tree can no longer strand the press state.
         releaseAllPressed(engine, event.x, event.y, mods);
 
-        hitAndDispatch(engine, event.x, event.y, .click, .clickable_capture, .clickable);
+        // The click carries its sequence count in key_code (1 = single, 2 = the
+        // click completing a double click, ...), so a widget that acts on single
+        // clicks can skip the one a double_click already handled.
+        if (events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, event.x, event.y)) |hit_id| {
+            var ectx = makeEventCtx(engine);
+            ectx.key_code = @max(engine.click_count, 1);
+            events_mod.dispatchEvent(ectx, hit_id, .click, .clickable_capture, .clickable, event.x, event.y) catch {};
+        }
     } else if (event.event_type == .right_mouse_down) {
         emitEvent(engine, .right_mouse_down, reg.NULL_NODE, "", event.x, event.y, 0, 0, "", mods);
+
+        // A right click focuses like a left one (the nearest focusable ancestor of
+        // the hit), BEFORE the press is dispatched: a context-menu handler then
+        // sees its widget focused, as in every desktop toolkit. A miss leaves the
+        // focus alone (unlike a left click), so right-clicking empty chrome does
+        // not blur the editor.
+        if (events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, event.x, event.y)) |hit_id| {
+            var current_id: reg.NodeId = hit_id;
+            while (current_id != reg.NULL_NODE) {
+                if (engine.store.getModifier(current_id, .focusable)) |_| {
+                    moveFocus(engine, current_id, .pointer);
+                    break;
+                }
+                const node = engine.registry.getNode(current_id) orelse break;
+                current_id = node.parent;
+            }
+        }
 
         hitAndDispatch(engine, event.x, event.y, .right_mouse_down, .right_clickable_capture, .right_clickable);
     } else if (event.event_type == .right_mouse_up) {

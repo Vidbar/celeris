@@ -311,6 +311,8 @@ pub fn build(self: *MyForm, ctx: *fw.component.BuildContext) !void {
 - `.fill` — sizes the mount anchor to fill its parent (100% × 100%); use for container widgets whose root is full-size (e.g. a `SplitPane` body, a full-pane `TreeView`).
 - `.hug` — makes the anchor a row so a hug-shaped widget (like `Button`) shrink-wraps its content instead of stretching to the anchor width.
 
+**Button content placement.** A `Button` that doesn't hug fills its column, and its label (or `content`) is centered. `.justify` (the same `fw.component.Justify` a box takes) places it on the main axis: `.justify = .start` gives a left-aligned, full-width header button (a sidebar section title such as "˅ DOCUMENTS"). The whole box stays the click and hover target.
+
 **Available widgets:**
 
 1. **Buttons & Inputs:** `fw.button.Button`, `fw.icon_button.IconButton`, `fw.checkbox.Checkbox`, `fw.radio.Radio`, `fw.slider.Slider`, `fw.dropdown.Dropdown`, `fw.text_input.TextInput`, `fw.text_area.TextArea`.
@@ -435,10 +437,11 @@ For `TreeView` specifically, because selection lives in a caller-owned signal ke
 
 | Key | Action |
 |-----|--------|
-| ↑ / ↓ | Move the selection up/down across the visible rows (clamped at the ends; from no selection, ↓/↑ pick the first row). |
+| ↑ / ↓ | Move the selection (and the focused row) up/down across the visible rows (clamped at the ends; from no selection, ↓/↑ pick the first row). |
 | → | Expand a collapsed branch; if already expanded, step into its first child. |
 | ← | Collapse an expanded branch; otherwise step out to the parent. |
 | Enter | On a branch, toggle it. On a leaf, fire `on_activate` (see below). |
+| Shift+F10 / menu key | Fire `on_context_menu` for the focused row (see below). |
 
 Navigation drives the `.selected` signal, so it composes with the lifted-state recipe above: the caller observes selection changes identically whether they came from the mouse, the keyboard, or the caller's own `.set`.
 
@@ -450,7 +453,7 @@ Navigation drives the `.selected` signal, so it composes with the lifted-state r
 **TreeView expansion and activation events.** Three optional `events.Handler` props (build them with `ctx.handler`). Each receives a synthesized event whose `ev.name` is `"expand"`, `"collapse"` or `"activate"` and whose `ev.item_id` is the `TreeNode.id`:
 
 - `.on_expand` / `.on_collapse` fire for every expand/collapse gesture: caret click, row click (when `toggle_on_row_click`), ←/→, and Enter on a branch.
-- `.on_activate` fires on a double click on a row and on Enter on a leaf. An IDE opens the file here. A single click only selects.
+- `.on_activate` fires on a double click on a row and on Enter on a leaf. An IDE opens the file here. A single click only selects, unless `.activate_on_click` is set (see "single-click activation" below).
 
 **Controlled expansion (model owns `expanded`, lazy children).** Set `.controlled_expansion = true` when an app model decides which folders are open. The widget then never writes `TreeNode.expanded`; it only fires `on_expand`/`on_collapse`. The handler updates `roots` (e.g. loads a folder's children the first time it opens) and bumps `data_rev`, which is required in this mode (asserted). Selection, hover and scroll survive that rebuild like any data refresh.
 
@@ -496,6 +499,26 @@ self.selected.set(picked_node_id);
 ```
 
 **Virtualization (automatic).** Wiring that same scroll bridge (`.scroll_offset` + a positive `.viewport_height`) also makes `TreeView` *windowed*: it materializes only the rows in view (plus a small overdraw) instead of one DOM node per visible tree node, so a fully-expanded tree of thousands of rows stays fluid — scrolling, hover and selection all cost O(window), not O(rows). This is transparent: the props, the `.selected`/`.hovered` signals, keyboard nav and ensure-visible all behave the same (they index the full tree internally). Requirement: rows are a fixed height, so the window math is exact. Omit the scroll bridge and the tree renders every visible row as before (fine for small trees).
+
+**TreeView look: metrics and colors.** Rows are always one line: a label that doesn't fit is clipped at the row's right edge (it never wraps, so a narrow, resizable pane keeps every row at the same height). The metrics are props in logical px: `.row_height` (22; raised automatically when `.font_size`/`.text_style` needs a taller line), `.indent` per depth level (14), `.row_padding` (an `EdgeInsets`; `.l` is the space before a top-level caret, 10 by default), and `.icon_gap` between icon and label (4). Colors come from `theme.list` (`fw.theme.ListColors`) and the tree's own `.colors` override, field by field (widget > theme > derived from the base tokens): `text`, `caret`, `icon`, `hover_bg`, `selected_bg`/`selected_text` (the selection while the tree has keyboard focus), `inactive_selected_bg`/`inactive_selected_text` (without focus, dimmer by default), and `focus_outline`. A node's own `TreeNode.icon_color` wins over `icon`, e.g. to tint folders and file types differently. Set `theme.list` once to style every list in the app; use `.colors` for one tree.
+
+```zig
+try ctx.mountOwned(fw.tree_view.TreeView, .{
+    .roots = &self.files,
+    .font_size = 13,
+    .indent = 8,
+    .row_padding = .{ .l = 4, .r = 8 },
+    .colors = .{ .selected_bg = host.list_active_bg, .inactive_selected_bg = host.list_inactive_bg },
+});
+```
+
+**TreeView focus vs selection.** The tree keeps a *focused row* (the keyboard cursor) apart from the selected one. The focused row shows a 1 px `focus_outline` while the tree has keyboard focus; the outline is part of the row's padding, so showing it never moves the content. Clicks and keyboard navigation move focus and selection together; a right click moves only the focus (see below). `tv.focusedNode()` reads it.
+
+**TreeView single-click activation (preview).** With `.activate_on_click = true` a single click on a leaf also fires `on_activate`, with `ev.name == "preview"`; a double click and Enter fire it as `"activate"`. An editor opens the file in a preview tab on `"preview"` and pins it on `"activate"`. A double click fires exactly one `"preview"` and one `"activate"` (the engine's `click` carries the click count in `ev.key_code`, so the second click of a double click is skipped). Branch clicks keep toggling.
+
+**TreeView reveal.** To scroll a node's row into view from app code (e.g. highlight the active editor's file when the user switches tabs) without changing the selection, pass a caller-owned `.reveal = &self.reveal` (`Signal(?usize)`) and write a node id to it. The tree scrolls the minimum needed (a visible row stays put) and writes `null` back. It needs the scroll bridge (`.scroll_offset` + `.viewport_height`), and the row must be visible: with `.controlled_expansion`, expand the ancestors in your model and bump `data_rev` first. To reveal *and* select, just set `.selected`: selection already keeps its row visible.
+
+**TreeView context menu.** `.on_context_menu` fires (`ev.name == "context_menu"`) on a right click on a row, with `ev.item_id` = the node and `ev.x`/`ev.y` = the pointer in window coordinates, so a menu opens with `menu.popupWindow(ev.x, ev.y, .pointer)`. A right click on empty space delivers `ev.item_id == null`. Shift+F10 and the menu key open it for the focused row, anchored at the row's bottom-left. The right click focuses the tree and moves the focused row but keeps the selection, as desktop IDEs do (the menu acts on the clicked row); set `.context_menu_selects = true` to select the row first, as file managers do.
 
 ### `VirtualGrid` — 2D windowed grid over a pull source
 

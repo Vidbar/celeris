@@ -9,6 +9,34 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Added
+
+- `TreeView` for file explorers: one-line rows that clip instead of wrapping;
+  metrics props `row_height`, `indent`, `row_padding`, `icon_gap`, `font_size`,
+  `text_style`; colors through the new `fw.theme.ListColors` (`theme.list`, or
+  the tree's `.colors`) plus `TreeNode.icon_color`; a focused row separate from
+  the selection, with a 1 px focus outline and an inactive selection color while
+  the tree lacks keyboard focus; `activate_on_click` (single-click "preview");
+  `reveal: ?*Signal(?usize)` to scroll a row into view; `on_context_menu` (right
+  click, Shift+F10, menu key) and `context_menu_selects`. See FRAMEWORK_API.md.
+- `Button.justify` places the label/content on the main axis (`.start` for a
+  left-aligned full-width button).
+- `fw.events.Key.apps` (the context-menu key; `XK_Menu` on Linux). Shift+F10
+  now reaches the app on Windows (it arrives as a system key).
+
+### Changed
+
+- The engine's `click` event carries the click count in `key_code` (1, 2, ...),
+  like `double_click` already did, so a single-click handler can skip the click
+  that completes a double click.
+- A right click now focuses the nearest focusable ancestor of the hit node
+  before dispatching, like a left click (a miss leaves the focus alone).
+- `TreeView` look: rows have a 4 px gap between icon and label, are vertically
+  centered (no 2 px top padding), and an unfocused tree paints its selection
+  with the dimmer `inactive_selected_bg`.
+
 ## 0.3.0 — 2026-11-13
 
 ### BREAKING

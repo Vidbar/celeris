@@ -11,6 +11,7 @@ const events = @import("events.zig");
 const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
 const flexbox = @import("../layout/flexbox.zig");
+const text_mod = @import("../render/text.zig");
 
 /// registry + store + router + mounts, wired together. A single `deinit` tears
 /// down all four in the correct order. `with_measure`/`with_clipboard` let the
@@ -67,9 +68,16 @@ pub const Harness = struct {
     /// this can.
     ///
     /// No font atlas, so text falls back to the engine's headless metrics — fine for
-    /// box geometry, not for glyph-accurate assertions.
+    /// box geometry, not for glyph-accurate assertions (use `solveWith`).
     pub fn solve(self: *Harness, root: reg.NodeId, w: f32, h: f32) void {
         var engine = flexbox.LayoutEngine.init(&self.registry, &self.store, null);
+        engine.solve(root, 0, 0, w, h);
+    }
+
+    /// `solve` with a real font atlas (see `loadSystemFont`): text is measured
+    /// and wrapped as on screen — for claims about text width, wrapping, clipping.
+    pub fn solveWith(self: *Harness, atlas: *text_mod.FontAtlas, root: reg.NodeId, w: f32, h: f32) void {
+        var engine = flexbox.LayoutEngine.init(&self.registry, &self.store, atlas);
         engine.solve(root, 0, 0, w, h);
     }
 
@@ -141,4 +149,21 @@ pub fn stubClipSet(_: *anyopaque, text: []const u8) bool {
 
 pub fn stubClipGet(_: *anyopaque, allocator: std.mem.Allocator) ?[]u8 {
     return allocator.dupe(u8, stub_clip_buf[0..stub_clip_len]) catch null;
+}
+
+/// Reads a system TrueType font for glyph-accurate layout tests (Arial on
+/// Windows, DejaVu Sans on Linux), or skips the test when none is installed.
+/// Pair with `Harness.solveWith` and a `FontAtlas` built from it.
+pub fn loadSystemFont(alloc: std.mem.Allocator) ![]u8 {
+    const candidates = [_][]const u8{
+        "C:/Windows/Fonts/arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    };
+    var threaded = std.Io.Threaded.init(alloc, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    for (candidates) |p| {
+        if (std.Io.Dir.cwd().readFileAlloc(io, p, alloc, .unlimited)) |data| return data else |_| {}
+    }
+    return error.SkipZigTest;
 }

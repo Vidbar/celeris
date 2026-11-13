@@ -248,6 +248,10 @@ pub const EventContext = struct {
     /// MOD_* bitmask copied onto every dispatched event (Shift/Ctrl/Alt held
     /// during the pointer action).
     modifiers: u32 = 0,
+    /// Copied into every dispatched event's `key_code`. The live path sets the
+    /// click count (1, 2, 3...) on `click`, so a widget can tell the click that
+    /// completes a double click from a fresh one; 0 elsewhere.
+    key_code: u32 = 0,
 };
 
 /// Copies `s` into `buf` as a NUL-terminated string for the C ABI (truncating to
@@ -354,7 +358,7 @@ fn fireCallback(
             .action_id = toCString(&idbuf, id_str),
             .x = x,
             .y = y,
-            .key_code = 0,
+            .key_code = ctx.key_code,
             .scroll_delta = 0,
             .text = "",
             .modifiers = ctx.modifiers,
