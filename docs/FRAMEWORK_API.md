@@ -311,7 +311,7 @@ pub fn build(self: *MyForm, ctx: *fw.component.BuildContext) !void {
 - `.fill` — sizes the mount anchor to fill its parent (100% × 100%); use for container widgets whose root is full-size (e.g. a `SplitPane` body, a full-pane `TreeView`).
 - `.hug` — makes the anchor a row so a hug-shaped widget (like `Button`) shrink-wraps its content instead of stretching to the anchor width.
 
-**Button content placement.** A `Button` that doesn't hug fills its column, and its label (or `content`) is centered. `.justify` (the same `fw.component.Justify` a box takes) places it on the main axis: `.justify = .start` gives a left-aligned, full-width header button (a sidebar section title such as "˅ DOCUMENTS"). The whole box stays the click and hover target.
+**Button content placement.** A `Button` that doesn't hug fills its column, and its label (or `content`) is centered. `.justify` (the same `fw.component.Justify` a box takes) places it on the main axis: `.justify = .start` gives a left-aligned, full-width header button (a sidebar section title such as "˅ DOCUMENTS"; add `.radius = 0` for square corners, since a button otherwise takes the theme's `radius_base`). The whole box stays the click and hover target.
 
 **Available widgets:**
 

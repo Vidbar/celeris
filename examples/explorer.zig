@@ -103,6 +103,7 @@ const ExplorerApp = struct {
             .key = "section",
             .label = "\u{02C5} EXPLORER",
             .justify = .start,
+            .radius = 0,
             .padding = fw.component.EdgeInsets{ .l = 4, .t = 2, .b = 2 },
             .on_click = ctx.handler(self, onHeader),
         });

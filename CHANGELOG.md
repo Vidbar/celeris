@@ -21,6 +21,7 @@ listed here as well.
   the tree lacks keyboard focus; `activate_on_click` (single-click "preview");
   `reveal: ?*Signal(?usize)` to scroll a row into view; `on_context_menu` (right
   click, Shift+F10, menu key) and `context_menu_selects`. See FRAMEWORK_API.md.
+- `Button.radius` overrides the theme corner radius (`0` for square corners).
 - `Button.justify` places the label/content on the main axis (`.start` for a
   left-aligned full-width button).
 - `fw.events.Key.apps` (the context-menu key; `XK_Menu` on Linux). Shift+F10

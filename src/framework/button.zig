@@ -67,6 +67,9 @@ pub const Button = struct {
     /// no wrapper box needed.
     border_width: ?f32 = null,
     border_color: ?theme_mod.Color = null,
+    /// Corner radius in px; defaults to the theme's `radius_base`. `0` gives
+    /// square corners (a full-width section header, a toolbar segment).
+    radius: ?f32 = null,
     /// Main-axis placement of the label/`content` inside the button — the same
     /// `justify` a `boxNode` takes. `.start` is a left-aligned header/list-style
     /// button. Visible only when the button is wider than its content (it fills
@@ -111,7 +114,7 @@ pub const Button = struct {
             .direction = .row,
             .@"align" = .center,
             .justify = self.justify,
-            .radius = t.radius_base,
+            .radius = self.radius orelse t.radius_base,
             .focusable = !self.disabled,
             .role = "button",
             .on_click = if (self.disabled) null else self.on_click,
@@ -754,5 +757,25 @@ test "Button justify: .start puts the label at the button's x; the default still
             .start => try testing.expectApproxEqAbs(btn.x, txt.x, 0.01),
             else => try testing.expectApproxEqAbs(btn.x + (btn.width - txt.width) / 2, txt.x, 0.5),
         }
+    }
+}
+
+test "Button radius overrides the theme's corner radius; null keeps radius_base" {
+    const a = testing.allocator;
+    for ([_]?f32{ 0, null }) |r| {
+        var registry = reg.UIRegistry.init(a);
+        defer registry.deinit();
+        var store = props.PropertyStore.init(a);
+        defer store.deinit();
+        store.setRegistry(&registry);
+        var router = events.EventRouter.init(a);
+        defer router.deinit();
+        var mounts = component.MountTable.init(a);
+        defer mounts.deinit();
+        registry.addNodeRemovedListener(&mounts, component.MountTable.nodeRemovedListener);
+
+        const btn = try mountButton(&registry, &store, &router, &mounts, .{ .label = "X", .radius = r });
+        const got = store.getStyle(btn.root, .radius).?.dimension.value;
+        try testing.expectApproxEqAbs(r orelse dark.radius_base, got, 0.001);
     }
 }
