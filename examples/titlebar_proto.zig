@@ -213,7 +213,6 @@ pub fn main() !void {
 
     const recent_menu = try fw.menu.Menu.init(allocator, "recent_menu");
     defer recent_menu.deinit();
-    recent_menu.on_select = on_select;
     try recent_menu.addItem("demo_project.cel", "recent.a");
     try recent_menu.addItem("recording_2026.cel", "recent.b");
     try project_menu.addSubmenu("Recent", recent_menu);

@@ -941,7 +941,8 @@ fn syncTitle(self: *App) void {
     const t = std.fmt.bufPrint(&buf, "{s} - Albesi", .{self.folder_name.get()}) catch "Albesi";
     fw.window.setTitle(t);
 }
-// once, e.g. in init / the first build:
+// once, in init / main (NOT inside build: the effect runs at once, and setTitle
+// rebuilds when the classic bar is shown):
 _ = try self.scope.createEffect(self, syncTitle);   // re-runs whenever folder_name changes
 ```
 
