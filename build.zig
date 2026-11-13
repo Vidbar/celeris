@@ -97,6 +97,7 @@ const example_apps = [_]ExampleApp{
     .{ .name = "devtools", .root = "src/devtools/inspector.zig", .step = "devtools", .desc = "Run the DevTools inspector (inspects a second engine live)" },
     .{ .name = "thread_test", .root = "examples/thread_test.zig", .step = "thread_test", .desc = "Test background threads and celeris_post_task" },
     .{ .name = "tree_bench", .root = "examples/tree_bench.zig", .step = "tree_bench", .desc = "Large virtualized TreeView for re-measuring bake/render cost" },
+    .{ .name = "explorer", .root = "examples/explorer.zig", .step = "explorer", .desc = "VS Code-style explorer: one-line rows, preview click, context menu, start-aligned header" },
     .{ .name = "titlebar_proto", .root = "examples/titlebar_proto.zig", .step = "titlebar_proto", .desc = "App-composed custom window caption via the app_bar slot" },
     .{ .name = "restyle_inspector", .root = "examples/restyle_inspector.zig", .step = "restyle_inspector", .desc = "Live editable style inspector" },
     .{ .name = "property_panel", .root = "examples/property_panel.zig", .step = "property_panel", .desc = "Key/value property panel recipe (DevTools inspector pane) — referenced in docs/FRAMEWORK_API.md" },
