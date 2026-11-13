@@ -1058,20 +1058,37 @@ pub const Child = struct {
 /// Byte column within `line` nearest to local x — the inverse of caret
 /// positioning (font hit-test, midpoint rule). Uses exact measurement when
 /// present, else the size-scaled fallback advance. `line` must not contain newlines.
+/// Always returns a codepoint boundary: it steps (and measures) whole codepoints,
+/// never single bytes, so a click can't put the caret inside a multibyte
+/// character — an insertion there would split it into invalid UTF-8.
 pub fn columnAtX(measure: ?TextMeasure, line: []const u8, font_size: f32, local_x: f32) usize {
     if (local_x <= 0) return 0;
     if (measure) |m| {
         var acc: f32 = 0;
         var i: usize = 0;
-        while (i < line.len) : (i += 1) {
-            const adv = m.width(line[i .. i + 1], font_size);
+        while (i < line.len) {
+            const next = nextBoundary(line, i);
+            const adv = m.width(line[i..next], font_size);
             if (local_x < acc + adv / 2.0) return i;
             acc += adv;
+            i = next;
         }
         return line.len;
     }
     const c: usize = @intFromFloat(@round(local_x / fallbackCharWidth(font_size)));
-    return @min(c, line.len);
+    return if (c >= line.len) line.len else prevBoundary(line, c + 1);
+}
+
+test "columnAtX returns codepoint boundaries, measured and fallback" {
+    const m = @import("testkit.zig").measureStub();
+    const s = "a\u{20AC}b\u{65E5}c\u{1F600}d"; // 1+3+1+3+1+4+1 bytes
+    var x: f32 = 0;
+    while (x < 200) : (x += 0.5) {
+        const im = columnAtX(m, s, 16, x);
+        try testing.expect(im == s.len or (s[im] & 0xC0) != 0x80);
+        const ifb = columnAtX(null, s, 16, x);
+        try testing.expect(ifb == s.len or (s[ifb] & 0xC0) != 0x80);
+    }
 }
 
 /// `columnAtX` for text drawn with `style` (a `b.fontMono` / `b.fontBold` node, or

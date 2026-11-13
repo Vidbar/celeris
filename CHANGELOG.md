@@ -40,6 +40,10 @@ listed here as well.
   the BMP now arrive as one `char_input` (the surrogate pair is combined).
 - Window titles longer than 255 bytes were cut mid-character, handing the OS
   invalid UTF-8; they are now cut on a character boundary (Win32 and Wayland).
+- `TextInput` / `TextArea`: clicking inside non-ASCII text could put the caret in
+  the middle of a multibyte character (`component.columnAtX` stepped byte by
+  byte), so the next keystroke split it into invalid UTF-8. Clicks now always
+  land on a character boundary.
 
 ## 0.2.1 — 2026-11-12
 
