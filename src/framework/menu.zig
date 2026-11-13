@@ -246,6 +246,9 @@ pub const Menu = struct {
         self.pos_x.set(x);
         self.pos_y.set(y);
         self.highlighted.set(-1);
+        // A fresh open never inherits a one-shot suppression left over from an
+        // earlier click (fireSelect re-arms it after this when it must).
+        self.suppress_dismiss = false;
         self.is_open.set(true);
         if (!self.is_submenu and !self.scope_pushed and self.panel_id != reg.NULL_NODE) {
             if (self.focus_scope) |fs| {
@@ -405,15 +408,21 @@ pub const Menu = struct {
             return;
         }
         if (!std.mem.eql(u8, ev.name, "click")) return;
-        self.fireSelect(idx);
+        self.fireSelect(idx, .pointer);
     }
 
     /// The single selection path (mouse click and Enter): closes the whole chain
     /// from the root, then fires the root's `on_select` with a synthesized
-    /// "select" event. Everything needed is copied to locals before `close()`
-    /// and nothing touches `self`/the root after the call, so a handler that
-    /// reopens the menu sees it in a clean state.
-    fn fireSelect(self: *Menu, idx: usize) void {
+    /// "select" event. Everything the event needs is copied to locals before
+    /// `close()`, so a handler that reopens the menu sees it in a clean state.
+    ///
+    /// A mouse selection's `click` is still bubbling: after this returns it
+    /// reaches the root backdrop's `onDismiss`, which would close a menu the
+    /// handler just reopened. So if — and only if — the handler reopened it,
+    /// arm the one-shot `suppress_dismiss` for that click (as opening a submenu
+    /// does). Enter has no trailing click and never arms it. (The root is
+    /// touched after the call, which is why the handler must not `deinit` it.)
+    fn fireSelect(self: *Menu, idx: usize, origin: events.FocusOrigin) void {
         const r = self.rootMenu();
         const h = r.on_select;
         const ev: events.Event = .{
@@ -423,6 +432,7 @@ pub const Menu = struct {
         };
         r.close();
         if (h) |handler| handler.call(handler.ptr, ev);
+        if (origin == .pointer and r.isOpen()) r.suppress_dismiss = true;
     }
 
     // ── Keyboard navigation (model logic; host wires it to key events) ──────────
@@ -468,7 +478,7 @@ pub const Menu = struct {
             sub.highlighted.set(sub.firstEnabled());
             return;
         }
-        self.fireSelect(@intCast(hi));
+        self.fireSelect(@intCast(hi), .keyboard);
     }
 
     /// The deepest open submenu under this menu (or this menu itself) — the one
@@ -1180,6 +1190,77 @@ test "Menu: on_select handler may reopen the menu (reentrancy)" {
     try testing.expect(Reopen.fired);
     try testing.expect(m.isOpen());
     try testing.expectEqual(@as(i32, -1), m.highlighted.peek());
+}
+
+/// A real mouse selection: the engine bubbles the row's `click` up to the
+/// backdrop (the rows are its descendants), so route both, in that order.
+fn clickRowBubbling(env: *ts.Harness, m: *Menu, idx: usize) void {
+    clickRow(env, m, idx);
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = m.backdrop_id });
+}
+
+test "Menu: reopening from on_select survives the click bubbling to the backdrop" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    const m = try buildTestMenu(&env);
+    defer m.deinit();
+
+    const Reopen = struct {
+        fn f(menu: *Menu, _: events.Event) void {
+            menu.popup(40, 40, .pointer);
+        }
+    };
+    m.on_select = events.makeHandler(m, Reopen.f);
+    m.popup(0, 0, .pointer);
+    clickRowBubbling(&env, m, 0);
+    try testing.expect(m.isOpen()); // before the fix: closed by onDismiss
+
+    // The suppression was one-shot: a genuine outside click still dismisses.
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = m.backdrop_id });
+    try testing.expect(!m.isOpen());
+}
+
+test "Menu: a mouse selection that does not reopen leaves no stale dismiss suppression" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    const m = try buildTestMenu(&env);
+    defer m.deinit();
+
+    var host: Host = .{};
+    m.on_select = events.makeHandler(&host, Host.onSelect);
+    m.popup(0, 0, .pointer);
+    clickRowBubbling(&env, m, 0); // the bubble consumes the suppression
+    try testing.expectEqual(@as(u32, 1), host.calls);
+    try testing.expect(!m.isOpen());
+
+    // Reopened later by the host: the first outside click must close it.
+    m.popup(0, 0, .pointer);
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = m.backdrop_id });
+    try testing.expect(!m.isOpen());
+}
+
+test "Menu: Enter does not arm the dismiss suppression (no trailing click)" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    const m = try buildTestMenu(&env);
+    defer m.deinit();
+
+    const Reopen = struct {
+        fn f(menu: *Menu, _: events.Event) void {
+            menu.popup(40, 40, .pointer);
+        }
+    };
+    m.on_select = events.makeHandler(m, Reopen.f);
+    m.popup(0, 0, .pointer);
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.down.code() });
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = m.panel_id, .key_code = events.Key.enter.code() });
+    try testing.expect(m.isOpen());
+    // The very next outside click is genuine and must dismiss.
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = m.backdrop_id });
+    try testing.expect(!m.isOpen());
 }
 
 test "Menu: closed panel has zero height; popup positions + opens it" {
