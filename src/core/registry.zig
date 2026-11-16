@@ -76,6 +76,27 @@ pub const Node = struct {
     render_dirty: bool = true,
     last_avail_w: f32 = -1.0,
     last_avail_h: f32 = -1.0,
+    /// Whether `geometry` / `last_avail_*` came from a content-sizing measure (see
+    /// `LayoutEngine.content_sizing`). The fill-mode cache hits only when false.
+    last_content_sizing: bool = false,
+    /// True when this box's width was last computed from its own content (the
+    /// hug path) and has not been widened since: it is exactly-fit, so `place`
+    /// must not re-measure its children against it (the text re-wrap trap).
+    width_from_content: bool = false,
+    /// Second measure-cache slot, for content-sizing measures (Yoga keeps one
+    /// per measure mode too). A hit returns the contribution WITHOUT touching
+    /// `geometry`, which keeps holding the final (stretched) layout — so a
+    /// subtree measured both ways each solve costs nothing once clean.
+    cs_avail_w: f32 = -1.0,
+    cs_avail_h: f32 = -1.0,
+    cs_w: f32 = 0,
+    cs_h: f32 = 0,
+    /// Solve generation the content slot was filled in, and the generation this
+    /// node was last measured while dirty. The slot is valid only if it is not
+    /// older than that dirty measure (a fill-mode measure may have consumed the
+    /// dirty bit after the content slot went stale).
+    cs_gen: u64 = 0,
+    dirty_gen: u64 = 0,
 
     /// True when the text content or font size changed and the shaped layout must
     /// be recomputed. Distinct from `layout_dirty` so a pure available-height

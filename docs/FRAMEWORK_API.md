@@ -310,6 +310,28 @@ pub fn build(self: *MyForm, ctx: *fw.component.BuildContext) !void {
 - `.key` — disambiguates sibling instances of the same widget type under one parent. Give each its own key.
 - `.fill` — sizes the mount anchor to fill its parent (100% × 100%); use for container widgets whose root is full-size (e.g. a `SplitPane` body, a full-pane `TreeView`).
 - `.hug` — makes the anchor a row so a hug-shaped widget (like `Button`) shrink-wraps its content instead of stretching to the anchor width.
+  You need it where the anchor's parent has a definite width (a column, a box with `width`). You do not need it when an ancestor sizes to its content. A box with no width inside a row is such an ancestor.
+
+#### Content-sized boxes (CSS `fit-content`)
+
+A box with no `width` inside a row takes the width of its content. Inside it, any box that would normally take its parent's width counts with its own content width instead. Such boxes include a column, a `flexRow` with no width, or a `mountOwned` anchor without `.hug`. This matches an auto-width child of a `fit-content` box in CSS. Once the outer box's width is known, those children stretch to fill it, as usual. So a tab like the one below is as wide as its label. It does not fill the strip, and you don't need `.hug` or row wrappers:
+
+```zig
+try b.flexRow(strip);                 // the tab strip
+const tab = try b.openBox();          // no width: sizes to content
+try ctx.mountOwned(Button, .{ .label = "a.zig" });   // no .hug needed
+b.close();
+```
+
+A `width`, `flexGrow` or `flexBasis` on the outer box still sets its size, and its column children stretch to that width.
+
+Inside a box that sizes to its content, a few children count differently while that box is being measured:
+
+- A child with a percentage width, such as a `.fill` anchor, counts as having no width. After the outer box's width is known, the percentage is resolved against it. This is how CSS handles a percentage that depends on the box's own content.
+- A percentage `min-width` or `max-width` is ignored while the content is measured. It applies once the final width is known.
+- An image with no width counts as 0. Celeris doesn't know an image's natural size during layout. In a column the image then stretches like any other child. In a row nothing stretches its width, so it stays 0 wide. Give images inside content-sized boxes an explicit `width`.
+
+The engine keeps a separate measure cache for this content-width pass, as Yoga does for each measure mode. When a later frame changes something else, a subtree that hasn't changed is not measured again.
 
 **Button content placement.** A `Button` that doesn't hug fills its column, and its label (or `content`) is centered. `.justify` (the same `fw.component.Justify` a box takes) places it on the main axis: `.justify = .start` gives a left-aligned, full-width header button (a sidebar section title such as "˅ DOCUMENTS"; add `.radius = 0` for square corners, since a button otherwise takes the theme's `radius_base`). The whole box stays the click and hover target.
 

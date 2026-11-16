@@ -94,6 +94,21 @@ pub const TextLayoutInfo = struct {
     /// the renderer, caret and hit-testing step lines by the same slot as
     /// `total_height`.
     line_height_factor: f32 = LINE_HEIGHT_FACTOR,
+    /// True when the wrap loop broke a line because it hit `max_width` (a soft
+    /// wrap). When false, every break was a hard `\n`.
+    soft_wrapped: bool = false,
+    /// The largest running sum of codepoint advances on any line — the quantity
+    /// the wrap loop compares against `max_width`. Not the HarfBuzz `max_width`
+    /// above, which can be narrower (that gap is the "Ver" -> "Ve"/"r" trap).
+    wrap_sum: f32 = 0,
+
+    /// Whether wrapping this same text at width `w` would reproduce this layout
+    /// exactly: nothing soft-wrapped, and at `w` the wrap loop never breaks.
+    /// Lets a node skip re-shaping when it is only offered MORE room — the
+    /// content-contribution width vs. the final width, or a window resize.
+    pub fn fitsWithoutWrap(self: *const TextLayoutInfo, w: f32) bool {
+        return !self.soft_wrapped and (w <= 0 or w >= self.wrap_sum);
+    }
 
     pub fn deinit(self: *TextLayoutInfo) void {
         self.lines.deinit();
@@ -720,6 +735,8 @@ pub const FontAtlas = struct {
         var line_start: usize = 0;
         var w: f32 = 0;
         var last_break: ?usize = null;
+        var soft_wrapped = false;
+        var wrap_sum: f32 = 0;
 
         // Iterate by codepoint (indices stay byte offsets). Wrapping uses UAX#14
         // break opportunities (linebreak.zig): break after spaces/hyphens and
@@ -755,6 +772,7 @@ pub const FontAtlas = struct {
                 }
                 if (at == null and cur_class != .cl and cur_class != .sp) at = cp_start;
                 if (at) |brk| {
+                    soft_wrapped = true;
                     const lw = self.measureWidthPref(text[line_start..brk], font_size, preferred, ls);
                     try lines.append(.{ .start_index = line_start, .end_index = brk, .width = lw });
                     max_w = @max(max_w, lw);
@@ -771,6 +789,7 @@ pub const FontAtlas = struct {
             }
 
             w += adv;
+            wrap_sum = @max(wrap_sum, w);
             prev_class = cur_class;
         }
         const lw = self.measureWidthPref(text[line_start..text.len], font_size, preferred, ls);
@@ -788,6 +807,8 @@ pub const FontAtlas = struct {
             .preferred_font = preferred,
             .letter_spacing = ls,
             .line_height_factor = lh,
+            .soft_wrapped = soft_wrapped,
+            .wrap_sum = wrap_sum,
         };
     }
 

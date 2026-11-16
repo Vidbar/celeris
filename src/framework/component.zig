@@ -506,7 +506,10 @@ pub const BuildContext = struct {
         // Reserved `.hug` prop: makes the anchor a row so the widget's root
         // shrink-wraps its content horizontally. Without it, a widthless root fills
         // the anchor (a box defaults to the parent's width unless the parent is a
-        // row — flexbox `measure`). Use for hug-shaped widgets like Button.
+        // row — flexbox `measure`). Use for hug-shaped widgets like Button in a
+        // column. Not needed when an ancestor already sizes to its content (a
+        // widthless box in a row): there the anchor reports the widget's content
+        // width, as a CSS auto-width child of a fit-content box does.
         if (@hasField(@TypeOf(init_props), "hug") and @field(init_props, "hug")) {
             try self.builder.store.setLayout(anchor, .flex_direction, .{ .keyword = .row });
             // Hug the cross axis too. `align_items` defaults to `stretch` (CSS), which

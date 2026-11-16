@@ -397,6 +397,64 @@ test "Button mounted with .hug shrink-wraps its label instead of filling the col
     try testing.expect(w < 400); // hugs padding+label, not the full column width
 }
 
+test "A widthless box in a row hugs a mountOwned Button without .hug (no full-row width)" {
+    const a = testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    var router = events.EventRouter.init(a);
+    defer router.deinit();
+    var mounts = component.MountTable.init(a);
+    defer mounts.deinit();
+    registry.addNodeRemovedListener(&mounts, component.MountTable.nodeRemovedListener);
+
+    var b = component.UIBuilder.init(&registry, &store);
+    b.theme = dark;
+    var ctx = BuildContext{ .builder = &b, .router = &router, .mounts = &mounts };
+    const row = try b.openNodeKeyed(.box, null);
+    try b.store.setLayout(row, .width, .{ .dimension = .{ .value = 600, .unit = .px } });
+    try b.store.setLayout(row, .height, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try b.store.setLayout(row, .flex_direction, .{ .keyword = .row });
+    // Albesi's editor tab, verbatim:
+    //   tab (box, no width; column) > content (flexRow, flexGrow 1) >
+    //     [ mountOwned(Button, label) — no .hug,  close (box) > mountOwned(IconButton) ]
+    const IconButton = @import("icon_button.zig").IconButton;
+    var tabs: [2]reg.NodeId = undefined;
+    var anchors: [2]reg.NodeId = undefined;
+    var closes: [2]reg.NodeId = undefined;
+    for (&tabs, &anchors, &closes) |*t, *anc, *cls| {
+        t.* = try b.openNodeKeyed(.box, null);
+        const content = try b.openNodeKeyed(.box, null);
+        try b.store.setLayout(content, .flex_direction, .{ .keyword = .row });
+        try b.store.setLayout(content, .flex_grow, .{ .number = 1 });
+        try ctx.mountOwned(Button, .{ .label = "a.zig" }); // no .hug
+        anc.* = registry.getNode(content).?.first_child;
+        cls.* = try b.openNodeKeyed(.box, null);
+        try ctx.mountOwned(IconButton, .{ .icon = "x" });
+        b.close(); // close
+        b.close(); // content
+        b.close(); // tab
+    }
+    b.close();
+
+    const flexbox = @import("../layout/flexbox.zig");
+    var engine = flexbox.LayoutEngine.init(&registry, &store, null);
+    engine.solve(row, 0, 0, 600, 40);
+
+    const btn: *Button = @ptrCast(@alignCast(mounts.get(anchors[0]).?.component_ptr));
+    const btn_w = registry.getNode(btn.root).?.geometry.width;
+    const close_w = registry.getNode(closes[0]).?.geometry.width;
+    const t0 = registry.getNode(tabs[0]).?.geometry;
+    const t1 = registry.getNode(tabs[1]).?.geometry;
+    try testing.expect(btn_w > 0);
+    try testing.expect(close_w > 0);
+    try testing.expectEqual(btn_w + close_w, t0.width); // label + close, not the strip
+    try testing.expectEqual(t0.x + t0.width, t1.x); // second tab right after the first
+    try testing.expect(t1.x + t1.width <= 600); // and visible in the strip
+}
+
 test "Button aria_label is the accessible name, over the glyph label" {
     const a = testing.allocator;
     var registry = reg.UIRegistry.init(a);

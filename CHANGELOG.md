@@ -9,6 +9,18 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Fixed
+
+- A box with no width inside a row now takes the width of its content. Before, it
+  could take the whole row when a box inside it took its parent's width (a
+  column, or a `mountOwned` anchor without `.hug`). Such children now count with
+  their content width while the outer box is being measured. After that they
+  stretch to its width, as an auto-width child of a CSS `fit-content` box does.
+  `.hug` and row wrappers are no longer needed for this. See "Content-sized
+  boxes" in FRAMEWORK_API.md.
+
 ## 0.4.0 — 2026-11-13
 
 ### Added

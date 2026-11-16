@@ -30,6 +30,14 @@ pub const LayoutEngine = struct {
     /// re-measured this solve are stamped with it; `place` skips any node not
     /// stamped this gen whose origin is unchanged (its subtree is identical).
     gen: u64 = 0,
+    /// True while measuring the subtree of a box whose width comes from its
+    /// content (a widthless box in a row). In this mode a box that would
+    /// normally take its parent's width ("fill") contributes its own content
+    /// width instead — CSS's auto-width child of a fit-content parent. Once the
+    /// hugging box's width is resolved, `placeChildren`' cross-axis stretch
+    /// widens those children to it and `place` re-measures them normally.
+    /// Cleared again under any box whose width is definite (explicit width).
+    content_sizing: bool = false,
 
     pub fn init(registry: *reg.UIRegistry, store: *const props.PropertyStore, atlas: ?*text_mod.FontAtlas) LayoutEngine {
         return .{ .registry = registry, .store = store, .atlas = atlas };
@@ -68,20 +76,44 @@ pub const LayoutEngine = struct {
         defer self.depth -= 1;
         const node = self.registry.getNode(node_id) orelse return .{ .w = 0, .h = 0 };
 
-        if (!node.layout_dirty and
-            node.last_avail_w == available_w and
-            node.last_avail_h == available_h)
-        {
-            return .{ .w = node.geometry.width, .h = node.geometry.height };
+        if (!node.layout_dirty) {
+            if (self.content_sizing) {
+                // Content slot first: it returns the contribution without touching
+                // `geometry` (the final layout from the last place pass).
+                // The hit leaves `geometry` alone, so it is only sound when the
+                // geometry will match what the parent now expects: it already
+                // equals the contribution, or the parent's cross-axis stretch
+                // will overwrite the width anyway (the stretch/re-measure
+                // ping-pong this slot exists for). Otherwise — e.g. a centered
+                // child whose geometry a fill measure set wider since — measure.
+                if (node.cs_avail_w == available_w and node.cs_avail_h == available_h and
+                    node.cs_gen >= node.dirty_gen and
+                    ((node.geometry.width == node.cs_w and node.geometry.height == node.cs_h) or
+                        self.stretchesWidth(node_id)))
+                {
+                    return .{ .w = node.cs_w, .h = node.cs_h };
+                }
+            } else if (!node.last_content_sizing and
+                node.last_avail_w == available_w and
+                node.last_avail_h == available_h)
+            {
+                return .{ .w = node.geometry.width, .h = node.geometry.height };
+            }
         }
 
         // Real measurement work below → this node's size may change this solve, so
         // `place` must not skip it (nor treat its subtree as untouched).
         node.measured_gen = self.gen;
         self.registry.dbg_measured += 1;
+        if (node.layout_dirty) node.dirty_gen = self.gen;
 
         node.last_avail_w = available_w;
         node.last_avail_h = available_h;
+        node.last_content_sizing = self.content_sizing;
+        node.width_from_content = false;
+        // Restored on exit: the mode is scoped to the subtree that set it.
+        const saved_content_sizing = self.content_sizing;
+        defer self.content_sizing = saved_content_sizing;
         // If we got here, either the node was already dirty or the available
         // space changed.  Mark dirty so downstream lazy caches (text layout)
         // know to recompute — they check `layout_dirty`, not `last_avail_*`.
@@ -95,19 +127,36 @@ pub const LayoutEngine = struct {
         // would re-wrap text whose natural width equals the box width to within a
         // sub-pixel snapping error (the "DevTools" → "DevTool"/"s" bug).
         var hug_extent: ?struct { w: f32, h: f32 } = null;
-        if (self.explicitSize(node_id, .width)) |w_prop| {
-            node.geometry.width = resolveDim(w_prop, available_w);
+        // While an ancestor sizes to content, a percentage width has nothing
+        // definite to resolve against: CSS treats it as `auto` for the content
+        // contribution (cyclic percentage, css-sizing-3 §5.2.1) and resolves it
+        // against the final width afterwards (`place` → `remeasurePercentChildren`).
+        // Without this a `.fill` mount anchor (width 100%) would still balloon.
+        const w_prop_opt = self.explicitSize(node_id, .width);
+        const width_is_cyclic = self.content_sizing and w_prop_opt != null and isPercent(w_prop_opt.?);
+        if (w_prop_opt != null and !width_is_cyclic) {
+            node.geometry.width = resolveDim(w_prop_opt.?, available_w);
+            // A definite width: its children fill it, whatever the ancestor mode.
+            self.content_sizing = false;
         } else {
             if (node.node_type == .box) {
-                if (node.parent != reg.NULL_NODE and self.isRow(node.parent)) {
+                // Hug: a widthless box in a row, or ANY widthless box while an
+                // ancestor is sizing to content (it reports its content width, not
+                // the available width; stretch fills it once the ancestor resolves).
+                if (self.content_sizing or (node.parent != reg.NULL_NODE and self.isRow(node.parent))) {
+                    self.content_sizing = true;
                     const ext = self.measureChildrenExtent(node_id, available_w);
                     hug_extent = .{ .w = ext.w, .h = ext.h };
                     node.geometry.width = ext.w;
+                    node.width_from_content = true;
                 } else {
                     node.geometry.width = available_w; // fill parent width by default
                 }
             } else if (node.node_type == .image) {
-                node.geometry.width = if (available_w == std.math.floatMax(f32)) 0 else available_w;
+                // An image's natural size is not known at layout time (no blocking
+                // I/O here), so a widthless image contributes 0 to a content-sized
+                // ancestor — as with an unbounded width — and stretch sizes it after.
+                node.geometry.width = if (self.content_sizing or available_w == std.math.floatMax(f32)) 0 else available_w;
             } else if (node.node_type == .path) {
                 // Intrinsic width = the path's bounding box (author paths in
                 // local coords starting near the origin; the stroke is drawn
@@ -164,10 +213,13 @@ pub const LayoutEngine = struct {
         // stretch path (`placeChildren`) already clamps in this order; doing it the
         // other way here made the same min/max pair resolve differently depending on
         // whether a node got its cross size from measurement or from stretch.
-        if (self.getMaxDim(node_id, .max_width, available_w)) |mw| node.geometry.width = @min(node.geometry.width, mw);
+        // `widthBound`, not getMax/MinDim: a % bound is cyclic when THIS node is
+        // measured for a content contribution (the incoming mode; the field may
+        // have changed above for this node's own children).
+        if (self.widthBound(node_id, .max_width, available_w, saved_content_sizing)) |mw| node.geometry.width = @min(node.geometry.width, mw);
         if (self.getMaxDim(node_id, .max_height, available_h)) |mh| node.geometry.height = @min(node.geometry.height, mh);
 
-        if (self.getMinDim(node_id, .min_width, available_w)) |mw| node.geometry.width = @max(node.geometry.width, mw);
+        if (self.widthBound(node_id, .min_width, available_w, saved_content_sizing)) |mw| node.geometry.width = @max(node.geometry.width, mw);
         if (self.getMinDim(node_id, .min_height, available_h)) |mh| node.geometry.height = @max(node.geometry.height, mh);
 
         node.layout_dirty = false;
@@ -175,6 +227,13 @@ pub const LayoutEngine = struct {
         // this box (and its children need re-measuring) or left it at content size.
         node.layout_w = node.geometry.width;
         node.layout_h = node.geometry.height;
+        if (saved_content_sizing) {
+            node.cs_avail_w = available_w;
+            node.cs_avail_h = available_h;
+            node.cs_w = node.geometry.width;
+            node.cs_h = node.geometry.height;
+            node.cs_gen = self.gen;
+        }
         return .{ .w = node.geometry.width, .h = node.geometry.height };
     }
 
@@ -233,6 +292,12 @@ pub const LayoutEngine = struct {
                 // by whether its parent happened to carry an explicit height (the only
                 // other path, `measureChildrenPass`, measures every child). That is what
                 // kept TooltipHost's panel invisible.
+                //
+                // Out of flow → not part of the content size being computed, so it
+                // sizes as it normally would, outside content-sizing mode.
+                const saved = self.content_sizing;
+                self.content_sizing = false;
+                defer self.content_sizing = saved;
                 _ = self.measure(
                     child_id,
                     @max(parent.geometry.width - bor.horizontal(), 0),
@@ -415,14 +480,25 @@ pub const LayoutEngine = struct {
             // `flex-grow` slot in a row that only gains a definite HEIGHT via
             // cross-axis `align-items: stretch` never re-measures its children, so a
             // `height: 100%` descendant (e.g. a `mountReactiveFill` anchor) collapses.
-            const width_is_hug = self.explicitSize(node_id, .width) == null and
-                node.parent != reg.NULL_NODE and self.isRow(node.parent) and
-                self.getFlexGrow(node_id) == 0 and
-                self.store.getLayout(node_id, .flex_basis) == null;
+            //
+            // "Width came from content" is recorded by `measure` itself
+            // (`width_from_content`), so it also covers a widthless box inside a
+            // content-sized ancestor (any parent direction): when such a column
+            // child is a `flex-grow` item, its HEIGHT grows while its width is still
+            // exactly its content — the same trap.
+            const in_row = node.parent != reg.NULL_NODE and self.isRow(node.parent);
+            const width_is_hug = node.width_from_content and
+                !(in_row and (self.getFlexGrow(node_id) != 0 or
+                    self.store.getLayout(node_id, .flex_basis) != null));
             if (node.geometry.width != node.layout_w or
                 (node.geometry.height != node.layout_h and !width_is_hug))
             {
                 self.measureChildrenPass(node_id);
+            } else if (node.width_from_content) {
+                // Children were measured for the content contribution, where a
+                // percentage width counted as `auto`. Resolve those now against
+                // the final width (the rest already fit it, via stretch).
+                self.remeasurePercentChildren(node_id);
             }
             self.placeChildren(node_id);
         } else if (node.node_type == .text and node.geometry.width < node.layout_w and !self.isNoWrap(node_id)) {
@@ -926,6 +1002,61 @@ pub const LayoutEngine = struct {
         return v;
     }
 
+    /// True when the parent's cross-axis stretch sets this node's width in
+    /// `placeChildren` (column parent, effective alignment `stretch`, no definite
+    /// width) — the same test the stretch branch applies.
+    fn stretchesWidth(self: *const LayoutEngine, node_id: reg.NodeId) bool {
+        const node = self.registry.getNode(node_id) orelse return false;
+        if (node.parent == reg.NULL_NODE or self.isRow(node.parent)) return false;
+        if (node.node_type == .path or self.hasDefiniteDim(node_id, .width)) return false;
+        return (self.alignSelf(node_id) orelse self.alignItems(node.parent)) == .stretch;
+    }
+
+    /// Resolved `min_width`/`max_width`, except that a percentage (or
+    /// `fill_parent`) one is cyclic while an ancestor sizes to content: it is
+    /// ignored for the contribution (css-sizing-3 §5.2.1c), and the stretch
+    /// branch / a later fill measure clamps against the final width instead.
+    fn widthBound(self: *const LayoutEngine, node_id: reg.NodeId, key: props.LayoutKey, avail: f32, content_sizing: bool) ?f32 {
+        const p = self.store.getLayout(node_id, key) orelse return null;
+        if (content_sizing and isPercent(p)) return null;
+        return if (key == .min_width) self.getMinDim(node_id, key, avail) else self.getMaxDim(node_id, key, avail);
+    }
+
+    /// A size relative to the parent (a percentage or `fill_parent`): cyclic, so
+    /// `auto` while an ancestor is sizing to content.
+    fn isPercent(prop: props.PropValue) bool {
+        if (prop == .keyword) return prop.keyword == .fill_parent;
+        return prop == .dimension and prop.dimension.unit == .percent;
+    }
+
+    /// After a content-sized box gets its final width without a full child
+    /// re-measure, resolve its percentage-width flow children against that width.
+    /// Only a child whose resolved width differs is re-measured: re-measuring one
+    /// already at exactly its content width would re-wrap its text (the trap).
+    fn remeasurePercentChildren(self: *LayoutEngine, parent_id: reg.NodeId) void {
+        const parent = self.registry.getNode(parent_id) orelse return;
+        const ins = self.insets(parent_id);
+        const content_w = @max(parent.geometry.width - ins.horizontal(), 0);
+        const content_h = @max(parent.geometry.height - ins.vertical(), 0);
+        var child_id = parent.first_child;
+        while (child_id != reg.NULL_NODE) {
+            const child = self.registry.getNode(child_id).?;
+            if (!self.isAbsolute(child_id)) {
+                if (self.explicitSize(child_id, .width)) |wp| {
+                    // Compare against the CLAMPED target, or a binding min/max
+                    // would make this re-measure on every place.
+                    var target = resolveDim(wp, content_w);
+                    if (self.getMaxDim(child_id, .max_width, content_w)) |mx| target = @min(target, mx);
+                    if (self.getMinDim(child_id, .min_width, content_w)) |mn| target = @max(target, mn);
+                    if (isPercent(wp) and child.geometry.width != target) {
+                        _ = self.measure(child_id, content_w, content_h);
+                    }
+                }
+            }
+            child_id = child.next_sibling;
+        }
+    }
+
     fn resolveDim(prop: props.PropValue, parent_size: f32) f32 {
         if (prop == .keyword and prop.keyword == .fill_parent) {
             return if (parent_size == std.math.floatMax(f32)) 0 else @max(parent_size, 0);
@@ -1130,6 +1261,15 @@ pub const LayoutEngine = struct {
                 // measure pass run twice per solve nearly free.
                 const max_w = self.wrapWidth(node_id, node.last_avail_w, pad_left + pad_right);
                 const alloc = self.registry.allocator;
+                // A new wrap width that this layout already fits without wrapping
+                // yields the same lines: adopt the width, skip the work. This is
+                // what keeps a label measured at the content-contribution width
+                // and then at its final width (or a window resize) to 0 reshapes.
+                if (!node.text_dirty and max_w != node.last_shaped_w) {
+                    if (node.text_layout) |tl| {
+                        if (tl.fitsWithoutWrap(max_w)) node.last_shaped_w = max_w;
+                    }
+                }
                 if (node.text_dirty or node.text_layout == null or max_w != node.last_shaped_w) {
                     const content_changed = node.text_dirty;
                     node.text_dirty = false;
@@ -1275,6 +1415,271 @@ pub const LayoutEngine = struct {
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
+
+/// Test fixture for content-sizing: a 600px row holding `n` widthless boxes, each
+/// with a widthless COLUMN child that holds a 40x20 leaf. Returns the box ids.
+fn contentSizingFixture(registry: *reg.UIRegistry, store: *props.PropertyStore, n: usize, out: []reg.NodeId) !reg.NodeId {
+    const px = struct {
+        fn d(v: f32) props.PropValue {
+            return .{ .dimension = .{ .value = v, .unit = .px } };
+        }
+    }.d;
+    const row = try registry.createNode(.box);
+    try store.registerNode(row);
+    try store.setLayout(row, .width, px(600));
+    try store.setLayout(row, .height, px(40));
+    try store.setLayout(row, .flex_direction, .{ .keyword = .row });
+    for (0..n) |i| {
+        const tab = try registry.createNode(.box); // no width, default column
+        const col = try registry.createNode(.box); // no width, column → "fill"
+        const leaf = try registry.createNode(.box);
+        inline for (.{ tab, col, leaf }) |id| try store.registerNode(id);
+        registry.appendChild(row, tab);
+        registry.appendChild(tab, col);
+        registry.appendChild(col, leaf);
+        try store.setLayout(col, .flex_direction, .{ .keyword = .column });
+        try store.setLayout(leaf, .width, px(40));
+        try store.setLayout(leaf, .height, px(20));
+        out[i] = tab;
+    }
+    return row;
+}
+
+test "Flexbox — a hug box in a row is not widened to the row by a fill-width column descendant" {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    var tabs: [1]reg.NodeId = undefined;
+    const row = try contentSizingFixture(&registry, &store, 1, &tabs);
+
+    var engine = LayoutEngine.init(&registry, &store, null);
+    engine.solve(row, 0, 0, 600, 40);
+    const tab = registry.getNode(tabs[0]).?;
+    try std.testing.expectEqual(@as(f32, 40), tab.geometry.width);
+    // The column child still fills its (now resolved) parent — stretch.
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(tab.first_child).?.geometry.width);
+
+    // Stable across an incremental re-solve (measure cache keyed by mode).
+    registry.getNode(row).?.layout_dirty = true;
+    engine.solve(row, 0, 0, 600, 40);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(tabs[0]).?.geometry.width);
+}
+
+test "Flexbox — two hug boxes with fill-width descendants sit side by side in a row" {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    var tabs: [2]reg.NodeId = undefined;
+    const row = try contentSizingFixture(&registry, &store, 2, &tabs);
+
+    var engine = LayoutEngine.init(&registry, &store, null);
+    engine.solve(row, 0, 0, 600, 40);
+    const a = registry.getNode(tabs[0]).?.geometry;
+    const b = registry.getNode(tabs[1]).?.geometry;
+    try std.testing.expectEqual(@as(f32, 40), a.width);
+    try std.testing.expectEqual(a.x + a.width, b.x);
+}
+
+test "Flexbox — content sizing: a clean stretched subtree is not re-measured on later solves" {
+    // tab (hug) > [wide (column, 40px leaf), narrow (column > deep chain > 10px leaf)]
+    // `narrow` measures at 10 for the contribution, then stretches to 40 and is
+    // re-measured in fill mode. A later solve dirtied only through `wide` must
+    // serve `narrow` from the content slot: no ping-pong re-measure of its chain.
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    var tabs: [1]reg.NodeId = undefined;
+    const row = try contentSizingFixture(&registry, &store, 1, &tabs);
+    const wide_leaf = registry.getNode(registry.getNode(tabs[0]).?.first_child).?.first_child;
+
+    const narrow = try registry.createNode(.box);
+    try store.registerNode(narrow);
+    registry.appendChild(tabs[0], narrow);
+    var parent = narrow;
+    for (0..8) |_| {
+        const c = try registry.createNode(.box);
+        try store.registerNode(c);
+        registry.appendChild(parent, c);
+        parent = c;
+    }
+    try store.setLayout(parent, .width, .{ .dimension = .{ .value = 10, .unit = .px } });
+    try store.setLayout(parent, .height, .{ .dimension = .{ .value = 5, .unit = .px } });
+
+    var engine = LayoutEngine.init(&registry, &store, null);
+    engine.solve(row, 0, 0, 600, 40);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(tabs[0]).?.geometry.width);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(narrow).?.geometry.width);
+
+    for (0..3) |_| {
+        registry.markLayoutDirty(wide_leaf);
+        engine.solve(row, 0, 0, 600, 40);
+        // row, tab, wide column, wide leaf — and `narrow` answers from its slot.
+        try std.testing.expect(registry.dbg_measured <= 4);
+        try std.testing.expectEqual(@as(f32, 40), registry.getNode(tabs[0]).?.geometry.width);
+        try std.testing.expectEqual(@as(f32, 40), registry.getNode(narrow).?.geometry.width);
+    }
+
+    // A real change inside `narrow` is still seen (the slot is not stale).
+    try store.setLayout(parent, .width, .{ .dimension = .{ .value = 70, .unit = .px } });
+    registry.markLayoutDirty(parent); // this store has no registry wired to do it
+    engine.solve(row, 0, 0, 600, 40);
+    try std.testing.expectEqual(@as(f32, 70), registry.getNode(tabs[0]).?.geometry.width);
+}
+
+test "Flexbox — content sizing: a flex-grow column child keeps its exact-fit children un-re-measured" {
+    // tab (hug, row-stretched to 40 tall) > content (column, flex-grow 1) > leaf.
+    // `content` grows in HEIGHT only; its width is still exactly its content, so
+    // `place` must not re-measure its children against it (the text re-wrap trap).
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    var tabs: [1]reg.NodeId = undefined;
+    const row = try contentSizingFixture(&registry, &store, 1, &tabs);
+    const content = registry.getNode(tabs[0]).?.first_child;
+    const leaf = registry.getNode(content).?.first_child;
+    try store.setLayout(content, .flex_grow, .{ .number = 1 });
+
+    var engine = LayoutEngine.init(&registry, &store, null);
+    engine.solve(row, 0, 0, 600, 40);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(content).?.geometry.height);
+    // The leaf was only measured for the contribution (at the row's width).
+    try std.testing.expect(registry.getNode(leaf).?.last_content_sizing);
+    try std.testing.expectEqual(@as(f32, 600), registry.getNode(leaf).?.last_avail_w);
+}
+
+test "Flexbox — content sizing: a percentage width counts as auto, then resolves to the final width" {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    var tabs: [1]reg.NodeId = undefined;
+    const row = try contentSizingFixture(&registry, &store, 1, &tabs);
+    // A `.fill`-style anchor: width 100%, holding a 10px leaf.
+    const pct = try registry.createNode(.box);
+    const small = try registry.createNode(.box);
+    const img = try registry.createNode(.image); // no width: contributes 0
+    inline for (.{ pct, small, img }) |id| try store.registerNode(id);
+    registry.appendChild(tabs[0], pct);
+    registry.appendChild(pct, small);
+    registry.appendChild(tabs[0], img);
+    try store.setLayout(pct, .width, .{ .dimension = .{ .value = 100, .unit = .percent } });
+    try store.setLayout(small, .width, .{ .dimension = .{ .value = 10, .unit = .px } });
+    try store.setLayout(small, .height, .{ .dimension = .{ .value = 5, .unit = .px } });
+    try store.setLayout(img, .height, .{ .dimension = .{ .value = 5, .unit = .px } });
+
+    var engine = LayoutEngine.init(&registry, &store, null);
+    engine.solve(row, 0, 0, 600, 40);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(tabs[0]).?.geometry.width);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(pct).?.geometry.width);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(img).?.geometry.width);
+}
+
+test "Flexbox — content slot never serves a size that disagrees with a non-stretched child's geometry" {
+    // tab (align-items: center) > col > 40px leaf. Giving `tab` a width makes the
+    // clean `col` fill it (300); removing the width must bring `col` back to 40,
+    // not reuse its content slot while geometry still says 300.
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    var tabs: [1]reg.NodeId = undefined;
+    const row = try contentSizingFixture(&registry, &store, 1, &tabs);
+    const col = registry.getNode(tabs[0]).?.first_child;
+    try store.setLayout(tabs[0], .align_items, .{ .keyword = .center });
+
+    var engine = LayoutEngine.init(&registry, &store, null);
+    engine.solve(row, 0, 0, 600, 40);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(col).?.geometry.width);
+
+    try store.setLayout(tabs[0], .width, .{ .dimension = .{ .value = 300, .unit = .px } });
+    registry.markLayoutDirty(tabs[0]);
+    engine.solve(row, 0, 0, 600, 40);
+    try std.testing.expectEqual(@as(f32, 300), registry.getNode(col).?.geometry.width);
+
+    try store.setLayout(tabs[0], .width, .{ .keyword = .auto });
+    registry.markLayoutDirty(tabs[0]);
+    engine.solve(row, 0, 0, 600, 40);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(tabs[0]).?.geometry.width);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(col).?.geometry.width);
+}
+
+test "Flexbox — content sizing: a percentage min-width is cyclic too" {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    var tabs: [1]reg.NodeId = undefined;
+    const row = try contentSizingFixture(&registry, &store, 1, &tabs);
+    const col = registry.getNode(tabs[0]).?.first_child;
+    try store.setLayout(col, .min_width, .{ .dimension = .{ .value = 100, .unit = .percent } });
+
+    var engine = LayoutEngine.init(&registry, &store, null);
+    engine.solve(row, 0, 0, 600, 40);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(tabs[0]).?.geometry.width);
+    try std.testing.expectEqual(@as(f32, 40), registry.getNode(col).?.geometry.width);
+}
+
+test "reshape: resizing a row of content-sized tabs re-shapes no label" {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    const font = try loadRegressionFont(std.testing.allocator);
+    defer std.testing.allocator.free(font);
+    var atlas = try text_mod.FontAtlas.init(std.testing.allocator, font, 16);
+    defer atlas.deinit();
+
+    // row > 20 × [tab (hug, column) > col (column, would fill) > "file_N.zig"]
+    var b = builder.UIBuilder.init(&registry, &store);
+    const row = try b.openBox();
+    try b.flexRow(row);
+    for (0..20) |_| {
+        _ = try b.openBox(); // tab
+        const col = try b.openBox();
+        try b.flexColumn(col);
+        _ = try b.addText("file.zig");
+        b.close();
+        b.close();
+    }
+    b.close();
+
+    var engine = LayoutEngine.init(&registry, &store, &atlas);
+    engine.solve(row, 0, 0, 2000, 40);
+    try std.testing.expect(registry.dbg_reshaped > 0); // sanity
+    var w: f32 = 2001;
+    while (w < 2010) : (w += 1) {
+        engine.solve(row, 0, 0, w, 40);
+        try std.testing.expectEqual(@as(u32, 0), registry.dbg_reshaped);
+    }
+}
+
+test "Flexbox — explicit width or flex-grow still gives the space; column children stretch to it" {
+    for ([_]bool{ true, false }) |use_explicit| {
+        var registry = reg.UIRegistry.init(std.testing.allocator);
+        defer registry.deinit();
+        var store = props.PropertyStore.init(std.testing.allocator);
+        defer store.deinit();
+        var tabs: [1]reg.NodeId = undefined;
+        const row = try contentSizingFixture(&registry, &store, 1, &tabs);
+        if (use_explicit) {
+            try store.setLayout(tabs[0], .width, .{ .dimension = .{ .value = 300, .unit = .px } });
+        } else {
+            try store.setLayout(tabs[0], .flex_grow, .{ .number = 1 });
+        }
+
+        var engine = LayoutEngine.init(&registry, &store, null);
+        engine.solve(row, 0, 0, 600, 40);
+        const want: f32 = if (use_explicit) 300 else 600;
+        const tab = registry.getNode(tabs[0]).?;
+        try std.testing.expectEqual(want, tab.geometry.width);
+        try std.testing.expectEqual(want, registry.getNode(tab.first_child).?.geometry.width);
+    }
+}
 
 test "Flexbox — align_items defaults to stretch (CSS initial), not flex_start" {
     var registry = reg.UIRegistry.init(std.testing.allocator);
