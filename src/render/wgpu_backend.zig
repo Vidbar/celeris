@@ -452,7 +452,6 @@ const DrawBatchType = enum { rect, image, text, path };
 const DrawBatch = struct {
     batch_type: DrawBatchType,
     z_index: f32,
-    order: u32,
     start_idx: u32,
     count: u32,
     img_path: ?[]const u8 = null,
@@ -1139,9 +1138,8 @@ pub const WgpuBackend = struct {
         node_id: reg.NodeId,
         clip_in: renderer_mod.Clip,
         current_z: f32,
-        global_order: *u32,
         t_verts: *std.array_list.Managed(TextVertex),
-        batches: *std.array_list.Managed(DrawBatch),
+        text_runs: *std.array_list.Managed(renderer_mod.TextRun),
         clips: *renderer_mod.ClipTable,
     ) void {
         const node_opt = registry.getNode(node_id);
@@ -1289,20 +1287,18 @@ pub const WgpuBackend = struct {
 
             const added = t_verts.items.len - start_verts;
             if (added > 0) {
-                batches.append(.{
-                    .batch_type = .text,
+                text_runs.append(.{
                     .z_index = z_val,
-                    .order = global_order.*,
-                    .start_idx = @intCast(start_verts),
+                    .order = node.paint_order,
+                    .start = @intCast(start_verts),
                     .count = @intCast(added),
                 }) catch {};
-                global_order.* += 1;
             }
         }
 
         var child_id = node.first_child;
         while (child_id != reg.NULL_NODE) {
-            self.appendTextRecursive(registry, store, child_id, next_clip, z_val, global_order, t_verts, batches, clips);
+            self.appendTextRecursive(registry, store, child_id, next_clip, z_val, t_verts, text_runs, clips);
             const child_node = registry.getNode(child_id) orelse break;
             child_id = child_node.next_sibling;
         }
@@ -1585,8 +1581,12 @@ pub const WgpuBackend = struct {
         registry: *reg.UIRegistry,
         store: *const props.PropertyStore,
         prims: []const renderer_mod.RectPrimitive,
+        /// Paint order per rect (`renderer.PaintOrders.rects`); may be shorter
+        /// than `prims` — extra rects paint last within their z.
+        rect_orders: []const u32,
         image_prims: []const renderer_mod.ImagePrimitive,
         path_prims: []const renderer_mod.PathSegPrim,
+        path_orders: []const u32,
         /// The bake's rounded-clip table (`renderer.bakeRegistry`'s `clip_out`).
         clips: []const renderer_mod.ClipEntry,
     ) !void {
@@ -1653,46 +1653,8 @@ pub const WgpuBackend = struct {
 
             var batches = std.array_list.Managed(DrawBatch).init(self.allocator);
             defer batches.deinit();
-            var global_order: u32 = 0;
-
-            // Generate rect batches
-            var r_start: u32 = 0;
-            if (prims.len > 0) {
-                var current_z = prims[0].z_index;
-                for (prims, 0..) |p, i| {
-                    if (p.z_index != current_z) {
-                        batches.append(.{ .batch_type = .rect, .z_index = current_z, .order = global_order, .start_idx = r_start, .count = @as(u32, @intCast(i)) - r_start }) catch {};
-                        r_start = @as(u32, @intCast(i));
-                        current_z = p.z_index;
-                        global_order += 1;
-                    }
-                }
-                batches.append(.{ .batch_type = .rect, .z_index = current_z, .order = global_order, .start_idx = r_start, .count = @as(u32, @intCast(prims.len)) - r_start }) catch {};
-                global_order += 1;
-            }
-
-            // Generate image batches
-            for (image_prims, 0..) |img, i| {
-                batches.append(.{ .batch_type = .image, .z_index = img.z_index, .order = global_order, .start_idx = @intCast(i), .count = 1, .img_path = img.src_path }) catch {};
-                global_order += 1;
-            }
-
-            // Generate path batches — segments arrive z-sorted from the bake, so
-            // split on z change exactly like rects (one instanced draw per run).
-            if (path_prims.len > 0) {
-                var p_start: u32 = 0;
-                var p_z = path_prims[0].z_index;
-                for (path_prims, 0..) |p, i| {
-                    if (p.z_index != p_z) {
-                        batches.append(.{ .batch_type = .path, .z_index = p_z, .order = global_order, .start_idx = p_start, .count = @as(u32, @intCast(i)) - p_start }) catch {};
-                        p_start = @as(u32, @intCast(i));
-                        p_z = p.z_index;
-                        global_order += 1;
-                    }
-                }
-                batches.append(.{ .batch_type = .path, .z_index = p_z, .order = global_order, .start_idx = p_start, .count = @as(u32, @intCast(path_prims.len)) - p_start }) catch {};
-                global_order += 1;
-            }
+            var text_runs = std.array_list.Managed(renderer_mod.TextRun).init(self.allocator);
+            defer text_runs.deinit();
 
             // --- Upload Text Verts ---
             var t_verts = std.array_list.Managed(TextVertex).init(self.allocator);
@@ -1708,7 +1670,7 @@ pub const WgpuBackend = struct {
             const initial_clip = renderer_mod.unclipped;
             for (registry.nodes.items) |node| {
                 if (node.parent == reg.NULL_NODE) {
-                    self.appendTextRecursive(registry, store, node.id, initial_clip, 0.0, &global_order, &t_verts, &batches, &clip_table);
+                    self.appendTextRecursive(registry, store, node.id, initial_clip, 0.0, &t_verts, &text_runs, &clip_table);
                 }
             }
             // Upload the finished clip table (group 1 of every pipeline).
@@ -1779,15 +1741,32 @@ pub const WgpuBackend = struct {
                 if (img.src_path.len > 0) _ = self.getOrLoadTexture(img.src_path);
             }
 
-            // Sort batches by z_index, then by original order
-            const SortFn = struct {
-                fn lessThan(ctx: void, a: DrawBatch, b: DrawBatch) bool {
-                    _ = ctx;
+            // One paint sequence for every primitive kind: the tree walk gives
+            // text runs in paint order per z; sort by (z, order) to merge.
+            const TextSort = struct {
+                fn lessThan(_: void, a: renderer_mod.TextRun, b: renderer_mod.TextRun) bool {
                     if (a.z_index != b.z_index) return a.z_index < b.z_index;
                     return a.order < b.order;
                 }
             };
-            std.mem.sort(DrawBatch, batches.items, {}, SortFn.lessThan);
+            std.mem.sort(renderer_mod.TextRun, text_runs.items, {}, TextSort.lessThan);
+            var runs = std.array_list.Managed(renderer_mod.PaintRun).init(self.allocator);
+            defer runs.deinit();
+            renderer_mod.planPaintRuns(prims, rect_orders, image_prims, path_prims, path_orders, text_runs.items, &runs) catch {};
+            for (runs.items) |r| {
+                batches.append(.{
+                    .batch_type = switch (r.kind) {
+                        .rect => .rect,
+                        .image => .image,
+                        .text => .text,
+                        .path => .path,
+                    },
+                    .z_index = r.z_index,
+                    .start_idx = r.start,
+                    .count = r.count,
+                    .img_path = if (r.kind == .image) image_prims[r.start].src_path else null,
+                }) catch {};
+            }
 
             if (P) {
                 const n = profNowNs();

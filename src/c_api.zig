@@ -3457,7 +3457,8 @@ fn bakeAndRenderFrame(engine: *EngineState, render: bool) !void {
     var clips = renderer_mod.ClipTable.init(frame_arena.allocator());
     engine.hit_list.clearRetainingCapacity();
     const bz = prof.zoneNamed("bake");
-    try renderer_mod.bakeRegistry(&engine.registry, &engine.store, &prims, &image_prims, &path_prims, &engine.hit_list, &clips, engine.focused_node, engine.focus_ring_color, engine.focus_highlight_mode, frame_arena.allocator(), engine.scale);
+    var orders = renderer_mod.PaintOrders.init(frame_arena.allocator());
+    try renderer_mod.bakeRegistryOrdered(&engine.registry, &engine.store, &prims, &image_prims, &path_prims, &engine.hit_list, &clips, engine.focused_node, engine.focus_ring_color, engine.focus_highlight_mode, frame_arena.allocator(), engine.scale, &orders);
     bz.end();
 
     if (!render) return;
@@ -3477,7 +3478,7 @@ fn bakeAndRenderFrame(engine: *EngineState, render: bool) !void {
     }
 
     if (engine.backend) |*be| {
-        try be.renderFrame(&engine.registry, &engine.store, prims.items, image_prims.items, path_prims.items, clips.items);
+        try be.renderFrame(&engine.registry, &engine.store, prims.items, orders.rects.items, image_prims.items, path_prims.items, orders.paths.items, clips.items);
     }
 }
 

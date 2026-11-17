@@ -102,6 +102,10 @@ pub const Node = struct {
     /// be recomputed. Distinct from `layout_dirty` so a pure available-height
     /// change (which can't affect line wrapping) never forces a re-shape.
     text_dirty: bool = true,
+    /// Paint order of this node's CONTENT (glyphs / texture / stroke), written
+    /// by the bake each frame. The text pass reads it so glyphs interleave with
+    /// boxes, images and paths in tree order (see `renderer.bakeRegistry`).
+    paint_order: u32 = 0,
     /// The wrap width (`last_avail_w` minus horizontal padding) the cached
     /// `text_layout` was shaped at. A change here is the only geometric reason to
     /// re-shape; height changes are ignored.

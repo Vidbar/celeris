@@ -1444,6 +1444,13 @@ modifiers for you; prefer them. Delivery follows the
   inherit their parent's `z`** unless they set their own, and the comparison is global
   across the window, not per parent (there are no CSS stacking contexts): a child with
   `z = 5` inside a `z = 100` panel is drawn *below* an unrelated `z = 10` node.
+
+  **Paint order at equal `z`** is tree order for every kind of node — boxes, text,
+  images and paths alike: a later sibling covers an earlier one whatever each
+  draws (a caret box placed after a `b.path` underline paints over it, as it would
+  over a box underline). Within one node the layers stack as shadow, background /
+  border, content (glyphs, image texture or path stroke), focus ring; its children
+  then paint above all of them. Raise `z` only to break out of tree order.
 - `const panel = try b.openOverlay(z)` … `b.close()` — opens a box that floats above the
   app at `z`, positioned with `left` / `top` in the coordinates of the container the
   overlay host was mounted into (window coordinates for a `runApp` singleton). It also

@@ -89,6 +89,26 @@ pub const ImagePrimitive = struct {
     clip_id: f32 = 0.0,
     opacity: f32 = 1.0,
     src_path: []const u8,
+    /// Paint order within its z (see `PaintOrders`). CPU-only: images are
+    /// expanded to vertices, so this never reaches the GPU.
+    draw_order: u32 = 0,
+};
+
+/// Paint order of each baked rect / path segment, parallel to the bake's
+/// `out` / `path_out` lists. Rects, images, paths and text all share one
+/// order sequence, so a backend can interleave them exactly as the tree
+/// paints. (Separate arrays because both prim structs are GPU layouts.)
+pub const PaintOrders = struct {
+    rects: std.array_list.Managed(u32),
+    paths: std.array_list.Managed(u32),
+
+    pub fn init(allocator: std.mem.Allocator) PaintOrders {
+        return .{ .rects = .init(allocator), .paths = .init(allocator) };
+    }
+    pub fn deinit(self: *PaintOrders) void {
+        self.rects.deinit();
+        self.paths.deinit();
+    }
 };
 
 /// One flattened stroke segment of a `NodeType.path` node, ready for the GPU.
@@ -461,8 +481,19 @@ fn bakeNodeRecursive(
 
     const z_val = if (ctx.store.getStyle(node_id, .z_index)) |val| val.number else current_z;
 
+    // One paint slot per layer of this node, in the order they stack: shadow,
+    // body, content (texture / stroke / glyphs), focus ring — then children.
+    // Every primitive type sorts by this one sequence, so at equal z a later
+    // sibling covers an earlier one whatever kind of primitive each emits
+    // (the display-list rule of Skia/Flutter/Chromium painters).
     ctx.draw_counter.* += 1;
     const my_order = ctx.draw_counter.*;
+    const shadow_order = my_order;
+    const body_order = my_order + 1;
+    const content_order = my_order + 2;
+    const ring_order = my_order + 3;
+    ctx.draw_counter.* = ring_order;
+    node.paint_order = content_order;
 
     try ctx.hit_list.append(.{
         .id = node_id,
@@ -578,7 +609,8 @@ fn bakeNodeRecursive(
                         .src_path = src.string,
                     };
                     img.z_index = z_val;
-                    try ctx.sortable_imgs.append(.{ .prim = img, .z_index = z_val, .draw_order = my_order });
+                    img.draw_order = content_order;
+                    try ctx.sortable_imgs.append(.{ .prim = img, .z_index = z_val, .draw_order = content_order });
                 }
             }
         },
@@ -621,7 +653,7 @@ fn bakeNodeRecursive(
                             .z_index = z_val,
                         },
                         .z_index = z_val,
-                        .draw_order = my_order,
+                        .draw_order = content_order,
                     });
                 }
             }
@@ -658,17 +690,15 @@ fn bakeNodeRecursive(
         shadow_prim.border_bottom = 0.0;
         shadow_prim.border_left = 0.0;
         shadow_prim.border_color_a = 0.0;
-        ctx.draw_counter.* += 1;
         shadow_prim.z_index = z_val;
-        try ctx.sortable_rects.append(.{ .prim = shadow_prim, .z_index = z_val, .draw_order = ctx.draw_counter.* });
+        try ctx.sortable_rects.append(.{ .prim = shadow_prim, .z_index = z_val, .draw_order = shadow_order });
     }
     prim.shadow_blur = 0.0;
 
-    ctx.draw_counter.* += 1;
     prim.z_index = z_val;
     // A path node emits its own stroke instances above; it has no rect body.
     if (node.node_type != .path) {
-        try ctx.sortable_rects.append(.{ .prim = prim, .z_index = z_val, .draw_order = ctx.draw_counter.* });
+        try ctx.sortable_rects.append(.{ .prim = prim, .z_index = z_val, .draw_order = body_order });
     }
 
     // Focus ring. A focused, focusable node gets a 2px accent border
@@ -728,9 +758,8 @@ fn bakeNodeRecursive(
                 .border_color_a = ctx.focus_ring_color[3],
             };
             if (ctx.store.getStyle(node_id, .radius)) |r| ring.border_radius = r.dimension.value + rw;
-            ctx.draw_counter.* += 1;
             ring.z_index = z_val;
-            try ctx.sortable_rects.append(.{ .prim = ring, .z_index = z_val, .draw_order = ctx.draw_counter.* });
+            try ctx.sortable_rects.append(.{ .prim = ring, .z_index = z_val, .draw_order = ring_order });
         }
     }
 
@@ -745,6 +774,100 @@ fn bakeNodeRecursive(
             const child_node = ctx.registry.getNode(child_id) orelse break;
             child_id = child_node.next_sibling;
         }
+    }
+}
+
+pub const PaintKind = enum { rect, image, text, path };
+
+/// One draw call of the frame: `count` consecutive items of one kind starting
+/// at `start` (rect / path: instance index; image: image index; text: vertex
+/// index).
+pub const PaintRun = struct {
+    kind: PaintKind,
+    z_index: f32,
+    start: u32,
+    count: u32,
+};
+
+/// A text node's glyph vertices, with the node's z and `Node.paint_order`.
+pub const TextRun = struct {
+    z_index: f32,
+    order: u32,
+    start: u32,
+    count: u32,
+};
+
+/// Plans the frame's draw calls: merges rects, images, paths and text runs —
+/// each already sorted by (z, paint order) — into ONE sequence in paint order,
+/// coalescing consecutive same-kind items into a single run. The result is
+/// already in draw order. This is what makes a later sibling cover an earlier
+/// one at equal z whatever primitive kinds they emit; batches stay as large as
+/// the tree allows (a run breaks only where another kind truly paints between).
+///
+/// `rect_orders` may be shorter than `rects` (prims appended after the bake,
+/// e.g. the inspector overlay): those paint last within their z.
+pub fn planPaintRuns(
+    rects: []const RectPrimitive,
+    rect_orders: []const u32,
+    images: []const ImagePrimitive,
+    paths: []const PathSegPrim,
+    path_orders: []const u32,
+    texts: []const TextRun,
+    out: *std.array_list.Managed(PaintRun),
+) !void {
+    const Head = struct { z: f32, order: u32 };
+    const late = std.math.maxInt(u32);
+    var ri: usize = 0;
+    var ii: usize = 0;
+    var pi: usize = 0;
+    var ti: usize = 0;
+    while (true) {
+        var best: ?PaintKind = null;
+        var bk: Head = undefined;
+        const consider = struct {
+            fn f(b: *?PaintKind, k: *Head, kind: PaintKind, h: Head) void {
+                if (b.* == null or h.z < k.z or (h.z == k.z and h.order < k.order)) {
+                    b.* = kind;
+                    k.* = h;
+                }
+            }
+        }.f;
+        if (ri < rects.len) consider(&best, &bk, .rect, .{ .z = rects[ri].z_index, .order = if (ri < rect_orders.len) rect_orders[ri] else late });
+        if (ii < images.len) consider(&best, &bk, .image, .{ .z = images[ii].z_index, .order = images[ii].draw_order });
+        if (pi < paths.len) consider(&best, &bk, .path, .{ .z = paths[pi].z_index, .order = if (pi < path_orders.len) path_orders[pi] else late });
+        if (ti < texts.len) consider(&best, &bk, .text, .{ .z = texts[ti].z_index, .order = texts[ti].order });
+        const kind = best orelse break;
+
+        var start: u32 = undefined;
+        var count: u32 = 1;
+        switch (kind) {
+            .rect => {
+                start = @intCast(ri);
+                ri += 1;
+            },
+            .image => {
+                start = @intCast(ii);
+                ii += 1;
+            },
+            .path => {
+                start = @intCast(pi);
+                pi += 1;
+            },
+            .text => {
+                start = texts[ti].start;
+                count = texts[ti].count;
+                ti += 1;
+            },
+        }
+        // Images never coalesce: each binds its own texture.
+        if (out.items.len > 0 and kind != .image) {
+            const last = &out.items[out.items.len - 1];
+            if (last.kind == kind and last.z_index == bk.z and last.start + last.count == start) {
+                last.count += count;
+                continue;
+            }
+        }
+        try out.append(.{ .kind = kind, .z_index = bk.z, .start = start, .count = count });
     }
 }
 
@@ -766,6 +889,27 @@ pub fn bakeRegistry(
     allocator: std.mem.Allocator,
     /// Device pixels per logical px (the window's DPI scale; 1 at 96 DPI).
     scale: f32,
+) !void {
+    return bakeRegistryOrdered(registry, store, out, img_out, path_out, hit_out, clip_out, focused_node, ring_color, focus_highlight_mode, allocator, scale, null);
+}
+
+/// `bakeRegistry` that also reports each rect's / path segment's paint order
+/// (`orders`, cleared first) — what a backend needs to interleave primitive
+/// kinds in tree order at equal z.
+pub fn bakeRegistryOrdered(
+    registry: *reg.UIRegistry,
+    store: *const props.PropertyStore,
+    out: *std.array_list.Managed(RectPrimitive),
+    img_out: *std.array_list.Managed(ImagePrimitive),
+    path_out: *std.array_list.Managed(PathSegPrim),
+    hit_out: *std.array_list.Managed(HitNode),
+    clip_out: ?*ClipTable,
+    focused_node: ?reg.NodeId,
+    ring_color: ?[4]f32,
+    focus_highlight_mode: core_events.FocusHighlightMode,
+    allocator: std.mem.Allocator,
+    scale: f32,
+    orders: ?*PaintOrders,
 ) !void {
     const initial_clip = unclipped;
     if (clip_out) |t| {
@@ -819,14 +963,20 @@ pub fn bakeRegistry(
     std.mem.sort(HitNode, hit_list_nodes.items, {}, sortHitNodesDescending);
 
     // Populate outputs
+    if (orders) |o| {
+        o.rects.clearRetainingCapacity();
+        o.paths.clearRetainingCapacity();
+    }
     for (sortable_rects.items) |sr| {
         try out.append(sr.prim);
+        if (orders) |o| try o.rects.append(sr.draw_order);
     }
     for (sortable_imgs.items) |si| {
         try img_out.append(si.prim);
     }
     for (sortable_paths.items) |sp| {
         try path_out.append(sp.prim);
+        if (orders) |o| try o.paths.append(sp.draw_order);
     }
     for (hit_list_nodes.items) |hn| {
         try hit_out.append(hn);
@@ -950,6 +1100,99 @@ test "A path node emits stroke segments at its z, styled, offset by geometry; no
     try std.testing.expectEqual(@as(f32, 2), s.half_width); // 4px / 2
     try std.testing.expectEqual(@as(f32, 0.2), s.color_r);
     try std.testing.expectEqual(@as(f32, 1), s.z_index);
+}
+
+test "Paint order: at equal z, a later box sibling covers an earlier path, image or text (tree order across kinds)" {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    store.setRegistry(&registry);
+
+    // root > [ path (squiggle), image, text, caret box ] — no zIndex anywhere.
+    const root = try registry.createNode(.box);
+    const p = try registry.createNode(.path);
+    const img = try registry.createNode(.image);
+    const txt = try registry.createNode(.text);
+    const caret = try registry.createNode(.box);
+    for ([_]reg.NodeId{ p, img, txt, caret }) |c| registry.appendChild(root, c);
+    for ([_]reg.NodeId{ root, p, img, txt, caret }) |id| try store.registerNode(id);
+    var verts = [_]path_mod.PathVertex{ .{ .x = 0, .y = 0 }, .{ .x = 60, .y = 0 } };
+    try store.setPath(p, &verts);
+    try store.setModifier(img, .src, .{ .string = try store.stringAllocator().dupe(u8, "x.png") });
+    try store.setStyle(caret, .background, .{ .color = .{ .r = 1, .g = 0, .b = 0, .a = 1 } });
+
+    var engine = layout.LayoutEngine.init(&registry, &store, null);
+    engine.solve(root, 0, 0, 800, 600);
+
+    var prims = std.array_list.Managed(RectPrimitive).init(std.testing.allocator);
+    defer prims.deinit();
+    var images = std.array_list.Managed(ImagePrimitive).init(std.testing.allocator);
+    defer images.deinit();
+    var paths = std.array_list.Managed(PathSegPrim).init(std.testing.allocator);
+    defer paths.deinit();
+    var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
+    defer hits.deinit();
+    var orders = PaintOrders.init(std.testing.allocator);
+    defer orders.deinit();
+    try bakeRegistryOrdered(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1, &orders);
+    try std.testing.expectEqual(prims.items.len, orders.rects.items.len);
+    try std.testing.expectEqual(paths.items.len, orders.paths.items.len);
+
+    // The text pass reports the text node's content slot (as the backend does).
+    const texts = [_]TextRun{.{ .z_index = 0, .order = registry.getNode(txt).?.paint_order, .start = 0, .count = 6 }};
+    var runs = std.array_list.Managed(PaintRun).init(std.testing.allocator);
+    defer runs.deinit();
+    try planPaintRuns(prims.items, orders.rects.items, images.items, paths.items, orders.paths.items, &texts, &runs);
+
+    // Paint sequence by kind: root+path body-less → rect(root) path rect(img bg)
+    // image rect(text box) text rect(caret). The caret rect is LAST.
+    const last = runs.items[runs.items.len - 1];
+    try std.testing.expectEqual(PaintKind.rect, last.kind);
+    try std.testing.expectEqual(@as(f32, 1), prims.items[last.start + last.count - 1].color_r);
+    var seen_path = false;
+    var seen_image = false;
+    var seen_text = false;
+    for (runs.items[0 .. runs.items.len - 1]) |r| switch (r.kind) {
+        .path => seen_path = true,
+        .image => {
+            seen_image = true;
+            // The image's own (transparent) box paints UNDER its texture.
+            try std.testing.expect(images.items[r.start].draw_order > orders.rects.items[1]);
+        },
+        .text => seen_text = true,
+        .rect => {},
+    };
+    try std.testing.expect(seen_path and seen_image and seen_text);
+}
+
+test "planPaintRuns coalesces same-kind neighbours and keeps z ahead of tree order" {
+    const r0 = RectPrimitive{ .x = 0, .y = 0, .width = 1, .height = 1, .z_index = 0 };
+    const r5 = RectPrimitive{ .x = 0, .y = 0, .width = 1, .height = 1, .z_index = 5 };
+    const s0 = PathSegPrim{ .ax = 0, .ay = 0, .bx = 1, .by = 1, .half_width = 1, .z_index = 0 };
+    // z0: rects 1,2,4 and two path segments at 10; z5: one rect at order 3.
+    const rects = [_]RectPrimitive{ r0, r0, r0, r5 };
+    const rect_orders = [_]u32{ 1, 2, 4, 3 };
+    const paths = [_]PathSegPrim{ s0, s0 };
+    const path_orders = [_]u32{ 10, 10 };
+    var runs = std.array_list.Managed(PaintRun).init(std.testing.allocator);
+    defer runs.deinit();
+    try planPaintRuns(&rects, &rect_orders, &.{}, &paths, &path_orders, &.{}, &runs);
+    // One rect draw (3 instances), one path draw (2), then the z-5 rect — a
+    // higher z beats an earlier order.
+    try std.testing.expectEqual(@as(usize, 3), runs.items.len);
+    try std.testing.expectEqual(PaintKind.rect, runs.items[0].kind);
+    try std.testing.expectEqual(@as(u32, 3), runs.items[0].count);
+    try std.testing.expectEqual(PaintKind.path, runs.items[1].kind);
+    try std.testing.expectEqual(@as(u32, 2), runs.items[1].count);
+    try std.testing.expectEqual(@as(f32, 5), runs.items[2].z_index);
+
+    // Rects past `rect_orders` (the inspector overlay) paint last within z 0.
+    runs.clearRetainingCapacity();
+    try planPaintRuns(&[_]RectPrimitive{ r0, r0 }, &[_]u32{1}, &.{}, &paths, &path_orders, &.{}, &runs);
+    try std.testing.expectEqual(@as(usize, 3), runs.items.len);
+    try std.testing.expectEqual(PaintKind.rect, runs.items[2].kind);
+    try std.testing.expectEqual(@as(u32, 1), runs.items[2].start);
 }
 
 test "Flatten failure or empty path emits nothing, and unstyled path defaults to 1px black" {
