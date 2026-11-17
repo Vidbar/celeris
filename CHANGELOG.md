@@ -9,6 +9,19 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.4.2 — 2026-11-16
+
+No BREAKING changes. `CELERIS_ABI_VERSION` unchanged (8).
+
+### Fixed
+
+- At equal `z`, boxes, text, images and paths now paint in tree order. Before,
+  every path and image painted over every box at the same `z`, and text over
+  both, whatever their place in the tree (a `b.path` underline drew over a caret
+  box placed after it). An image's texture now always paints above its own
+  background. See "Paint order at equal `z`" under `b.zIndex` in
+  FRAMEWORK_API.md.
+
 ## 0.4.1 — 2026-11-15
 
 No BREAKING changes. `CELERIS_ABI_VERSION` unchanged (8).
