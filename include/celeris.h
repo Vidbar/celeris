@@ -38,7 +38,7 @@ extern "C" {
 
 /* C-ABI version of this header / build. Compare against celeris_abi_version() at
  * load time; a mismatch means the .dll/.so doesn't match this header. */
-#define CELERIS_ABI_VERSION 8u
+#define CELERIS_ABI_VERSION 9u
 uint32_t celeris_abi_version(void);
 
 /* ── Diagnostics: zone profiler ───────────────────────────────────────────────
@@ -161,7 +161,8 @@ typedef enum CelerisEventType {
     CELERIS_EVENT_DROP,             /* drag-and-drop (text = uri-list / path / text) */
     CELERIS_EVENT_DOUBLE_CLICK,     /* double/triple click; key_code = click count (2|3) */
     CELERIS_EVENT_SCROLL_H,         /* horizontal scroll; scroll_delta = notches (+ = right) */
-    CELERIS_EVENT_RESIZE            /* observed node's solved size changed; x = width, y = height */
+    CELERIS_EVENT_RESIZE,           /* observed node's solved size changed; x = width, y = height */
+    CELERIS_EVENT_POINTER_LEFT_WINDOW /* pointer left the window; node_id = 0; x/y = last known position */
 } CelerisEventType;
 
 /* A structured UI event. action_id/text are engine-owned, NUL-terminated, and

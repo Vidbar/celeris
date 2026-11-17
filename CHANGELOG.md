@@ -9,6 +9,41 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No BREAKING changes. `CELERIS_ABI_VERSION` is now 9 (additive).
+
+### Added
+
+- `pointer_left_window` event (`CELERIS_EVENT_POINTER_LEFT_WINDOW`, appended
+  last to the C enum): when the OS reports the pointer leaving the window, the
+  engine sends it target-less (`node_id == 0`) to every `router.onGlobal`
+  handler, once per leave, whether or not a node was hovered. It follows the
+  hovered node's own `mouse_leave`, which also fires on node-to-node moves and
+  so could not tell the two apart. `x`/`y` hold the last known in-window
+  position on every platform.
+- `Scrollbar.on_change` (`events.Handler`): fires `value_changed` after a thumb
+  drag, track click or wheel over the bar changed `offset`. Programmatic
+  `offset.set(...)` and writes that clamp to the same value stay silent. Same
+  contract as `Slider.on_change`.
+- Documented the rule for writing signals during `build` (FRAMEWORK_API.md,
+  "Writing signals during build"). Debug builds now panic when a build writes a
+  signal it already read with `get()`: that write's re-run was silently dropped
+  (stale UI) or re-entered the build. Writing `peek()`-ed or unread signals, or
+  another component's, is unaffected. Release builds are unchanged.
+- Window-coordinate input in the test harness: `Harness.bakeHits()` plus
+  `testkit.Query.clickAtWindow` / `mouseDownAtWindow` / `mouseUpAtWindow` /
+  `wheelAtWindow` / `moveToWindow` / `leaveWindow`. They route through the
+  engine's real hit-test, z-order and `clickable`/`scrollable` bubbling, so a
+  test can check that an overlay blocks the nodes beneath it.
+
+### Changed
+
+- Pointer routing (hit-test, hover, press capture, click, wheel) moved out of
+  `c_api.zig` into `core/input_routing.zig`, shared by the engine and the test
+  harness. Event order and targets are unchanged. Internally, `EventContext`
+  gained an optional `sink` (a callback with context) next to `event_callback`.
+
 ## 0.4.3 — 2026-11-16
 
 No BREAKING changes. `CELERIS_ABI_VERSION` unchanged (8).

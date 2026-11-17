@@ -16,6 +16,7 @@
 //! single module-global "current effect" pointer is all the tracker needs.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const props = @import("properties.zig");
 const reg = @import("registry.zig");
 
@@ -202,6 +203,9 @@ pub const Effect = struct {
     /// use a large base (`HEIGHT_BASE + anchor depth`) so every computed drains
     /// before any build, and ancestor builds before descendant builds.
     height_base: u32 = 0,
+    /// True for a component build-effect (set by the component build layer).
+    /// Only read by the debug guard in `Signal.set` — see `isBuildSelfWrite`.
+    is_build: bool = false,
 
     /// Called from a source's `get()` during this effect's run to raise its height
     /// above that source. `source_height` is 0 for a signal, the computed's height
@@ -300,6 +304,22 @@ fn valuesEqual(comptime T: type, a: T, b: T) bool {
     };
 }
 
+/// The build-write rule's debug guard. True when the effect running right now is
+/// a component build-effect AND it is subscribed to the signal being written —
+/// i.e. that build already `get()`-ed it and is now writing it. That is always a
+/// bug: inside a drain the queued re-run is subsumed (the UI keeps the stale
+/// value); on an inline first mount it re-enters this same build. Writing a
+/// signal the build only `peek()`-ed or hasn't read yet (TreeView's reconcile of
+/// `sel`/`hov`/`focus_state`), or another component's signal, is allowed and
+/// never trips this. Untracked regions (`untrackedBegin`) clear `current`, so
+/// they never trip it either.
+pub fn isBuildSelfWrite(subscribers: []const *Effect) bool {
+    const eff = tracker.current orelse return false;
+    if (!eff.is_build) return false;
+    for (subscribers) |s| if (s == eff) return true;
+    return false;
+}
+
 pub fn Signal(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -342,6 +362,12 @@ pub fn Signal(comptime T: type) type {
         /// opens a propagation so dependents run once, in dependency order, after it.
         pub fn set(self: *Self, v: T) void {
             if (valuesEqual(T, self.value, v)) return;
+            if (builtin.mode == .Debug and isBuildSelfWrite(self.subscribers.items)) {
+                @panic("Signal.set inside build() on a signal this build already read with get(): " ++
+                    "the re-run is dropped (stale UI) or runs re-entrantly. Read it with peek(), " ++
+                    "or move the write to an event handler / effect. See FRAMEWORK_API.md, " ++
+                    "\"Writing signals during build\".");
+            }
             self.value = v;
             tracker.pending_allocator = tracker.pending_allocator orelse self.allocator;
             beginPropagation();
@@ -1339,4 +1365,50 @@ test "OOM: Computed.get never leaves a half-subscription" {
         src.set(5); // must not crash regardless of the starved allocation
     }
     resetGlitchFlagForTest();
+}
+
+test "build-write guard: trips only on a build-effect writing a signal it already get()-ed" {
+    const a = std.testing.allocator;
+    var read = Signal(u32).init(a, 0);
+    defer read.deinit();
+    var peeked = Signal(u32).init(a, 0);
+    defer peeked.deinit();
+    var unread = Signal(u32).init(a, 0);
+    defer unread.deinit();
+    // Declared after the signals so it tears down first (its effect unsubscribes).
+    var scope = Scope.init(a);
+    defer scope.deinit();
+
+    const Noop = struct {
+        fn run(_: *u8) void {}
+    };
+    var dummy: u8 = 0;
+    const eff = try scope.createEffectDeferred(&dummy, Noop.run, 1024);
+
+    // A plain (non-build) effect that read the signal: not this rule's business.
+    var prev = pushEffect(eff);
+    _ = read.get();
+    try std.testing.expect(!isBuildSelfWrite(read.subscribers.items));
+    popEffect(prev);
+
+    // The same reads inside a build-effect.
+    eff.is_build = true;
+    prev = pushEffect(eff);
+    _ = read.get();
+    _ = peeked.peek();
+    // get() then write: the bug the guard catches.
+    try std.testing.expect(isBuildSelfWrite(read.subscribers.items));
+    // peek() then write, or write before any read: TreeView's reconcile pattern, allowed.
+    try std.testing.expect(!isBuildSelfWrite(peeked.subscribers.items));
+    try std.testing.expect(!isBuildSelfWrite(unread.subscribers.items));
+    peeked.set(1);
+    unread.set(1);
+    // An untracked region inside the build never trips it.
+    const u = untrackedBegin();
+    try std.testing.expect(!isBuildSelfWrite(read.subscribers.items));
+    untrackedEnd(u);
+    popEffect(prev);
+
+    // Outside any effect (event handlers, host code): never.
+    try std.testing.expect(!isBuildSelfWrite(read.subscribers.items));
 }

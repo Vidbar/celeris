@@ -21,6 +21,10 @@
 //! writes; it never rewrites `offset` on its own when the sizes change — the owner
 //! of the content re-clamps (it knows when its content shrank).
 //!
+//! To react to user scrolls (not programmatic ones), pass `.on_change =
+//! ctx.handler(self, onUserScroll)`: it fires after a drag / track click / wheel
+//! moved `offset`, which already holds the new value.
+//!
 //! **Sizing.** The bar is `thickness` across and grows along its axis to fill
 //! its mount anchor, so the anchor needs a *definite* length — otherwise the
 //! track measures 0 and no thumb shows (the thumb is out of flow, so the track
@@ -112,6 +116,14 @@ pub const Scrollbar = struct {
     min_thumb: f32 = 20,
     /// Pixels per wheel notch over the bar (same factor as `ScrollView`).
     wheel_step: f32 = 20,
+    /// Fired after the USER moved the scroll (thumb drag, track click, wheel
+    /// over the bar) and `offset` actually changed — never for a programmatic
+    /// `offset.set(...)`, and not when the write clamps to the same value. The
+    /// event is `value_changed` with `node_id` = the bar's root; the new offset
+    /// is already in the `offset` signal (read it with `peek()`), the same
+    /// contract as `Slider.on_change`. Lets the owner run its own logic on user
+    /// scrolls without diffing the signal on the next build.
+    on_change: ?events.Handler = null,
 
     // State (auto-created in onMount; preserved across rebuilds).
     own_offset: signals.Signal(f32) = undefined,
@@ -186,9 +198,17 @@ pub const Scrollbar = struct {
         return Metrics.compute(self.contentSig().peek(), self.viewportSig().peek(), self.trackLenNow(), self.offsetSig().peek(), self.min_thumb);
     }
 
+    /// The single write site for user-driven scrolls (drag, track, wheel):
+    /// clamps, writes `offset`, and fires `on_change` only if the value moved.
+    /// Programmatic changes go straight to the caller's signal and never pass
+    /// through here, so they stay silent.
     fn setClamped(self: *Scrollbar, value: f32) void {
         const max_scroll = @max(0.0, self.contentSig().peek() - self.viewportSig().peek());
-        self.offsetSig().set(std.math.clamp(value, -max_scroll, 0));
+        const sig = self.offsetSig();
+        const next = std.math.clamp(value, -max_scroll, 0);
+        if (next == sig.peek()) return;
+        sig.set(next);
+        if (self.on_change) |h| h.call(h.ptr, .{ .name = "value_changed", .id = "", .node_id = self.root_node });
     }
 
     fn axis(self: *const Scrollbar, ev: events.Event) f32 {
@@ -406,11 +426,22 @@ const Fixture = struct {
     offset: signals.Signal(f32),
     content: signals.Signal(f32),
     viewport: signals.Signal(f32),
+    /// `on_change` calls, and the offset each one observed.
+    changes: u32 = 0,
+    last_change: f32 = 1,
+
+    fn onChange(p: ?*anyopaque, _: events.Event) void {
+        const f: *Fixture = @ptrCast(@alignCast(p.?));
+        f.changes += 1;
+        f.last_change = f.offset.peek();
+    }
 
     /// Heap-allocated so the signal pointers handed to the widget stay put.
     fn create(orientation: Orientation) !*Fixture {
         const a = testing.allocator;
         const f = try a.create(Fixture);
+        f.changes = 0;
+        f.last_change = 1;
         f.offset = signals.Signal(f32).init(a, 0);
         f.content = signals.Signal(f32).init(a, 1000);
         f.viewport = signals.Signal(f32).init(a, 250);
@@ -435,6 +466,7 @@ const Fixture = struct {
             .content_size = &f.content,
             .viewport_size = &f.viewport,
             .orientation = orientation,
+            .on_change = events.Handler{ .ptr = f, .call = onChange },
         });
         b.close();
         // Two frames: the first reports the track size, the second lays out
@@ -517,6 +549,42 @@ test "Scrollbar: clicking the track pages by one viewport toward the click" {
     f.env.route(.{ .name = "mouse_down", .id = "", .node_id = sb.track_node, .y = 30 });
     try testing.expect(sb.dragging.peek());
     try testing.expectApproxEqAbs(@as(f32, 0), f.offset.peek(), 0.01);
+}
+
+test "Scrollbar: on_change fires for drag, track click and wheel — never for code" {
+    const f = try Fixture.create(.vertical);
+    defer f.destroy();
+    const sb = f.bar();
+
+    // Programmatic writes stay silent.
+    f.offset.set(-100);
+    f.offset.set(0);
+    try testing.expectEqual(@as(u32, 0), f.changes);
+
+    // Thumb drag: one call per move that changes the offset, with the new value.
+    f.env.route(.{ .name = "mouse_down", .id = "", .node_id = sb.thumb_node, .x = 5, .y = 10 });
+    f.env.route(.{ .name = "mouse_move", .id = "", .x = 900, .y = 40 });
+    try testing.expectEqual(@as(u32, 1), f.changes);
+    try testing.expectApproxEqAbs(@as(f32, -150), f.last_change, 0.01);
+    // A move that doesn't change the offset (same y) is not reported.
+    f.env.route(.{ .name = "mouse_move", .id = "", .x = 900, .y = 40 });
+    try testing.expectEqual(@as(u32, 1), f.changes);
+    f.env.route(.{ .name = "mouse_up", .id = "" });
+
+    // Track click pages and reports.
+    f.offset.set(0);
+    f.env.route(.{ .name = "mouse_down", .id = "", .node_id = sb.track_node, .y = 180 });
+    try testing.expectEqual(@as(u32, 2), f.changes);
+    try testing.expectApproxEqAbs(@as(f32, -250), f.last_change, 0.01);
+
+    // Wheel over the bar reports; a wheel past the start clamps to the same
+    // value and stays silent.
+    f.env.route(.{ .name = "scroll", .id = "", .node_id = sb.root_node, .scroll_delta = 2 });
+    try testing.expectEqual(@as(u32, 3), f.changes);
+    try testing.expectApproxEqAbs(@as(f32, -210), f.last_change, 0.01);
+    f.offset.set(0);
+    f.env.route(.{ .name = "scroll", .id = "", .node_id = sb.root_node, .scroll_delta = 5 });
+    try testing.expectEqual(@as(u32, 3), f.changes);
 }
 
 test "Scrollbar: hover and press paint the theme's thumb states" {

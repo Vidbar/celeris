@@ -114,6 +114,65 @@ pub const Query = struct {
         _ = self.h.router.route(.{ .name = name, .id = "", .node_id = 0, .x = r.x + lx, .y = r.y + ly });
     }
 
+    // ── Window-coordinate input ────────────────────────────────────────────
+    //
+    // The helpers above target a node you name. These take a WINDOW point and
+    // go through the engine's own pointer routing (`core/input_routing.zig`,
+    // shared with `handleOSInput`): hit-test against the baked hit list,
+    // z-order, capture→bubble of `clickable`/`scrollable`, hover and press
+    // capture. Use them to test what a user's pointer would actually reach —
+    // e.g. that a `positionAbsolute` + `zIndex` overlay blocks clicks and the
+    // wheel from the nodes beneath it. Call `h.solve(...)` and then
+    // `h.bakeHits()` first, and re-bake after anything moves.
+    //
+    // Not covered (engine-only, not routing): focus on click, cursor shape,
+    // double-click timing (pass `click_count` yourself), DPI scale and
+    // owner-modal blocking.
+
+    pub const WindowPointerError = error{NotBaked};
+
+    fn windowRouter(self: Query, x: f32, y: f32, mods: u32) WindowPointerError!@import("../core/input_routing.zig").Router {
+        if (!self.h.baked) return WindowPointerError.NotBaked;
+        self.h.last_x = x;
+        self.h.last_y = y;
+        return self.h.inputRouter(mods);
+    }
+
+    /// Pointer motion to window (`x`, `y`): global `mouse_move`, then hover
+    /// (`mouse_leave` / `mouse_enter`). Returns the top hit.
+    pub fn moveToWindow(self: Query, x: f32, y: f32) WindowPointerError!?reg.NodeId {
+        return (try self.windowRouter(x, y, 0)).mouseMove(x, y);
+    }
+
+    /// Left press at window (`x`, `y`): `global_mouse_down`, then `mouse_down`
+    /// capture→bubble at whatever is on top there. Returns the hit.
+    pub fn mouseDownAtWindow(self: Query, x: f32, y: f32, mods: u32) WindowPointerError!?reg.NodeId {
+        return (try self.windowRouter(x, y, mods)).mouseDown(x, y);
+    }
+
+    /// Left release at window (`x`, `y`): global `mouse_up`, `mouse_up` to the
+    /// nodes that took the press, then `click` at what is on top there.
+    pub fn mouseUpAtWindow(self: Query, x: f32, y: f32, mods: u32, click_count: u32) WindowPointerError!void {
+        (try self.windowRouter(x, y, mods)).mouseUp(x, y, click_count);
+    }
+
+    /// A full single click at window (`x`, `y`): press then release.
+    pub fn clickAtWindow(self: Query, x: f32, y: f32) WindowPointerError!void {
+        _ = try self.mouseDownAtWindow(x, y, 0);
+        try self.mouseUpAtWindow(x, y, 0, 1);
+    }
+
+    /// Wheel at window (`x`, `y`): `scroll` (`dy`) and/or `scroll_h` (`dx`) to
+    /// the nearest `scrollable` ancestor-or-self of what is on top there.
+    pub fn wheelAtWindow(self: Query, x: f32, y: f32, dy: f32, dx: f32) WindowPointerError!void {
+        (try self.windowRouter(x, y, 0)).wheel(x, y, dy, dx);
+    }
+
+    /// The OS reported the pointer leaving the window.
+    pub fn leaveWindow(self: Query) WindowPointerError!void {
+        (try self.windowRouter(self.h.last_x, self.h.last_y, 0)).pointerLeftWindow(self.h.last_x, self.h.last_y);
+    }
+
     pub const AssertError = error{NodeNotVisible};
 
     /// Fails unless `node_id` resolved to a non-zero box after `h.solve(...)`
@@ -301,4 +360,105 @@ test "LayoutReader: local coords on an offset node, scrolled ancestor, drag out 
     _ = h.router.route(.{ .name = "mouse_down", .id = "", .node_id = probe.target, .x = 50, .y = 5 });
     try std.testing.expectEqual(@as(f32, 0), probe.down.?.x);
     try std.testing.expectEqual(@as(f32, 0), probe.down.?.y);
+}
+
+const OverlayProbe = struct {
+    under: reg.NodeId = 0,
+    overlay: reg.NodeId = 0,
+    under_clicks: u32 = 0,
+    overlay_clicks: u32 = 0,
+    under_downs: u32 = 0,
+    overlay_downs: u32 = 0,
+    under_wheels: u32 = 0,
+    overlay_wheels: u32 = 0,
+
+    fn onUnderClick(self: *OverlayProbe, _: events.Event) void {
+        self.under_clicks += 1;
+    }
+    fn onOverlayClick(self: *OverlayProbe, _: events.Event) void {
+        self.overlay_clicks += 1;
+    }
+    fn onUnderDown(self: *OverlayProbe, _: events.Event) void {
+        self.under_downs += 1;
+    }
+    fn onOverlayDown(self: *OverlayProbe, _: events.Event) void {
+        self.overlay_downs += 1;
+    }
+    fn onUnderWheel(self: *OverlayProbe, _: events.Event) void {
+        self.under_wheels += 1;
+    }
+    fn onOverlayWheel(self: *OverlayProbe, _: events.Event) void {
+        self.overlay_wheels += 1;
+    }
+
+    /// 400×200 root → full-size `under` (click/press/wheel), and a 100×50
+    /// overlay sibling at (50,50) with `positionAbsolute` + `zIndex` 10.
+    fn build(self: *OverlayProbe, ctx: *component.BuildContext, root: *reg.NodeId) !void {
+        root.* = try ctx.boxNode(.{ .width = component.px(400), .height = component.px(200) }, .{});
+        try ctx.builder.rootAt(root.*);
+        self.under = try ctx.boxNode(.{
+            .width = component.px(400),
+            .height = component.px(200),
+            .on_click = ctx.handler(self, onUnderClick),
+            .on_mouse_down = ctx.handler(self, onUnderDown),
+            .on_scroll = ctx.handler(self, onUnderWheel),
+        }, .{});
+        self.overlay = try ctx.boxNode(.{
+            .width = component.px(100),
+            .height = component.px(50),
+            .on_click = ctx.handler(self, onOverlayClick),
+            .on_mouse_down = ctx.handler(self, onOverlayDown),
+            .on_scroll = ctx.handler(self, onOverlayWheel),
+        }, .{});
+        try ctx.builder.positionAbsolute(self.overlay, 50, 50);
+        try ctx.builder.zIndex(self.overlay, 10);
+        ctx.builder.close();
+    }
+};
+
+test "window-coordinate input: a higher zIndex overlay takes the click and wheel, not the node beneath" {
+    var h = Harness.init(std.testing.allocator);
+    defer h.deinit();
+    h.wire();
+    var b = builder_mod.UIBuilder.init(&h.registry, &h.store);
+    var ctx = component.BuildContext.initWithRouter(&b, &h.router);
+    var p = OverlayProbe{};
+    var root: reg.NodeId = 0;
+    try p.build(&ctx, &root);
+    const q = Query.init(&h);
+
+    // Nothing baked yet: the helpers refuse rather than route against no frame.
+    try std.testing.expectError(Query.WindowPointerError.NotBaked, q.clickAtWindow(60, 60));
+
+    h.solve(root, 400, 200);
+    try h.bakeHits();
+
+    // Inside the overlay: it gets press, click and wheel; the node beneath none.
+    try std.testing.expectEqual(@as(?reg.NodeId, p.overlay), try q.mouseDownAtWindow(60, 60, 0));
+    try q.mouseUpAtWindow(60, 60, 0, 1);
+    try q.wheelAtWindow(60, 60, 1, 0);
+    try std.testing.expectEqual(@as(u32, 1), p.overlay_downs);
+    try std.testing.expectEqual(@as(u32, 1), p.overlay_clicks);
+    try std.testing.expectEqual(@as(u32, 1), p.overlay_wheels);
+    try std.testing.expectEqual(@as(u32, 0), p.under_downs);
+    try std.testing.expectEqual(@as(u32, 0), p.under_clicks);
+    try std.testing.expectEqual(@as(u32, 0), p.under_wheels);
+
+    // Outside the overlay: the node beneath is reachable.
+    try q.clickAtWindow(300, 150);
+    try q.wheelAtWindow(300, 150, 1, 0);
+    try std.testing.expectEqual(@as(u32, 1), p.under_clicks);
+    try std.testing.expectEqual(@as(u32, 1), p.under_wheels);
+    try std.testing.expectEqual(@as(u32, 1), p.overlay_clicks);
+
+    // Removing a node makes the baked hit list stale: the helpers refuse
+    // until the next bake, instead of hit-testing a dead (recyclable) id.
+    h.registry.removeNode(p.overlay);
+    try std.testing.expectError(Query.WindowPointerError.NotBaked, q.clickAtWindow(60, 60));
+    h.solve(root, 400, 200);
+    try h.bakeHits();
+    // Re-baked without the overlay: the same point now reaches the node beneath.
+    try q.clickAtWindow(60, 60);
+    try std.testing.expectEqual(@as(u32, 2), p.under_clicks);
+    try std.testing.expectEqual(@as(u32, 1), p.overlay_clicks);
 }

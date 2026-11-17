@@ -467,6 +467,7 @@ pub const BuildContext = struct {
                 .mounts = table,
             };
             r.effect = try scope.createEffectDeferred(r, MountRecord.rerun, HEIGHT_BASE + depthOf(self.builder.registry, anchor));
+            r.effect.is_build = true;
             try table.put(anchor, r);
             rec = r;
             // First mount: the first build-effect run IS the mount, so onMount fires
@@ -541,6 +542,7 @@ pub const BuildContext = struct {
                 .mounts = table,
             };
             r.effect = try table.scope.createEffectDeferred(r, MountRecord.rerun, HEIGHT_BASE + depthOf(self.builder.registry, anchor));
+            r.effect.is_build = true;
             try table.put(anchor, r);
             rec = r;
             callOnMount(T, inst, alloc); // state signals init here (allocator provided)

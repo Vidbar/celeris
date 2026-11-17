@@ -12,6 +12,9 @@ const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
 const flexbox = @import("../layout/flexbox.zig");
 const text_mod = @import("../render/text.zig");
+const renderer = @import("../render/renderer.zig");
+const core_events = @import("../core/events.zig");
+const input_routing = @import("../core/input_routing.zig");
 
 /// registry + store + router + mounts, wired together. A single `deinit` tears
 /// down all four in the correct order. `with_measure`/`with_clipboard` let the
@@ -23,6 +26,17 @@ pub const Harness = struct {
     mounts: component.MountTable,
     with_measure: bool = false,
     with_clipboard: bool = false,
+    /// The frame's z-sorted hit list, from the renderer's own CPU bake
+    /// (`bakeHits`). Window-coordinate input routes through it, exactly like
+    /// the engine's `handleOSInput`.
+    hit_list: std.array_list.Managed(renderer.HitNode),
+    baked: bool = false,
+    /// Hover + press capture for window-coordinate input (shared routing state).
+    pointer: input_routing.PointerState = .{},
+    propagation_stopped: bool = false,
+    /// Last window-coordinate pointer position, for the removal hook's events.
+    last_x: f32 = 0,
+    last_y: f32 = 0,
 
     pub fn init(a: std.mem.Allocator) Harness {
         return .{
@@ -30,6 +44,7 @@ pub const Harness = struct {
             .store = props.PropertyStore.init(a),
             .router = events.EventRouter.init(a),
             .mounts = component.MountTable.init(a),
+            .hit_list = std.array_list.Managed(renderer.HitNode).init(a),
         };
     }
 
@@ -41,11 +56,24 @@ pub const Harness = struct {
     /// loudly, it just leaks (see the inspector.zig fix this mirrors).
     pub fn wire(self: *Harness) void {
         self.store.setRegistry(&self.registry);
+        // Pointer first, like the engine's listener: a removed hovered/pressed
+        // node gets its mouse_leave/mouse_up while its handlers still exist.
+        self.registry.addNodeRemovedListener(self, pointerNodeRemoved);
         self.registry.addNodeRemovedListener(&self.mounts, component.MountTable.nodeRemovedListener);
         self.registry.addNodeRemovedListener(&self.router, events.EventRouter.nodeRemovedListener);
     }
 
+    fn pointerNodeRemoved(ctx: ?*anyopaque, id: reg.NodeId) void {
+        const self: *Harness = @ptrCast(@alignCast(ctx.?));
+        _ = self.inputRouter(0).nodeRemoved(id, self.last_x, self.last_y);
+        // The hit list may now name a dead (or soon recycled) id: require a
+        // fresh `bakeHits()` before routing again, as the engine re-bakes
+        // every frame. Hover/press state above was cleaned up first.
+        self.baked = false;
+    }
+
     pub fn deinit(self: *Harness) void {
+        self.hit_list.deinit();
         self.mounts.deinit();
         self.router.deinit();
         self.store.deinit();
@@ -116,6 +144,46 @@ pub const Harness = struct {
     /// widget gets from `ctx.layoutReader()`.
     pub fn reader(self: *Harness) component.LayoutReader {
         return .{ .registry = &self.registry };
+    }
+
+    /// Builds the frame's hit list from the solved layout with the renderer's
+    /// own bake (CPU only, no GPU) — the same z-sort, clipping and draw order
+    /// the engine hit-tests against. Call after `solve`/`frame`, and again after
+    /// any change that moves, adds or removes nodes. Required by the testkit's
+    /// window-coordinate helpers.
+    pub fn bakeHits(self: *Harness) !void {
+        const a = self.registry.allocator;
+        var rects = std.array_list.Managed(renderer.RectPrimitive).init(a);
+        defer rects.deinit();
+        var images = std.array_list.Managed(renderer.ImagePrimitive).init(a);
+        defer images.deinit();
+        var paths = std.array_list.Managed(renderer.PathSegPrim).init(a);
+        defer paths.deinit();
+        self.hit_list.clearRetainingCapacity();
+        try renderer.bakeRegistry(&self.registry, &self.store, &rects, &images, &paths, &self.hit_list, null, null, null, .pointer, a, 1);
+        self.baked = true;
+    }
+
+    /// Forwards a structured event to the router — the same
+    /// `EventRouter.dispatchEvent` production's host callback reaches.
+    fn routerSink(ctx: ?*anyopaque, ev: *const core_events.CelerisEvent) void {
+        const router: *events.EventRouter = @ptrCast(@alignCast(ctx.?));
+        _ = router.dispatchEvent(ev);
+    }
+
+    /// The engine's pointer routing (`core/input_routing.zig`) over this
+    /// harness: real hit-test, z-order, capture→bubble, hover and press capture.
+    pub fn inputRouter(self: *Harness, mods: u32) input_routing.Router {
+        return .{
+            .registry = &self.registry,
+            .store = &self.store,
+            .hit_list = self.hit_list.items,
+            .sink = .{ .ctx = &self.router, .f = routerSink },
+            .state = &self.pointer,
+            .propagation_stopped = &self.propagation_stopped,
+            .allocator = self.registry.allocator,
+            .mods = mods,
+        };
     }
 
     /// Whether `id` ended up with a non-zero box after `solve` — the cheapest

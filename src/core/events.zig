@@ -167,6 +167,15 @@ pub const EventType = enum(c_int) {
     /// `double_click`'s `key_code`. Emitted after the frame is rendered, never
     /// inside the layout solve. Appended last to keep the C-ABI enum stable.
     resize,
+    /// The OS reported the pointer leaving the window. Target-less (node_id 0,
+    /// empty id), so it reaches `EventRouter.onGlobal` handlers — the same
+    /// channel as `global_mouse_down`. Emitted once per OS leave, whether or not
+    /// a node was hovered, right after the hovered node's own `mouse_leave` (which
+    /// is also sent when the pointer just moves onto another node, so on its own
+    /// it can't tell "left the window" apart). `x`/`y` carry the last known
+    /// in-window pointer position (Win32 reports none with the leave). Appended
+    /// last to keep the C-ABI enum stable.
+    pointer_left_window,
 
     pub fn name(self: EventType) [:0]const u8 {
         return switch (self) {
@@ -192,6 +201,7 @@ pub const EventType = enum(c_int) {
             .double_click => "double_click",
             .scroll_h => "scroll_h",
             .resize => "resize",
+            .pointer_left_window => "pointer_left_window",
         };
     }
 };
@@ -239,11 +249,27 @@ comptime {
 
 pub const StructuredEventCallback = *const fn (event: *const CelerisEvent) callconv(.c) void;
 
+/// Where an emitted event goes: a function plus its context. The engine wraps
+/// its context-free C callback in one (`c_api.engineSinkFn`); the test harness
+/// points one straight at its `EventRouter.dispatchEvent` — the same function
+/// production's callback reaches. Events are built in stack buffers, so the
+/// sink must consume them synchronously.
+pub const EventSink = struct {
+    ctx: ?*anyopaque,
+    f: *const fn (ctx: ?*anyopaque, event: *const CelerisEvent) void,
+
+    pub fn emit(self: EventSink, ev: *const CelerisEvent) void {
+        self.f(self.ctx, ev);
+    }
+};
+
 pub const EventContext = struct {
     registry: *reg.UIRegistry,
     store: *const @import("properties.zig").PropertyStore,
     propagation_stopped: *bool,
     event_callback: ?StructuredEventCallback = null,
+    /// Takes precedence over `event_callback` when set.
+    sink: ?EventSink = null,
     allocator: std.mem.Allocator,
     /// MOD_* bitmask copied onto every dispatched event (Shift/Ctrl/Alt held
     /// during the pointer action).
@@ -350,7 +376,7 @@ fn fireCallback(
         .string => |s| s,
         else => "unknown",
     };
-    if (ctx.event_callback) |cb| {
+    if (ctx.sink != null or ctx.event_callback != null) {
         var idbuf: [128]u8 = undefined;
         const ev = CelerisEvent{
             .event_type = @intFromEnum(event_type),
@@ -363,7 +389,7 @@ fn fireCallback(
             .text = "",
             .modifiers = ctx.modifiers,
         };
-        cb(&ev);
+        if (ctx.sink) |s| s.emit(&ev) else ctx.event_callback.?(&ev);
     }
 }
 

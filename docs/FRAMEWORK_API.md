@@ -278,6 +278,22 @@ There is no `ev.local_x`: `ev.node_id` is the node whose handler fires, not alwa
 
 In tests, `fw.testkit.Query.mouseDownAt(node, lx, ly)` / `pointerAt(name, node, lx, ly)` place an event at node-local coordinates, and `globalPointerAt(name, ref_node, lx, ly)` sends an untargeted one, as during a drag. They derive `ev.x/y` from the solved rect (call `h.solve(...)` first), so the handler's conversion runs exactly as in production.
 
+Those helpers deliver to the node you name, so they skip hit-testing. To test what a user's pointer would actually reach, such as an overlay (`positionAbsolute` + `zIndex`) blocking clicks and the wheel from the nodes beneath it, use the window-coordinate helpers. They go through the engine's own pointer routing (`core/input_routing.zig`, the same code `handleOSInput` runs): hit-test against the frame's z-sorted hit list, capture→bubble of `clickable` / `scrollable`, hover, and press capture.
+
+```zig
+h.solve(root, 400, 200);
+try h.bakeHits(); // the renderer's CPU bake → the frame's hit list; re-bake after anything moves
+const q = fw.testkit.Query.init(&h);
+try q.clickAtWindow(60, 60);           // mouse_down + mouse_up + click at what is on top there
+_ = try q.mouseDownAtWindow(60, 60, 0); // returns the hit node
+try q.mouseUpAtWindow(60, 60, 0, 1);   // last arg: click count carried by `click`
+try q.wheelAtWindow(60, 60, 1, 0);     // dy, dx → scroll / scroll_h
+_ = try q.moveToWindow(300, 150);      // global mouse_move, then mouse_leave / mouse_enter
+try q.leaveWindow();                   // hovered node's mouse_leave, then pointer_left_window
+```
+
+They return `error.NotBaked` until `h.bakeHits()` has run, and again after any node is removed (a rebuild), until the next bake. A stale hit list could otherwise route to a dead or recycled node id. Focus on click, cursor shape, double-click timing, DPI scale and owner-modal blocking are engine-side, not routing, so these helpers don't cover them.
+
 ## Framework-Owned Widgets
 
 Celeris ships a suite of pre-built widgets in `src/framework`. In the modern model you **do not** `init`/`register`/`deinit` them yourself. Instead you `ctx.mountOwned(Widget, .{ ...props })`: the framework allocates the instance on first mount, reuses it across rebuilds (preserving its internal state — hover, caret, value), and frees it on unmount.
@@ -355,7 +371,7 @@ This is the same mechanism across the widget suite:
 | `SplitPane` | `.ratio` | `*Signal(f32)` | set or animate the split |
 | `SplitPane` | `.left.collapsed`, `.right.collapsed` | `*Signal(bool)` | collapse / reopen a pane from a command (see *SplitPane sizing*) |
 | `ScrollView` | `.offset` | `*Signal(f32)` | read/drive the scroll position (px, `<= 0`; 0 = top) |
-| `Scrollbar` | `.offset`, `.content_size`, `.viewport_size` | `*Signal(f32)` | standalone bar for a view that draws only its visible slice; same offset convention as `ScrollView` |
+| `Scrollbar` | `.offset`, `.content_size`, `.viewport_size` | `*Signal(f32)` | standalone bar for a view that draws only its visible slice; same offset convention as `ScrollView`. Optional `.on_change` (`events.Handler`) fires `value_changed` after a user drag / track click / wheel moved the offset — never for a programmatic `.set` |
 
 ```zig
 // App owns the state. Declare the signal BEFORE the mount table so teardown
@@ -761,6 +777,7 @@ These are load-bearing behaviours; downstream apps (node editors, canvases) rely
 - **Wheel only reaches scrollable nodes.** `scroll`/`scroll_h` go to the **nearest ancestor-or-self of the hit node marked scrollable** (`on_scroll` / `.scrollable`) and stop there — exactly one node receives each wheel event, and a plain clickable box never sees one. Give a zoomable canvas an `on_scroll` handler to receive the wheel (or `ctx.onScroll(id, h)` for a raw-builder node — see [Wheel on raw-builder nodes](#wheel-on-raw-builder-nodes-ctxonscroll--ctxonscrollh)).
 - **Release goes where the press went (implicit pointer capture).** On release the engine emits the global `mouse_up` (no node, for drag-follow handlers), then a node-targeted `mouse_up` to every clickable node that received the `mouse_down` — even if the pointer is now elsewhere — and only then the `click` to the node under the pointer. A node removed by a rebuild between press and release gets its `mouse_up` at removal time. So `on_press` / `on_mouse_up` state (`Button.pressed`) can't get stuck, including when the click handler re-mounts the button. `Button`/`IconButton` also drop `pressed` on `mouse_leave`.
 - **Hover survives rebuilds.** If a rebuild removes the hovered node (e.g. a `Button` whose click rebuilds its parent is re-created), that node receives its `mouse_leave` **at removal time** — a removed node is never hovered — so hover-driven state (`Button.hovered`) resets even if the pointer leaves before the next frame or the re-mounted widget is no longer under it. After the next frame is baked, hover is re-evaluated at the last pointer position: a replacement still under the pointer gets `mouse_enter`, and its own `mouse_leave` later. Note that such a `mouse_leave` handler can run *during* a rebuild; keep hover handlers to state writes (the `on_hover` signal-setter pattern).
+- **Pointer left the window.** A node's `mouse_leave` fires both when the pointer moves onto another node and when it leaves the window, so on its own it can't tell the two apart. When the OS reports the pointer leaving the window, the engine first sends the hovered node its `mouse_leave` (if any), then a target-less `pointer_left_window` (`node_id == 0`) that reaches every `router.onGlobal` handler — once per OS leave, hovered node or not. `ev.x` / `ev.y` hold the last known in-window pointer position (Win32 reports none with the leave). C hosts receive `CELERIS_EVENT_POINTER_LEFT_WINDOW`.
 
 ### Keys (`fw.events.Key`, `ev.key()`)
 
@@ -845,6 +862,15 @@ b.close();
 ```
 
 Mutate with `list_signal.set(new_items)`; the rebuild is isolated to `list_container` (with a `markLayoutDirty`), preserving app-wide focus and performance.
+
+### Writing signals during build
+
+`build` runs inside the component's build-effect, and every `get()` in it subscribes that effect. Two cases follow from that:
+
+- **Allowed:** writing a signal this build has only `peek()`-ed or not read yet, or a signal owned by another component. The typical case is reconciling your own state against new props before building from it. `TreeView` does this with `selected`/`hovered`/`focus_state`: it `peek()`s them, clears any whose row no longer exists, and only then builds. Writes that reach other effects run after this build, in the same propagation.
+- **Not allowed:** writing a signal this build already read with `get()`. Inside a propagation the re-run it schedules is skipped, because this build already counts as the subtree's rebuild, so the UI keeps the stale value. On a first mount it re-enters the same build instead. Debug builds panic on it (`Signal.set` checks whether the running build-effect is subscribed to the signal). Read the signal with `peek()` if build only needs its current value, or move the write to an event handler or a separate effect.
+
+The same applies to host callbacks invoked from `build`: whatever they `set()` is subject to this rule. To react to a user change, prefer the widget's `on_change` handler, for example `Scrollbar.on_change`, over diffing in `build`.
 
 ## Recipes
 

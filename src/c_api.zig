@@ -4,6 +4,7 @@ const props = @import("core/properties.zig");
 const layout_mod = @import("layout/flexbox.zig");
 const renderer_mod = @import("render/renderer.zig");
 const events_mod = @import("core/events.zig");
+const input_routing = @import("core/input_routing.zig");
 const fw_events = @import("framework/events.zig");
 const platform_mod = @import("platform/platform.zig");
 const wgpu_mod = @import("render/wgpu_backend.zig");
@@ -375,7 +376,6 @@ pub const EngineState = struct {
     /// The cursor shape currently shown (so we only call the OS when it changes).
     current_cursor: platform_mod.CursorType,
     focused_node: ?reg.NodeId,
-    hovered_node: ?reg.NodeId,
     debug_node_id: ?reg.NodeId,
     overlay_rect: ?OverlayRect,
     dev_arena: std.heap.ArenaAllocator,
@@ -391,11 +391,11 @@ pub const EngineState = struct {
     last_pointer: ?PointerPos = null,
     /// Set when the hovered node is removed; consumed after the next bake.
     hover_recheck: bool = false,
-    /// Clickable nodes on the path that received the current mouse_down
-    /// (target first). The release goes to them — implicit pointer capture —
-    /// not to whatever is under the pointer at mouse_up. See `releasePressed`.
-    pressed_nodes: [MAX_PRESSED]reg.NodeId = undefined,
-    pressed_len: usize = 0,
+    /// Hovered node + the clickable nodes that received the current mouse_down
+    /// (implicit pointer capture: the release goes to them, not to whatever is
+    /// under the pointer at mouse_up). Owned by the shared pointer routing in
+    /// `core/input_routing.zig`; see `inputRouter`.
+    pointer: input_routing.PointerState = .{},
     /// Double/triple-click detection: time and position of the previous
     /// mouse-down, plus the running consecutive-click count.
     last_click_ms: i64 = 0,
@@ -515,16 +515,12 @@ pub const EngineState = struct {
                 // before the next frame would never reach the replacement.
                 // Then re-evaluate after the next bake so a replacement under
                 // a still pointer gets mouse_enter.
-                if (e.hovered_node == id) {
-                    e.hovered_node = null;
-                    e.hover_recheck = true;
-                    const p = e.last_pointer orelse PointerPos{ .x = 0, .y = 0 };
-                    emitEvent(e, .mouse_leave, id, "", p.x, p.y, 0, 0, "", 0);
-                }
+                //
                 // Press likewise: a removed node that took the mouse_down gets
                 // its mouse_up now (same safety argument), so press state it
                 // drives (Button.pressed) can't outlive it.
-                releasePressed(e, id);
+                const p = e.last_pointer orelse PointerPos{ .x = 0, .y = 0 };
+                if (inputRouter(e).nodeRemoved(id, p.x, p.y)) e.hover_recheck = true;
                 // A focus scope whose saved `prev_focus` was this node would
                 // otherwise restore focus to a recycled id on pop.
                 for (e.focus_scopes[0..e.focus_scope_len]) |*sc| {
@@ -546,7 +542,7 @@ pub const EngineState = struct {
         self.atlas = null;
         self.backend = null;
         self.focused_node = null;
-        self.hovered_node = null;
+        self.pointer = .{};
         self.debug_node_id = null;
         self.overlay_rect = null;
         self.dev_arena = std.heap.ArenaAllocator.init(allocator);
@@ -561,7 +557,6 @@ pub const EngineState = struct {
         self.input_mods = 0;
         self.last_pointer = null;
         self.hover_recheck = false;
-        self.pressed_len = 0;
         self.signal_scope = signals_mod.Scope.init(allocator);
         self.host_signals = std.array_list.Managed(*HostSignal).init(allocator);
         self.host_binding_nodes = std.array_list.Managed(*reg.NodeId).init(allocator);
@@ -818,8 +813,29 @@ fn hitAndDispatch(
     modifier_capture: props.ModifierKey,
     modifier_bubble: props.ModifierKey,
 ) void {
-    const hit_id = events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, x, y) orelse return;
-    events_mod.dispatchEvent(makeEventCtx(engine), hit_id, event_type, modifier_capture, modifier_bubble, x, y) catch {};
+    _ = inputRouter(engine).dispatchAt(x, y, event_type, modifier_capture, modifier_bubble, 0);
+}
+
+/// The engine's event sink: forwards to the host's context-free C callback.
+fn engineSinkFn(ctx: ?*anyopaque, ev: *const events_mod.CelerisEvent) void {
+    const engine: *EngineState = @ptrCast(@alignCast(ctx.?));
+    if (engine.event_callback) |cb| cb(ev);
+}
+
+/// The shared pointer routing (`core/input_routing.zig`) bound to this
+/// engine's current frame. The test harness builds the same router over its
+/// own registry/store/hit list, so tests exercise this exact code.
+fn inputRouter(engine: *EngineState) input_routing.Router {
+    return .{
+        .registry = &engine.registry,
+        .store = &engine.store,
+        .hit_list = engine.hit_list.items,
+        .sink = .{ .ctx = engine, .f = engineSinkFn },
+        .state = &engine.pointer,
+        .propagation_stopped = &engine.propagation_stopped,
+        .allocator = engine.gpa.allocator(),
+        .mods = engine.input_mods,
+    };
 }
 
 // ── Error channel ─────────────────────────────────────────────────────────────
@@ -857,9 +873,9 @@ pub export fn celeris_last_error() [*:0]const u8 {
 /// (celeris_pick_directory) and thread-safe repaint (celeris_request_redraw);
 /// v5 adds the CELERIS_EVENT_RESIZE event type; v6 adds the `line_height` style
 /// key and celeris_get_caret_metrics_ex / celeris_get_char_index_at_ex; v8 adds
-/// celeris_window_set_title.
+/// celeris_window_set_title; v9 adds the CELERIS_EVENT_POINTER_LEFT_WINDOW event type.
 pub export fn celeris_abi_version() u32 {
-    return 8;
+    return 9;
 }
 
 // ─── Diagnostics: zone profiler ────────────────────────────────────────────────
@@ -1680,21 +1696,8 @@ fn emitEvent(
     text: []const u8,
     modifiers: u32,
 ) void {
-    const cb = engine.event_callback orelse return;
-    var idbuf: [128]u8 = undefined;
-    var txtbuf: [256]u8 = undefined; // room for IME preedit/commit strings
-    const ev = events_mod.CelerisEvent{
-        .event_type = @intFromEnum(event_type),
-        .node_id = if (node_id == reg.NULL_NODE) 0 else node_id,
-        .action_id = events_mod.toCString(&idbuf, action_id),
-        .x = x,
-        .y = y,
-        .key_code = key_code,
-        .scroll_delta = scroll_delta,
-        .text = events_mod.toCString(&txtbuf, text),
-        .modifiers = modifiers,
-    };
-    cb(&ev);
+    if (engine.event_callback == null) return;
+    inputRouter(engine).emit(event_type, node_id, action_id, x, y, key_code, scroll_delta, text, modifiers);
 }
 
 /// True if `node` is an editable text widget — used to enable IME only inside
@@ -1887,114 +1890,24 @@ fn parseCursor(s: []const u8) platform_mod.CursorType {
     return .default;
 }
 
-/// Resolves the cursor for the node under the pointer: the nearest ancestor with
-/// an explicit `cursor` modifier wins; otherwise a `clickable` ancestor implies a
-/// pointer (hand); else the default arrow.
-/// Moves the hover to the nearest `.hoverable` ancestor-or-self of `top_hit`,
-/// emitting mouse_leave to the old node and mouse_enter to the new one. The
-/// single hover funnel: pointer motion and the post-rebuild recheck share it.
-fn updateHover(engine: *EngineState, top_hit: ?reg.NodeId, x: f32, y: f32, mods: u32) void {
-    var hit_hoverable: ?reg.NodeId = null;
-    if (top_hit) |hit_id| {
-        var current_id: reg.NodeId = hit_id;
-        while (current_id != reg.NULL_NODE) {
-            if (engine.store.getModifier(current_id, .hoverable)) |_| {
-                hit_hoverable = current_id;
-                break;
-            }
-            const node = engine.registry.getNode(current_id) orelse break;
-            current_id = node.parent;
-        }
-    }
-    if (engine.hovered_node == hit_hoverable) return;
-    if (engine.hovered_node) |old_hover| {
-        if (engine.store.getModifier(old_hover, .hoverable)) |val| {
-            const id_str = switch (val) {
-                .string => |s| s,
-                else => "unknown",
-            };
-            emitEvent(engine, .mouse_leave, old_hover, id_str, x, y, 0, 0, "", mods);
-        }
-    }
-    engine.hovered_node = hit_hoverable;
-    if (engine.hovered_node) |new_hover| {
-        if (engine.store.getModifier(new_hover, .hoverable)) |val| {
-            const id_str = switch (val) {
-                .string => |s| s,
-                else => "unknown",
-            };
-            emitEvent(engine, .mouse_enter, new_hover, id_str, x, y, 0, 0, "", mods);
-        }
-    }
-}
-
-const MAX_PRESSED = 32;
-
-/// Records the clickable nodes on the hit path of a mouse_down (target
-/// first) — the ones `.mouse_down` is dispatched to and that must get the
-/// matching `.mouse_up`.
-fn capturePressed(engine: *EngineState, x: f32, y: f32) void {
-    engine.pressed_len = 0;
-    var cur = events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, x, y) orelse return;
-    while (cur != reg.NULL_NODE and engine.pressed_len < MAX_PRESSED) {
-        if (engine.store.getModifier(cur, .clickable) != null or engine.store.getModifier(cur, .clickable_capture) != null) {
-            engine.pressed_nodes[engine.pressed_len] = cur;
-            engine.pressed_len += 1;
-        }
-        const node = engine.registry.getNode(cur) orelse break;
-        cur = node.parent;
-    }
-}
-
-fn pressedActionId(engine: *EngineState, id: reg.NodeId) []const u8 {
-    const m = engine.store.getModifier(id, .clickable) orelse return "";
-    return if (m == .string) m.string else "";
-}
-
-/// Delivers `mouse_up` to every node that took the current press,
-/// target first, then clears the capture. Nodes removed since were already
-/// released by `releasePressed`.
-fn releaseAllPressed(engine: *EngineState, x: f32, y: f32, mods: u32) void {
-    // Snapshot: a mouse_up handler may rebuild, and the removal listener
-    // edits `pressed_nodes` while we iterate.
-    var ids: [MAX_PRESSED]reg.NodeId = undefined;
-    const n = engine.pressed_len;
-    @memcpy(ids[0..n], engine.pressed_nodes[0..n]);
-    engine.pressed_len = 0;
-    for (ids[0..n]) |id| {
-        if (engine.registry.getNode(id) == null) continue;
-        emitEvent(engine, .mouse_up, id, pressedActionId(engine, id), x, y, 0, 0, "", mods);
-    }
-}
-
-/// Removal hook: if `id` took the current press, send it its mouse_up now and
-/// drop it from the capture.
-fn releasePressed(engine: *EngineState, id: reg.NodeId) void {
-    var i: usize = 0;
-    while (i < engine.pressed_len) : (i += 1) {
-        if (engine.pressed_nodes[i] != id) continue;
-        engine.pressed_len -= 1;
-        engine.pressed_nodes[i] = engine.pressed_nodes[engine.pressed_len];
-        const p = engine.last_pointer orelse PointerPos{ .x = 0, .y = 0 };
-        emitEvent(engine, .mouse_up, id, "", p.x, p.y, 0, 0, "", 0);
-        return;
-    }
-}
-
 /// A rebuild that removed the hovered node (e.g. a Button re-mounted
 /// by its own click) left the replacement with no hover edge — its surviving
 /// `hovered` state never got a mouse_leave. The removal listener clears
-/// `hovered_node` and arms this; once the fresh hit list is baked, hover is
+/// `pointer.hovered` and arms this; once the fresh hit list is baked, hover is
 /// re-evaluated at the last pointer position, so the node now under a still
 /// pointer receives mouse_enter and a later move-away delivers mouse_leave.
 fn recheckHover(engine: *EngineState) void {
     if (!engine.hover_recheck) return;
     engine.hover_recheck = false;
     const p = engine.last_pointer orelse return;
-    const top_hit = events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, p.x, p.y);
-    updateHover(engine, top_hit, p.x, p.y, 0);
+    var r = inputRouter(engine);
+    r.mods = 0;
+    r.updateHover(r.hitTest(p.x, p.y), p.x, p.y);
 }
 
+/// Resolves the cursor for the node under the pointer: the nearest ancestor with
+/// an explicit `cursor` modifier wins; otherwise a `clickable` ancestor implies a
+/// pointer (hand); else the default arrow.
 fn resolveCursor(store: *props.PropertyStore, registry: *reg.UIRegistry, hit: ?reg.NodeId) platform_mod.CursorType {
     var id: reg.NodeId = hit orelse return .default;
     while (id != reg.NULL_NODE) {
@@ -2062,11 +1975,9 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
     }
 
     if (event.event_type == .mouse_move) {
-        emitEvent(engine, .mouse_move, reg.NULL_NODE, "", event.x, event.y, 0, 0, "", mods);
-
-        const top_hit = events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, event.x, event.y);
-
-        // Update the mouse cursor for what's under the pointer.
+        // Global mouse_move + hover (shared routing), then the cursor for what's
+        // under the pointer (engine-only).
+        const top_hit = inputRouter(engine).mouseMove(event.x, event.y);
         if (engine.window != null) {
             const cur = resolveCursor(&engine.store, &engine.registry, top_hit);
             if (cur != engine.current_cursor) {
@@ -2074,23 +1985,14 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
                 platform_mod.setCursor(cur);
             }
         }
-
-        updateHover(engine, top_hit, event.x, event.y, mods);
     } else if (event.event_type == .mouse_leave) {
+        // Win32 sends no coordinates with WM_MOUSELEAVE: report the last known
+        // in-window position instead, so every platform agrees.
+        const last = engine.last_pointer orelse PointerPos{ .x = event.x, .y = event.y };
         engine.last_pointer = null;
-        // The pointer left the window — no node is hovered anymore. Emit the
-        // same mouse_leave the hover tracking sends and clear the state, so
-        // hover-driven signals (button backgrounds, tooltips) reset.
-        if (engine.hovered_node) |old_hover| {
-            if (engine.store.getModifier(old_hover, .hoverable)) |val| {
-                const id_str = switch (val) {
-                    .string => |s| s,
-                    else => "unknown",
-                };
-                emitEvent(engine, .mouse_leave, old_hover, id_str, event.x, event.y, 0, 0, "", mods);
-            }
-            engine.hovered_node = null;
-        }
+        // The hovered node's mouse_leave (hover-driven signals reset), then the
+        // target-less pointer_left_window that reaches onGlobal handlers.
+        inputRouter(engine).pointerLeftWindow(last.x, last.y);
     } else if (event.event_type == .mouse_down) {
         // Double/triple-click sequence bookkeeping, timing-only for parity.
         const now_click = nowMs();
@@ -2101,10 +2003,8 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
         engine.last_click_x = event.x;
         engine.last_click_y = event.y;
 
-        emitEvent(engine, .global_mouse_down, reg.NULL_NODE, "", event.x, event.y, 0, 0, "", mods);
-
-        capturePressed(engine, event.x, event.y);
-        hitAndDispatch(engine, event.x, event.y, .mouse_down, .clickable_capture, .clickable);
+        // global_mouse_down, press capture, mouse_down capture→bubble (shared).
+        _ = inputRouter(engine).mouseDown(event.x, event.y);
 
         // Focus handling
         var new_focus: ?reg.NodeId = null;
@@ -2139,20 +2039,13 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
             }
         }
     } else if (event.event_type == .mouse_up) {
-        emitEvent(engine, .mouse_up, reg.NULL_NODE, "", event.x, event.y, 0, 0, "", mods);
-        // Node-targeted release to the nodes that took the press, BEFORE the
-        // click (DOM order: mouseup, then click) — a click handler that
-        // rebuilds the tree can no longer strand the press state.
-        releaseAllPressed(engine, event.x, event.y, mods);
-
+        // Global mouse_up, then node-targeted release to the nodes that took the
+        // press, BEFORE the click (DOM order: mouseup, then click) — a click
+        // handler that rebuilds the tree can no longer strand the press state.
         // The click carries its sequence count in key_code (1 = single, 2 = the
         // click completing a double click, ...), so a widget that acts on single
         // clicks can skip the one a double_click already handled.
-        if (events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, event.x, event.y)) |hit_id| {
-            var ectx = makeEventCtx(engine);
-            ectx.key_code = @max(engine.click_count, 1);
-            events_mod.dispatchEvent(ectx, hit_id, .click, .clickable_capture, .clickable, event.x, event.y) catch {};
-        }
+        inputRouter(engine).mouseUp(event.x, event.y, engine.click_count);
     } else if (event.event_type == .right_mouse_down) {
         emitEvent(engine, .right_mouse_down, reg.NULL_NODE, "", event.x, event.y, 0, 0, "", mods);
 
@@ -2300,21 +2193,8 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
         }
     } else if (event.event_type == .scroll) {
         const axes = scrollAxes(event.scroll_delta, event.scroll_dx, event.shift_held);
-        const hit = events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, event.x, event.y);
-        if (hit) |hit_id| {
-            var current_id: reg.NodeId = hit_id;
-            while (current_id != reg.NULL_NODE) {
-                if (engine.store.getModifier(current_id, .scrollable)) |mod| {
-                    if (axes.dy != 0) emitEvent(engine, .scroll, current_id, mod.string, event.x, event.y, 0, axes.dy, "", mods);
-                    // Horizontal goes out as its own event type (additive
-                    // C-ABI enum), delta in scroll_delta, positive = right.
-                    if (axes.dx != 0) emitEvent(engine, .scroll_h, current_id, mod.string, event.x, event.y, 0, axes.dx, "", mods);
-                    break;
-                }
-                const node = engine.registry.getNode(current_id) orelse break;
-                current_id = node.parent;
-            }
-        }
+        // scroll / scroll_h to the nearest .scrollable ancestor-or-self of the hit.
+        inputRouter(engine).wheel(event.x, event.y, axes.dy, axes.dx);
     } else if (event.event_type == .drop) {
         // A file/text drop: deliver a `drop` event to the node under the pointer,
         // carrying the payload. The host routes on node id / action id + reads text.
@@ -3811,14 +3691,73 @@ test "Window mouse_leave clears the hovered node" {
     try engine.store.registerNode(btn);
     engine.registry.getNode(btn).?.geometry = .{ .x = 0, .y = 0, .width = 100, .height = 40 };
     try engine.store.setModifier(btn, .hoverable, .{ .string = try sa.dupe(u8, "btn") });
-    engine.hovered_node = btn;
+    engine.pointer.hovered = btn;
 
     handleOSInput(&engine, .{ .event_type = .mouse_leave });
-    try std.testing.expectEqual(@as(?reg.NodeId, null), engine.hovered_node);
+    try std.testing.expectEqual(@as(?reg.NodeId, null), engine.pointer.hovered);
 
     // Idempotent: a second leave with nothing hovered is a no-op.
     handleOSInput(&engine, .{ .event_type = .mouse_leave });
-    try std.testing.expectEqual(@as(?reg.NodeId, null), engine.hovered_node);
+    try std.testing.expectEqual(@as(?reg.NodeId, null), engine.pointer.hovered);
+}
+
+test "Window leave emits pointer_left_window to onGlobal once per OS leave, hovered or not" {
+    var engine: EngineState = undefined;
+    engine.init(true, .{});
+    defer engine.deinit();
+    const sa = engine.store.stringAllocator();
+
+    const root = try engine.registry.createNode(.box);
+    try engine.store.registerNode(root);
+    const btn = try engine.registry.createNode(.box);
+    try engine.store.registerNode(btn);
+    engine.registry.appendChild(root, btn);
+    try engine.store.setModifier(btn, .hoverable, .{ .string = try sa.dupe(u8, "btn") });
+
+    var router = fw_events.EventRouter.init(std.testing.allocator);
+    defer router.deinit();
+    const Seen = struct {
+        left: u32 = 0,
+        node_leaves: u32 = 0,
+        x: f32 = -1,
+        y: f32 = -1,
+        fn global(self: *@This(), ev: fw_events.Event) void {
+            if (std.mem.eql(u8, ev.name, "pointer_left_window")) {
+                self.left += 1;
+                self.x = ev.x;
+                self.y = ev.y;
+            }
+        }
+        fn nodeLeave(p: ?*anyopaque, _: fw_events.Event) void {
+            const self: *@This() = @ptrCast(@alignCast(p.?));
+            self.node_leaves += 1;
+        }
+    };
+    var seen = Seen{};
+    try router.onGlobal(root, &seen, Seen.global);
+    try router.onNode(btn, .mouse_leave, .{ .ptr = &seen, .call = Seen.nodeLeave });
+    mods_test_router = &router;
+    defer mods_test_router = null;
+    engine.event_callback = modsTestForward;
+
+    // Hovered: the node gets its mouse_leave AND globals get the window leave,
+    // carrying the last in-window position (Win32 sends none with the leave).
+    engine.pointer.hovered = btn;
+    engine.last_pointer = .{ .x = 12, .y = 34 };
+    handleOSInput(&engine, .{ .event_type = .mouse_leave });
+    try std.testing.expectEqual(@as(u32, 1), seen.node_leaves);
+    try std.testing.expectEqual(@as(u32, 1), seen.left);
+    try std.testing.expectEqual(@as(f32, 12), seen.x);
+    try std.testing.expectEqual(@as(f32, 34), seen.y);
+
+    // Nothing hovered: still exactly one window leave, no node leave.
+    handleOSInput(&engine, .{ .event_type = .mouse_leave });
+    try std.testing.expectEqual(@as(u32, 1), seen.node_leaves);
+    try std.testing.expectEqual(@as(u32, 2), seen.left);
+
+    // A pointer moving between nodes inside the window never emits it.
+    handleOSInput(&engine, .{ .event_type = .mouse_move, .x = 5, .y = 5 });
+    try std.testing.expectEqual(@as(u32, 2), seen.left);
 }
 
 test "Focus scope traps Tab inside the panel and pop restores the focus" {
@@ -4322,7 +4261,7 @@ fn hoverRemountScenario(case: HoverCase) !void {
             try fx.build(1, .{});
             try std.testing.expect(btn.root != old_root);
             // The replacement under the still pointer is the hovered node...
-            try std.testing.expectEqual(@as(?reg.NodeId, btn.root), engine.hovered_node);
+            try std.testing.expectEqual(@as(?reg.NodeId, btn.root), engine.pointer.hovered);
             try std.testing.expect(btn.hovered.peek());
             // ...and gets the leave when the pointer moves onto the sibling.
             const sg = engine.registry.getNode(fx.sibling).?.geometry;
