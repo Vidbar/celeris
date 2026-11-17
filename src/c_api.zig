@@ -3731,6 +3731,41 @@ test "hover_within: hovered over its visible subtree, not over the part an ances
     engine.last_pointer = .{ .x = 190, .y = 190 };
     handleOSInput(&engine, .{ .event_type = .mouse_leave });
     try std.testing.expectEqual(@as(u32, 2), EvLog.count(.mouse_leave, overlay));
+
+    // The flag toggled while hovered: every transition is leave→enter, so the
+    // node always ends up entered (enters − leaves == 1) and never doubled.
+    move(&engine, 190, 190);
+    try std.testing.expectEqual(@as(u32, 3), EvLog.count(.mouse_enter, overlay));
+    try engine.store.setModifier(overlay, .hover_within, .{ .number = 0 });
+    move(&engine, 191, 191);
+    try std.testing.expectEqual(@as(u32, 3), EvLog.count(.mouse_leave, overlay));
+    try std.testing.expectEqual(@as(u32, 4), EvLog.count(.mouse_enter, overlay));
+    try engine.store.setModifier(overlay, .hover_within, .{ .number = 1 });
+    move(&engine, 192, 192);
+    try std.testing.expectEqual(@as(u32, 4), EvLog.count(.mouse_leave, overlay));
+    try std.testing.expectEqual(@as(u32, 5), EvLog.count(.mouse_enter, overlay));
+}
+
+test "hover_within off: a hoverable child still takes the hover away (unchanged default)" {
+    var engine: EngineState = undefined;
+    engine.init(true, .{});
+    defer engine.deinit();
+    const sa = engine.store.stringAllocator();
+    const root = try testBox(&engine, reg.NULL_NODE, 0, 0, 500, 500);
+    const box = try testBox(&engine, root, 100, 100, 100, 100);
+    try engine.store.setModifier(box, .hoverable, .{ .string = try sa.dupe(u8, "box") });
+    const link = try testBox(&engine, box, 110, 110, 20, 20);
+    try engine.store.setModifier(link, .hoverable, .{ .string = try sa.dupe(u8, "link") });
+    const all: renderer_mod.ClipRect = .{ .x = 0, .y = 0, .w = 500, .h = 500 };
+    try engine.hit_list.append(.{ .id = link, .z_index = 0, .draw_order = 1, .clip_rect = all });
+    try engine.hit_list.append(.{ .id = box, .z_index = 0, .draw_order = 0, .clip_rect = all });
+    EvLog.reset();
+    engine.event_callback = EvLog.record;
+    handleOSInput(&engine, .{ .event_type = .mouse_move, .x = 150, .y = 150 });
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_enter, box));
+    handleOSInput(&engine, .{ .event_type = .mouse_move, .x = 115, .y = 115 });
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_leave, box));
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_enter, link));
 }
 
 test "captures_tab absent: Tab/Shift+Tab move focus and never reach the node" {

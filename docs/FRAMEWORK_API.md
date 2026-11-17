@@ -1454,8 +1454,8 @@ modifiers for you; prefer them. Delivery follows the
   a time.
 - `try b.hoverWithin(node)` — makes a `hoverable` node hovered while the pointer is over
   **any part of its subtree** (CSS `:hover`), so a hoverable child (a link, a button)
-  no longer takes its hover away: both are hovered at once. It changes nothing without
-  `hoverable`. "Over" is decided by the same hit-test that routes clicks (z-order,
+  no longer takes its hover away: both are hovered at once. It also stops taking the
+  hover from a hoverable ancestor of its own. It changes nothing without `hoverable`. "Over" is decided by the same hit-test that routes clicks (z-order,
   `overflow_hidden` clipping, `pointer_events_none`): if an ancestor clips the box, the
   hidden part is not over it. Use this to know whether the pointer is over your own
   floating box (a hover card, a popup) instead of comparing coordinates with its

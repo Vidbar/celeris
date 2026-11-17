@@ -228,7 +228,8 @@ pub const ModifierKey = enum {
     /// Modifies a `hoverable` node: it is hovered while the pointer is over
     /// ANY part of its subtree (CSS `:hover`), instead of only while it is the
     /// nearest hoverable ancestor of the hit. Hoverable descendants no longer
-    /// steal its hover — both are hovered at once. Decided by the same hit-test
+    /// steal its hover — both are hovered at once — and it does not take the
+    /// hover from a plain hoverable ancestor either. Decided by the same hit-test
     /// that routes clicks (z-order, `overflow_hidden` clipping,
     /// `pointer_events_none`), so a part of the subtree clipped away by an
     /// ancestor is not "inside". Without `hoverable` it does nothing (there is

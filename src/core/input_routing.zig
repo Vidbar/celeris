@@ -143,13 +143,20 @@ pub const Router = struct {
             }
         }
         std.mem.reverse(reg.NodeId, within[0..within_len]); // outermost first
-        self.setWithin(within[0..within_len], x, y);
 
-        if (self.state.hovered == hit_hoverable) return;
-        if (self.state.hovered) |old_hover| {
-            if (self.store.getModifier(old_hover, .hoverable) != null)
-                self.emit(.mouse_leave, old_hover, self.hoverableId(old_hover), x, y, 0, 0, "", self.mods);
+        // All leaves before any enter (innermost first), so a node that moves
+        // between the two sets — its `hover_within` flag toggled while hovered
+        // — gets leave→enter and ends up entered, never the reverse.
+        const changed = self.state.hovered != hit_hoverable;
+        if (changed) {
+            if (self.state.hovered) |old_hover| {
+                if (self.store.getModifier(old_hover, .hoverable) != null)
+                    self.emit(.mouse_leave, old_hover, self.hoverableId(old_hover), x, y, 0, 0, "", self.mods);
+            }
+            self.state.hovered = null;
         }
+        self.setWithin(within[0..within_len], x, y);
+        if (!changed) return;
         self.state.hovered = hit_hoverable;
         if (self.state.hovered) |new_hover| {
             if (self.store.getModifier(new_hover, .hoverable) != null)
