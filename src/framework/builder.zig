@@ -905,6 +905,19 @@ pub const UIBuilder = struct {
         try self.store.setModifier(id, .no_focus_ring, .{ .number = 1 });
     }
 
+    /// A press on this node or its subtree leaves focus where it is (events
+    /// still route normally) — see `ModifierKey.no_focus_on_click`.
+    pub fn noFocusOnClick(self: *UIBuilder, id: NodeId) !void {
+        try self.store.setModifier(id, .no_focus_on_click, .{ .number = 1 });
+    }
+
+    /// This hoverable node stays hovered while the pointer is anywhere over
+    /// its (visible) subtree, even over hoverable descendants — see
+    /// `ModifierKey.hover_within`. Combine with `hoverable` / `on_hover`.
+    pub fn hoverWithin(self: *UIBuilder, id: NodeId) !void {
+        try self.store.setModifier(id, .hover_within, .{ .number = 1 });
+    }
+
     pub fn nodeId(self: *UIBuilder, id: NodeId, label: []const u8) !void {
         const owned = try self.store.stringAllocator().dupe(u8, label);
         try self.store.setModifier(id, .id, .{ .string = owned });

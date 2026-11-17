@@ -1452,6 +1452,23 @@ modifiers for you; prefer them. Delivery follows the
   goes to the **nearest hoverable ancestor-or-self** of the node under the pointer, so
   moving between children of one hoverable box sends nothing; only one node is hovered at
   a time.
+- `try b.hoverWithin(node)` — makes a `hoverable` node hovered while the pointer is over
+  **any part of its subtree** (CSS `:hover`), so a hoverable child (a link, a button)
+  no longer takes its hover away: both are hovered at once. It changes nothing without
+  `hoverable`. "Over" is decided by the same hit-test that routes clicks (z-order,
+  `overflow_hidden` clipping, `pointer_events_none`): if an ancestor clips the box, the
+  hidden part is not over it. Use this to know whether the pointer is over your own
+  floating box (a hover card, a popup) instead of comparing coordinates with its
+  layout rect in an `onGlobal` handler, which ignores clipping and can disagree with
+  where clicks actually go. Leaving the window sends its `mouse_leave` too.
+- `try b.noFocusOnClick(node)` — a press on this node or anything inside it leaves
+  keyboard focus where it is. Normally a press focuses the nearest `focusable`
+  ancestor of the hit, or clears focus when there is none; this node stops that walk.
+  Everything else is unchanged: the node is hit, gets `mouse_down` and `click`, and a
+  `focusable` *inside* it still takes focus when clicked. Use it on a floating box shown
+  next to a focused widget (a hover card, a tooltip with selectable text) so clicking
+  the box does not take keys away from the widget (Escape to close keeps working).
+  Applies to right presses as well.
 - `try b.tooltip(node, "text")` — a tooltip shown after a hover dwell, rendered by the
   app's `TooltipHost`. Same as the `.tooltip` box prop, but usable on a node that already
   exists. It also makes the node hoverable with an id of its own, **replacing** any

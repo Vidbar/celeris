@@ -28,6 +28,9 @@ pub const PointerState = struct {
     /// the ones that got `mouse_down` and must get the matching `mouse_up`.
     pressed: [MAX_PRESSED]reg.NodeId = undefined,
     pressed_len: usize = 0,
+    /// `hover_within` hoverables whose subtree holds the hit, outermost first.
+    within: [MAX_PRESSED]reg.NodeId = undefined,
+    within_len: usize = 0,
 };
 
 /// One input event's view of the world. Cheap to build per event.
@@ -117,18 +120,31 @@ pub const Router = struct {
     /// new one. The single hover funnel: pointer motion and the post-rebuild
     /// recheck share it.
     pub fn updateHover(self: Router, top_hit: ?reg.NodeId, x: f32, y: f32) void {
+        // One walk up from the hit: the nearest plain hoverable (exclusive
+        // hover) and every `hover_within` hoverable (subtree hover).
         var hit_hoverable: ?reg.NodeId = null;
+        var within: [MAX_PRESSED]reg.NodeId = undefined;
+        var within_len: usize = 0;
         if (top_hit) |hit_id| {
             var current_id: reg.NodeId = hit_id;
             while (current_id != reg.NULL_NODE) {
                 if (self.store.getModifier(current_id, .hoverable)) |_| {
-                    hit_hoverable = current_id;
-                    break;
+                    if (self.store.modifierFlag(current_id, .hover_within)) {
+                        if (within_len < MAX_PRESSED) {
+                            within[within_len] = current_id;
+                            within_len += 1;
+                        }
+                    } else if (hit_hoverable == null) {
+                        hit_hoverable = current_id;
+                    }
                 }
                 const node = self.registry.getNode(current_id) orelse break;
                 current_id = node.parent;
             }
         }
+        std.mem.reverse(reg.NodeId, within[0..within_len]); // outermost first
+        self.setWithin(within[0..within_len], x, y);
+
         if (self.state.hovered == hit_hoverable) return;
         if (self.state.hovered) |old_hover| {
             if (self.store.getModifier(old_hover, .hoverable) != null)
@@ -138,6 +154,29 @@ pub const Router = struct {
         if (self.state.hovered) |new_hover| {
             if (self.store.getModifier(new_hover, .hoverable) != null)
                 self.emit(.mouse_enter, new_hover, self.hoverableId(new_hover), x, y, 0, 0, "", self.mods);
+        }
+    }
+
+    /// Replaces the `hover_within` set: mouse_leave to the nodes that left it
+    /// (innermost first), then mouse_enter to the ones that joined (outermost
+    /// first) — the DOM's enter/leave order.
+    fn setWithin(self: Router, new: []const reg.NodeId, x: f32, y: f32) void {
+        var old: [MAX_PRESSED]reg.NodeId = undefined;
+        const old_len = self.state.within_len;
+        @memcpy(old[0..old_len], self.state.within[0..old_len]);
+        @memcpy(self.state.within[0..new.len], new);
+        self.state.within_len = new.len;
+        var i = old_len;
+        while (i > 0) {
+            i -= 1;
+            const id = old[i];
+            if (std.mem.indexOfScalar(reg.NodeId, new, id) != null) continue;
+            if (self.registry.getNode(id) == null) continue;
+            self.emit(.mouse_leave, id, self.hoverableId(id), x, y, 0, 0, "", self.mods);
+        }
+        for (new) |id| {
+            if (std.mem.indexOfScalar(reg.NodeId, old[0..old_len], id) != null) continue;
+            self.emit(.mouse_enter, id, self.hoverableId(id), x, y, 0, 0, "", self.mods);
         }
     }
 
@@ -154,6 +193,7 @@ pub const Router = struct {
     /// then the target-less `pointer_left_window`. `x`/`y` are the last known
     /// in-window position.
     pub fn pointerLeftWindow(self: Router, x: f32, y: f32) void {
+        self.setWithin(&.{}, x, y);
         if (self.state.hovered) |old_hover| {
             if (self.store.getModifier(old_hover, .hoverable) != null)
                 self.emit(.mouse_leave, old_hover, self.hoverableId(old_hover), x, y, 0, 0, "", self.mods);
@@ -240,6 +280,13 @@ pub const Router = struct {
         var hover_cleared = false;
         if (self.state.hovered == id) {
             self.state.hovered = null;
+            hover_cleared = true;
+            self.emit(.mouse_leave, id, "", x, y, 0, 0, "", 0);
+        }
+        const wl = self.state.within_len;
+        if (std.mem.indexOfScalar(reg.NodeId, self.state.within[0..wl], id)) |w| {
+            std.mem.copyForwards(reg.NodeId, self.state.within[w .. wl - 1], self.state.within[w + 1 .. wl]);
+            self.state.within_len = wl - 1;
             hover_cleared = true;
             self.emit(.mouse_leave, id, "", x, y, 0, 0, "", 0);
         }

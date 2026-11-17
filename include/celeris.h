@@ -263,7 +263,8 @@ int32_t celeris_node_remove(int32_t engine_id, uint32_t node_id);
  * `fill` for width and height only;
  * numbers; keywords such as `row`, `center`, `space-between`; booleans
  * `true`/`false`/`1`/`0` (for the flags overflow_hidden, pointer_events_none,
- * no_drag, captures_tab and no_focus_ring, `0` is off);
+ * no_drag, captures_tab, no_focus_ring, no_focus_on_click and hover_within,
+ * `0` is off);
  * anything else verbatim. The key decides the type (`"1"` is a number for
  * opacity, 1px for radius). Unknown keys and values the key cannot use (a
  * keyword for radius, `%` for gap) return -1; see celeris_last_error(). */

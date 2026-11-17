@@ -9,6 +9,21 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No BREAKING changes. No C-ABI surface change (new modifier key strings only).
+
+### Added
+
+- `b.noFocusOnClick(node)` / modifier `no_focus_on_click`: a press on the node
+  or its subtree leaves keyboard focus where it is; hit-testing, `mouse_down`
+  and `click` are unchanged, and a `focusable` inside it still takes focus.
+  For floating boxes shown beside a focused widget.
+- `b.hoverWithin(node)` / modifier `hover_within`: a `hoverable` node stays
+  hovered while the pointer is over any visible part of its subtree, hoverable
+  descendants included. Decided by the routing hit-test, so the part of the
+  subtree an `overflow_hidden` ancestor clips away does not count.
+
 ## 0.5.0 — 2026-11-17
 
 No BREAKING changes. `CELERIS_ABI_VERSION` is now 9 (additive).

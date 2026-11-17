@@ -216,6 +216,24 @@ pub const ModifierKey = enum {
     /// Value: `.number = 1` (0 turns it back off). A widget using it MUST
     /// draw its own visible focus indicator (WCAG 2.4.7).
     no_focus_ring,
+    /// A press on THIS node or its subtree leaves keyboard focus where it is —
+    /// the focus counterpart of `pointer_events_none`. The click-to-focus walk
+    /// stops here: a `focusable` met before it (the node itself or a
+    /// descendant on the hit path) still takes focus; nothing above it does,
+    /// and the miss does not blur either. Hit-testing, `mouse_down`, `click`
+    /// and press capture are unchanged. For floating boxes (hover cards,
+    /// popups) shown beside a focused widget, so clicking them keeps keys
+    /// flowing to it. Applies to left and right presses. Value: `.number = 1`.
+    no_focus_on_click,
+    /// Modifies a `hoverable` node: it is hovered while the pointer is over
+    /// ANY part of its subtree (CSS `:hover`), instead of only while it is the
+    /// nearest hoverable ancestor of the hit. Hoverable descendants no longer
+    /// steal its hover — both are hovered at once. Decided by the same hit-test
+    /// that routes clicks (z-order, `overflow_hidden` clipping,
+    /// `pointer_events_none`), so a part of the subtree clipped away by an
+    /// ancestor is not "inside". Without `hoverable` it does nothing (there is
+    /// no action id to deliver to). Value: `.number = 1`.
+    hover_within,
 };
 
 const layout_count = @typeInfo(LayoutKey).@"enum".fields.len;

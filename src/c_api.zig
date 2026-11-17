@@ -802,6 +802,28 @@ fn makeEventCtx(engine: *EngineState) events_mod.EventContext {
     };
 }
 
+const ClickFocus = union(enum) {
+    /// Focus the nearest focusable ancestor-or-self of the hit.
+    focus: reg.NodeId,
+    /// Nothing focusable on the hit path (or nothing hit).
+    clear,
+    /// A `no_focus_on_click` node was met before any focusable: leave focus alone.
+    keep,
+};
+
+/// The click-to-focus walk shared by left and right presses: from the hit up to
+/// the nearest `focusable`, stopping at a `no_focus_on_click` node.
+fn clickFocusTarget(engine: *EngineState, x: f32, y: f32) ClickFocus {
+    var cur = events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, x, y) orelse return .clear;
+    while (cur != reg.NULL_NODE) {
+        if (engine.store.getModifier(cur, .focusable) != null) return .{ .focus = cur };
+        if (engine.store.modifierFlag(cur, .no_focus_on_click)) return .keep;
+        const node = engine.registry.getNode(cur) orelse break;
+        cur = node.parent;
+    }
+    return .clear;
+}
+
 /// Hit-tests (x,y) against the current frame and, on a hit, dispatches
 /// `event_type` (capture→bubble via the given modifier keys) to that node.
 /// No-op when nothing is under the pointer.
@@ -2006,25 +2028,15 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
         // global_mouse_down, press capture, mouse_down capture→bubble (shared).
         _ = inputRouter(engine).mouseDown(event.x, event.y);
 
-        // Focus handling
-        var new_focus: ?reg.NodeId = null;
-        if (events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, event.x, event.y)) |hit_id| {
-            var current_id: reg.NodeId = hit_id;
-            while (current_id != reg.NULL_NODE) {
-                if (engine.store.getModifier(current_id, .focusable)) |_| {
-                    new_focus = current_id;
-                    break;
-                }
-                const node = engine.registry.getNode(current_id) orelse break;
-                current_id = node.parent;
-            }
-        }
-
         // One funnel for every focus move (Tab, scopes, UIA SetFocus all share it):
         // dirties the ring, toggles IME, emits blur/focus and raises the UIA focus
         // event. The click carries no coordinates into blur/focus — neither does Tab.
         // `.pointer`: a mouse click never shows the focus-visible ring.
-        moveFocus(engine, new_focus, .pointer);
+        switch (clickFocusTarget(engine, event.x, event.y)) {
+            .focus => |id| moveFocus(engine, id, .pointer),
+            .clear => moveFocus(engine, null, .pointer),
+            .keep => {},
+        }
 
         // On the 2nd+ click of a sequence, deliver a double_click to the node
         // under the pointer, carrying the click count in key_code so widgets can
@@ -2054,16 +2066,9 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
         // sees its widget focused, as in every desktop toolkit. A miss leaves the
         // focus alone (unlike a left click), so right-clicking empty chrome does
         // not blur the editor.
-        if (events_mod.hitTest(engine.hit_list.items, &engine.registry, &engine.store, event.x, event.y)) |hit_id| {
-            var current_id: reg.NodeId = hit_id;
-            while (current_id != reg.NULL_NODE) {
-                if (engine.store.getModifier(current_id, .focusable)) |_| {
-                    moveFocus(engine, current_id, .pointer);
-                    break;
-                }
-                const node = engine.registry.getNode(current_id) orelse break;
-                current_id = node.parent;
-            }
+        switch (clickFocusTarget(engine, event.x, event.y)) {
+            .focus => |id| moveFocus(engine, id, .pointer),
+            .clear, .keep => {},
         }
 
         hitAndDispatch(engine, event.x, event.y, .right_mouse_down, .right_clickable_capture, .right_clickable);
@@ -3585,6 +3590,147 @@ test "no_focus_ring (via C-ABI string) leaves focus, Tab traversal and key routi
     try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
     try std.testing.expectEqual(events_mod.FocusHighlightMode.keyboard, f.engine.focus_highlight_mode);
     try std.testing.expectEqual(@as(u32, 0), f.seen.tabs);
+}
+
+// Raw event log for the no_focus_on_click / hover_within tests.
+const EvLog = struct {
+    var buf: [64]struct { t: c_int, n: u32 } = undefined;
+    var len: usize = 0;
+    fn record(ev: *const events_mod.CelerisEvent) callconv(.c) void {
+        if (len < buf.len) {
+            buf[len] = .{ .t = ev.event_type, .n = ev.node_id };
+            len += 1;
+        }
+    }
+    fn count(t: events_mod.EventType, n: reg.NodeId) u32 {
+        var c: u32 = 0;
+        for (buf[0..len]) |e| {
+            if (e.t == @intFromEnum(t) and e.n == n) c += 1;
+        }
+        return c;
+    }
+    fn reset() void {
+        len = 0;
+    }
+};
+
+fn testBox(engine: *EngineState, parent: reg.NodeId, x: f32, y: f32, w: f32, h: f32) !reg.NodeId {
+    const id = try engine.registry.createNode(.box);
+    try engine.store.registerNode(id);
+    if (parent != reg.NULL_NODE) engine.registry.appendChild(parent, id);
+    engine.registry.getNode(id).?.geometry = .{ .x = x, .y = y, .width = w, .height = h };
+    return id;
+}
+
+// Focusable A has focus; overlay B is its sibling (clickable, not focusable),
+// optionally with no_focus_on_click; C is a focusable inside B.
+const NoFocusClickFixture = struct {
+    engine: EngineState = undefined,
+    a: reg.NodeId = 0,
+    b: reg.NodeId = 0,
+    c: reg.NodeId = 0,
+
+    fn setUp(self: *NoFocusClickFixture, flag: bool) !void {
+        self.engine.init(true, .{});
+        const sa = self.engine.store.stringAllocator();
+        const root = try testBox(&self.engine, reg.NULL_NODE, 0, 0, 500, 500);
+        self.a = try testBox(&self.engine, root, 10, 10, 50, 20);
+        try self.engine.store.setModifier(self.a, .focusable, .{ .string = try sa.dupe(u8, "a") });
+        self.b = try testBox(&self.engine, root, 100, 100, 100, 100);
+        try self.engine.store.setModifier(self.b, .clickable, .{ .string = try sa.dupe(u8, "b") });
+        self.c = try testBox(&self.engine, self.b, 150, 150, 20, 20);
+        try self.engine.store.setModifier(self.c, .focusable, .{ .string = try sa.dupe(u8, "c") });
+        if (flag) {
+            // Same key + value parsing `celeris_node_add_modifier` runs.
+            const key = prop_parse.parseKey(props.ModifierKey, "no_focus_on_click") orelse return error.KeyNotParsed;
+            try self.engine.store.setModifier(self.b, key, try prop_parse.parseModifier(&self.engine.store, key, "1"));
+        }
+        const all: renderer_mod.ClipRect = .{ .x = 0, .y = 0, .w = 500, .h = 500 };
+        try self.engine.hit_list.append(.{ .id = self.c, .z_index = 0, .draw_order = 2, .clip_rect = all });
+        try self.engine.hit_list.append(.{ .id = self.b, .z_index = 0, .draw_order = 1, .clip_rect = all });
+        try self.engine.hit_list.append(.{ .id = self.a, .z_index = 0, .draw_order = 0, .clip_rect = all });
+        EvLog.reset();
+        self.engine.event_callback = EvLog.record;
+        moveFocus(&self.engine, self.a, .programmatic);
+    }
+    fn click(self: *NoFocusClickFixture, x: f32, y: f32) void {
+        handleOSInput(&self.engine, .{ .event_type = .mouse_down, .x = x, .y = y });
+        handleOSInput(&self.engine, .{ .event_type = .mouse_up, .x = x, .y = y });
+    }
+};
+
+test "no_focus_on_click: a click on the overlay keeps focus and still delivers mouse_down + click" {
+    var f: NoFocusClickFixture = .{};
+    try f.setUp(true);
+    defer f.engine.deinit();
+    f.click(110, 110);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_down, f.b));
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.click, f.b));
+    try std.testing.expectEqual(@as(u32, 0), EvLog.count(.blur, f.a));
+    // Right press: same rule.
+    handleOSInput(&f.engine, .{ .event_type = .right_mouse_down, .x = 110, .y = 110 });
+    try std.testing.expectEqual(@as(?reg.NodeId, f.a), f.engine.focused_node);
+    // A focusable inside the overlay is met first on the walk: it takes focus.
+    f.click(155, 155);
+    try std.testing.expectEqual(@as(?reg.NodeId, f.c), f.engine.focused_node);
+}
+
+test "no_focus_on_click absent: the same click clears focus as before" {
+    var f: NoFocusClickFixture = .{};
+    try f.setUp(false);
+    defer f.engine.deinit();
+    f.click(110, 110);
+    try std.testing.expectEqual(@as(?reg.NodeId, null), f.engine.focused_node);
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_down, f.b));
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.click, f.b));
+}
+
+test "hover_within: hovered over its visible subtree, not over the part an ancestor clips away" {
+    var engine: EngineState = undefined;
+    engine.init(true, .{});
+    defer engine.deinit();
+    const sa = engine.store.stringAllocator();
+    const root = try testBox(&engine, reg.NULL_NODE, 0, 0, 500, 500);
+    const host = try testBox(&engine, root, 0, 0, 200, 200);
+    try engine.store.setModifier(host, .overflow_hidden, .{ .number = 1 });
+    // The overlay sticks out of the clipping host: (150..250) vs host (0..200).
+    const overlay = try testBox(&engine, host, 150, 150, 100, 100);
+    try engine.store.setModifier(overlay, .hoverable, .{ .string = try sa.dupe(u8, "box") });
+    const key = prop_parse.parseKey(props.ModifierKey, "hover_within") orelse return error.KeyNotParsed;
+    try engine.store.setModifier(overlay, key, try prop_parse.parseModifier(&engine.store, key, "1"));
+    const link = try testBox(&engine, overlay, 160, 160, 20, 20);
+    try engine.store.setModifier(link, .hoverable, .{ .string = try sa.dupe(u8, "link") });
+    const clip: renderer_mod.ClipRect = .{ .x = 0, .y = 0, .w = 200, .h = 200 };
+    try engine.hit_list.append(.{ .id = link, .z_index = 0, .draw_order = 2, .clip_rect = clip });
+    try engine.hit_list.append(.{ .id = overlay, .z_index = 0, .draw_order = 1, .clip_rect = clip });
+    try engine.hit_list.append(.{ .id = host, .z_index = 0, .draw_order = 0, .clip_rect = .{ .x = 0, .y = 0, .w = 500, .h = 500 } });
+    EvLog.reset();
+    engine.event_callback = EvLog.record;
+    const move = struct {
+        fn f(e: *EngineState, x: f32, y: f32) void {
+            handleOSInput(e, .{ .event_type = .mouse_move, .x = x, .y = y });
+        }
+    }.f;
+
+    // Onto the hoverable child: both are hovered, the overlay keeps its hover.
+    move(&engine, 165, 165);
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_enter, overlay));
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_enter, link));
+    // Off the child, still in the overlay's visible part: only the child leaves.
+    move(&engine, 190, 190);
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_leave, link));
+    try std.testing.expectEqual(@as(u32, 0), EvLog.count(.mouse_leave, overlay));
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_enter, overlay));
+    // Into the overlay's clipped-away part: the hit-test says "not the overlay".
+    move(&engine, 230, 230);
+    try std.testing.expectEqual(@as(u32, 1), EvLog.count(.mouse_leave, overlay));
+    // Back in, then out of the window: one enter, one leave.
+    move(&engine, 190, 190);
+    try std.testing.expectEqual(@as(u32, 2), EvLog.count(.mouse_enter, overlay));
+    engine.last_pointer = .{ .x = 190, .y = 190 };
+    handleOSInput(&engine, .{ .event_type = .mouse_leave });
+    try std.testing.expectEqual(@as(u32, 2), EvLog.count(.mouse_leave, overlay));
 }
 
 test "captures_tab absent: Tab/Shift+Tab move focus and never reach the node" {

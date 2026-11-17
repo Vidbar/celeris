@@ -84,7 +84,7 @@ pub fn layoutKind(key: props.LayoutKey) Kind {
 pub fn modifierKind(key: props.ModifierKey) Kind {
     return switch (key) {
         .disabled, .checked, .expanded, .readonly => .boolean,
-        .overflow_hidden, .pointer_events_none, .no_drag, .captures_tab, .no_focus_ring => .flag,
+        .overflow_hidden, .pointer_events_none, .no_drag, .captures_tab, .no_focus_ring, .no_focus_on_click, .hover_within => .flag,
         .virtual_focus_target => .node_ref,
         else => .string,
     };
