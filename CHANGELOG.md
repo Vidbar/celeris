@@ -23,6 +23,15 @@ No BREAKING changes. No C-ABI surface change (new modifier key strings only).
   hovered while the pointer is over any visible part of its subtree, hoverable
   descendants included. Decided by the routing hit-test, so the part of the
   subtree an `overflow_hidden` ancestor clips away does not count.
+- FRAMEWORK_API.md recipe "Floating box beside a focused widget": the two
+  modifiers plus a `global_mouse_down` handler, with no coordinate checks.
+
+### Changed
+
+- A left press re-evaluates hover at the press point before
+  `global_mouse_down`, so a press with no motion before it (touch, or a node
+  that appeared under a still pointer) sends `mouse_enter` first and sees the
+  same hover state the press is routed by.
 
 ## 0.5.0 — 2026-11-17
 

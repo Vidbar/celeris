@@ -227,6 +227,10 @@ pub const Router = struct {
     /// `mouse_down` capture→bubble at the hit. Returns the hit; focus and
     /// double-click stay with the caller.
     pub fn mouseDown(self: Router, x: f32, y: f32) ?reg.NodeId {
+        // Hover first, at the press point: a press with no motion before it (a
+        // box that appeared under a still pointer, touch/pen) still finds hover
+        // state — and `hover_within` — matching where the press lands.
+        self.updateHover(self.hitTest(x, y), x, y);
         self.emit(.global_mouse_down, reg.NULL_NODE, "", x, y, 0, 0, "", self.mods);
         self.capturePressed(x, y);
         return self.dispatchAt(x, y, .mouse_down, .clickable_capture, .clickable, 0);

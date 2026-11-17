@@ -778,6 +778,8 @@ These are load-bearing behaviours; downstream apps (node editors, canvases) rely
 - **Release goes where the press went (implicit pointer capture).** On release the engine emits the global `mouse_up` (no node, for drag-follow handlers), then a node-targeted `mouse_up` to every clickable node that received the `mouse_down` — even if the pointer is now elsewhere — and only then the `click` to the node under the pointer. A node removed by a rebuild between press and release gets its `mouse_up` at removal time. So `on_press` / `on_mouse_up` state (`Button.pressed`) can't get stuck, including when the click handler re-mounts the button. `Button`/`IconButton` also drop `pressed` on `mouse_leave`.
 - **Hover survives rebuilds.** If a rebuild removes the hovered node (e.g. a `Button` whose click rebuilds its parent is re-created), that node receives its `mouse_leave` **at removal time** — a removed node is never hovered — so hover-driven state (`Button.hovered`) resets even if the pointer leaves before the next frame or the re-mounted widget is no longer under it. After the next frame is baked, hover is re-evaluated at the last pointer position: a replacement still under the pointer gets `mouse_enter`, and its own `mouse_leave` later. Note that such a `mouse_leave` handler can run *during* a rebuild; keep hover handlers to state writes (the `on_hover` signal-setter pattern).
 - **Pointer left the window.** A node's `mouse_leave` fires both when the pointer moves onto another node and when it leaves the window, so on its own it can't tell the two apart. When the OS reports the pointer leaving the window, the engine first sends the hovered node its `mouse_leave` (if any), then a target-less `pointer_left_window` (`node_id == 0`) that reaches every `router.onGlobal` handler — once per OS leave, hovered node or not. `ev.x` / `ev.y` hold the last known in-window pointer position (Win32 reports none with the leave). C hosts receive `CELERIS_EVENT_POINTER_LEFT_WINDOW`.
+- **A press focuses the nearest focusable ancestor-or-self of the hit**, after its `mouse_down`; with none, a left press clears focus and a right press leaves it alone. A `noFocusOnClick` node on the way up stops the walk and focus stays where it was (see [Floating box beside a focused widget](#floating-box-beside-a-focused-widget-hover-card-popup)).
+- **Hover is refreshed at the press point.** Before `global_mouse_down`, hover (`mouse_enter`/`mouse_leave`, `hoverWithin` included) is re-evaluated at the press position, so a press with no motion before it — touch, or a node that appeared under a still pointer — sees the same hover state the press is routed by.
 
 ### Keys (`fw.events.Key`, `ev.key()`)
 
@@ -930,6 +932,74 @@ b.close(); // list
 ```
 
 **Promotion criterion.** When a *second* real consumer needs this, move `KvRow` into `src/framework/` as a proper widget with lifted props (`values: []const Kv`, a `data_rev` for live updates), following the same patterns as the rest of the suite (caller-owned signals, no raw fn pointers, `mountOwned`). Until then, keep it as this recipe — a local component is cheaper than a premature widget.
+
+### Floating box beside a focused widget (hover card, popup)
+
+A widget that keeps keyboard focus (an editor) shows a floating box as a **sibling**
+of its focusable node: a hover card with selectable text, a popup with links. Three
+things have to hold, and each one is declared on the box rather than computed in a
+handler:
+
+1. **Clicking the box keeps focus on the widget**, so keys (Escape to close, keys
+   the box reacts to) keep arriving. → `b.noFocusOnClick(box)`.
+2. **The widget knows whether the pointer is over the box**, including over links
+   inside it, and not over a part of the box that a host's `overflow_hidden` clips
+   away. → `hoverable` + `b.hoverWithin(box)`, read through a `Signal(bool)`.
+3. **A press outside the box closes it.** → an `onGlobal` handler for
+   `global_mouse_down` that reads that same signal.
+
+```zig
+const HoverCard = struct {
+    open: fw.signals.Signal(bool),
+    over_box: fw.signals.Signal(bool),
+    card_x: f32 = 0,
+    card_y: f32 = 0,
+
+    pub fn build(self: *HoverCard, ctx: *fw.component.BuildContext) !void {
+        const editor = try ctx.boxNode(.{
+            .focusable = true,
+            .on_key = ctx.handler(self, onKey), // Escape arrives: focus never left
+        }, .{});
+        if (self.open.get()) {
+            const box = try ctx.boxNode(.{
+                .on_hover = ctx.signalSetter(&self.over_box),
+            }, .{ ... });
+            try ctx.builder.positionAbsolute(box, self.card_x, self.card_y);
+            try ctx.builder.zIndex(box, 10);
+            try ctx.builder.hoverWithin(box);     // hovered over its whole visible subtree
+            try ctx.builder.noFocusOnClick(box);  // a press on it leaves focus alone
+        }
+        // Owner = one of your own nodes: replaced on rebuild, dropped on unmount.
+        if (ctx.router) |r| try r.onGlobal(editor, self, onGlobal);
+    }
+
+    fn onGlobal(self: *HoverCard, ev: fw.events.Event) void {
+        if (std.mem.eql(u8, ev.name, "global_mouse_down") and !self.over_box.peek())
+            self.open.set(false);
+    }
+    fn onKey(self: *HoverCard, ev: fw.events.Event) void {
+        const key = ev.key() orelse return;
+        if (key == .escape) self.open.set(false);
+    }
+};
+```
+
+Why this is exact, and needs no coordinates:
+
+- `over_box` comes from the same hit-test that routes clicks (z-order,
+  `overflow_hidden` clipping, `pointer_events_none`). Never compare the pointer
+  against the box's `ctx.measuredRect`: the layout rect ignores clipping, so it can
+  call a point "inside" that the click actually lands beside.
+- Hover is refreshed at the press point **before** `global_mouse_down` is sent, so
+  the signal is correct even when the box appeared under a pointer that has not
+  moved since, or with touch input.
+- Leaving the window sends the box's `mouse_leave` (the signal turns false); if you
+  also need to know it was the window that was left, see `pointer_left_window` in
+  the [delivery rules](#pointer-event-delivery-rules).
+- A `focusable` *inside* the box (a text field in a popup) still takes focus when
+  clicked; `noFocusOnClick` only stops the walk at the box itself.
+- Links inside the box can be `hoverable` with their own `on_hover`; with
+  `hoverWithin` they no longer take the box's hover away.
 
 ## Multithreading and Background Tasks
 
