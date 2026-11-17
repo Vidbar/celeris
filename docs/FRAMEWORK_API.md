@@ -288,7 +288,7 @@ try q.clickAtWindow(60, 60);           // mouse_down + mouse_up + click at what 
 _ = try q.mouseDownAtWindow(60, 60, 0); // returns the hit node
 try q.mouseUpAtWindow(60, 60, 0, 1);   // last arg: click count carried by `click`
 try q.wheelAtWindow(60, 60, 1, 0);     // dy, dx → scroll / scroll_h
-_ = try q.moveToWindow(300, 150);      // global mouse_move, then mouse_leave / mouse_enter
+_ = try q.moveToWindow(300, 150);      // mouse_leave / mouse_enter, then the global mouse_move
 try q.leaveWindow();                   // hovered node's mouse_leave, then pointer_left_window
 ```
 

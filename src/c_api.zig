@@ -1997,7 +1997,7 @@ fn handleOSInput(ctx: ?*anyopaque, event_in: platform_mod.InputEvent) void {
     }
 
     if (event.event_type == .mouse_move) {
-        // Global mouse_move + hover (shared routing), then the cursor for what's
+        // Hover, then the global mouse_move (shared routing), then the cursor for what's
         // under the pointer (engine-only).
         const top_hit = inputRouter(engine).mouseMove(event.x, event.y);
         if (engine.window != null) {

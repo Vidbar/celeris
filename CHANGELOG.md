@@ -19,7 +19,9 @@ No BREAKING changes. No C-ABI surface change.
   included) before emitting the global `mouse_move`, the same order a press
   already uses. An `onGlobal` handler reading hover state now sees it for the
   current position instead of the previous one. Before, the global
-  `mouse_move` came first.
+  `mouse_move` came first. C hosts see the same new order in the event
+  callback (`CELERIS_EVENT_MOUSE_ENTER` / `_LEAVE` before the target-less
+  `CELERIS_EVENT_MOUSE_MOVE`).
 
 ## 0.6.0 — 2026-11-17
 
