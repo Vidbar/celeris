@@ -3766,6 +3766,31 @@ test "a press with no prior motion refreshes hover before global_mouse_down" {
     try std.testing.expectEqual(@as(c_int, @intFromEnum(events_mod.EventType.global_mouse_down)), EvLog.buf[1].t);
 }
 
+test "pointer motion updates hover before the global mouse_move" {
+    var engine: EngineState = undefined;
+    engine.init(true, .{});
+    defer engine.deinit();
+    const sa = engine.store.stringAllocator();
+    const root = try testBox(&engine, reg.NULL_NODE, 0, 0, 500, 500);
+    const box = try testBox(&engine, root, 100, 100, 100, 100);
+    try engine.store.setModifier(box, .hoverable, .{ .string = try sa.dupe(u8, "box") });
+    try engine.store.setModifier(box, .hover_within, .{ .number = 1 });
+    try engine.hit_list.append(.{ .id = box, .z_index = 0, .draw_order = 0, .clip_rect = .{ .x = 0, .y = 0, .w = 500, .h = 500 } });
+    EvLog.reset();
+    engine.event_callback = EvLog.record;
+    const move: c_int = @intFromEnum(events_mod.EventType.mouse_move);
+    // Entering: mouse_enter, then the global mouse_move.
+    handleOSInput(&engine, .{ .event_type = .mouse_move, .x = 150, .y = 150 });
+    try std.testing.expectEqual(@as(usize, 2), EvLog.len);
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(events_mod.EventType.mouse_enter)), EvLog.buf[0].t);
+    try std.testing.expectEqual(move, EvLog.buf[1].t);
+    // Leaving: mouse_leave, then the global mouse_move.
+    handleOSInput(&engine, .{ .event_type = .mouse_move, .x = 300, .y = 300 });
+    try std.testing.expectEqual(@as(usize, 4), EvLog.len);
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(events_mod.EventType.mouse_leave)), EvLog.buf[2].t);
+    try std.testing.expectEqual(move, EvLog.buf[3].t);
+}
+
 test "hover_within off: a hoverable child still takes the hover away (unchanged default)" {
     var engine: EngineState = undefined;
     engine.init(true, .{});

@@ -779,7 +779,7 @@ These are load-bearing behaviours; downstream apps (node editors, canvases) rely
 - **Hover survives rebuilds.** If a rebuild removes the hovered node (e.g. a `Button` whose click rebuilds its parent is re-created), that node receives its `mouse_leave` **at removal time** — a removed node is never hovered — so hover-driven state (`Button.hovered`) resets even if the pointer leaves before the next frame or the re-mounted widget is no longer under it. After the next frame is baked, hover is re-evaluated at the last pointer position: a replacement still under the pointer gets `mouse_enter`, and its own `mouse_leave` later. Note that such a `mouse_leave` handler can run *during* a rebuild; keep hover handlers to state writes (the `on_hover` signal-setter pattern).
 - **Pointer left the window.** A node's `mouse_leave` fires both when the pointer moves onto another node and when it leaves the window, so on its own it can't tell the two apart. When the OS reports the pointer leaving the window, the engine first sends the hovered node its `mouse_leave` (if any), then a target-less `pointer_left_window` (`node_id == 0`) that reaches every `router.onGlobal` handler — once per OS leave, hovered node or not. `ev.x` / `ev.y` hold the last known in-window pointer position (Win32 reports none with the leave). C hosts receive `CELERIS_EVENT_POINTER_LEFT_WINDOW`.
 - **A press focuses the nearest focusable ancestor-or-self of the hit**, after its `mouse_down`; with none, a left press clears focus and a right press leaves it alone. A `noFocusOnClick` node on the way up stops the walk and focus stays where it was (see [Floating box beside a focused widget](#floating-box-beside-a-focused-widget-hover-card-popup)).
-- **Hover is refreshed at the press point.** Before `global_mouse_down`, hover (`mouse_enter`/`mouse_leave`, `hoverWithin` included) is re-evaluated at the press position, so a press with no motion before it — touch, or a node that appeared under a still pointer — sees the same hover state the press is routed by.
+- **Hover is updated before the global event.** On pointer motion, hover (`mouse_enter`/`mouse_leave`, `hoverWithin` included) is updated *before* the global `mouse_move`; on a left press, it is re-evaluated at the press point *before* `global_mouse_down`. So an `onGlobal` handler that reads hover state always sees it for the event's own position — also for a press with no motion before it (touch, or a node that appeared under a still pointer).
 
 ### Keys (`fw.events.Key`, `ev.key()`)
 
@@ -990,9 +990,10 @@ Why this is exact, and needs no coordinates:
   `overflow_hidden` clipping, `pointer_events_none`). Never compare the pointer
   against the box's `ctx.measuredRect`: the layout rect ignores clipping, so it can
   call a point "inside" that the click actually lands beside.
-- Hover is refreshed at the press point **before** `global_mouse_down` is sent, so
-  the signal is correct even when the box appeared under a pointer that has not
-  moved since, or with touch input.
+- Hover is updated **before** the global `mouse_move` and, at the press point,
+  before `global_mouse_down`, so the signal is correct in either handler — even
+  when the box appeared under a pointer that has not moved since, or with touch
+  input.
 - Leaving the window sends the box's `mouse_leave` (the signal turns false); if you
   also need to know it was the window that was left, see `pointer_left_window` in
   the [delivery rules](#pointer-event-delivery-rules).

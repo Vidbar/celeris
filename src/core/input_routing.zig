@@ -187,12 +187,15 @@ pub const Router = struct {
         }
     }
 
-    /// Pointer motion: the global `mouse_move` (drag-follow handlers), then the
-    /// hover update. Returns the top hit (the engine resolves the cursor from it).
+    /// Pointer motion: the hover update, then the global `mouse_move`
+    /// (drag-follow handlers) — same order as a press, so a global handler that
+    /// reads hover state (`hoverWithin`) sees it for THIS position. The hit list
+    /// is the baked frame's either way, so the hit is the same before or after
+    /// the handlers. Returns the top hit (the engine resolves the cursor from it).
     pub fn mouseMove(self: Router, x: f32, y: f32) ?reg.NodeId {
-        self.emit(.mouse_move, reg.NULL_NODE, "", x, y, 0, 0, "", self.mods);
         const top_hit = self.hitTest(x, y);
         self.updateHover(top_hit, x, y);
+        self.emit(.mouse_move, reg.NULL_NODE, "", x, y, 0, 0, "", self.mods);
         return top_hit;
     }
 

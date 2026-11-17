@@ -138,8 +138,8 @@ pub const Query = struct {
         return self.h.inputRouter(mods);
     }
 
-    /// Pointer motion to window (`x`, `y`): global `mouse_move`, then hover
-    /// (`mouse_leave` / `mouse_enter`). Returns the top hit.
+    /// Pointer motion to window (`x`, `y`): hover (`mouse_leave` /
+    /// `mouse_enter`), then the global `mouse_move`. Returns the top hit.
     pub fn moveToWindow(self: Query, x: f32, y: f32) WindowPointerError!?reg.NodeId {
         return (try self.windowRouter(x, y, 0)).mouseMove(x, y);
     }

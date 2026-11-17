@@ -9,6 +9,18 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No BREAKING changes. No C-ABI surface change.
+
+### Changed
+
+- Pointer motion updates hover (`mouse_enter` / `mouse_leave`, `hoverWithin`
+  included) before emitting the global `mouse_move`, the same order a press
+  already uses. An `onGlobal` handler reading hover state now sees it for the
+  current position instead of the previous one. Before, the global
+  `mouse_move` came first.
+
 ## 0.6.0 — 2026-11-17
 
 No BREAKING changes. No C-ABI surface change (new modifier key strings only).
