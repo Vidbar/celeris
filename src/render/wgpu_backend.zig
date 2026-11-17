@@ -1752,7 +1752,12 @@ pub const WgpuBackend = struct {
             std.mem.sort(renderer_mod.TextRun, text_runs.items, {}, TextSort.lessThan);
             var runs = std.array_list.Managed(renderer_mod.PaintRun).init(self.allocator);
             defer runs.deinit();
-            renderer_mod.planPaintRuns(prims, rect_orders, image_prims, path_prims, path_orders, text_runs.items, &runs) catch {};
+            renderer_mod.planPaintRuns(prims, rect_orders, image_prims, path_prims, path_orders, text_runs.items, &runs) catch |err| {
+                // A half-built plan would paint out of order; draw nothing this
+                // frame rather than a wrong one, and say so.
+                log.warn("planPaintRuns failed ({s}); frame skipped\n", .{@errorName(err)});
+                runs.clearRetainingCapacity();
+            };
             for (runs.items) |r| {
                 batches.append(.{
                     .batch_type = switch (r.kind) {

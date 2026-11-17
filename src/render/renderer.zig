@@ -447,6 +447,16 @@ const BakeContext = struct {
     scale: f32,
 };
 
+/// Whether a body rect (not a shadow) puts any pixel on screen, per the rect
+/// shader: fill (solid or gradient endpoint) or a border with width and alpha.
+fn bodyPaints(p: RectPrimitive) bool {
+    if (p.width <= 0.0 or p.height <= 0.0) return false;
+    if (p.color_a > 0.0) return true;
+    if (p.grad_type > 0.0 and p.c2_a > 0.0) return true;
+    const bmax = @max(@max(p.border_top, p.border_right), @max(p.border_bottom, p.border_left));
+    return bmax > 0.0 and p.border_color_a > 0.0;
+}
+
 /// Converts the UIRegistry (layout-resolved tree) into a flat list
 /// of RectPrimitives to make the instanced draw call.
 /// This is the "Primitive Baking" step of the specified pipeline.
@@ -697,7 +707,11 @@ fn bakeNodeRecursive(
 
     prim.z_index = z_val;
     // A path node emits its own stroke instances above; it has no rect body.
-    if (node.node_type != .path) {
+    // A body that paints nothing (every unstyled wrapper, every text node) is
+    // skipped too: an empty rect between two text nodes would split the text
+    // batch (planPaintRuns breaks a run at every kind change). Its order slot
+    // stays reserved, so paint order is unchanged.
+    if (node.node_type != .path and bodyPaints(prim)) {
         try ctx.sortable_rects.append(.{ .prim = prim, .z_index = z_val, .draw_order = body_order });
     }
 
@@ -817,6 +831,14 @@ pub fn planPaintRuns(
 ) !void {
     const Head = struct { z: f32, order: u32 };
     const late = std.math.maxInt(u32);
+    const consider = struct {
+        fn f(b: *?PaintKind, k: *Head, kind: PaintKind, h: Head) void {
+            if (b.* == null or h.z < k.z or (h.z == k.z and h.order < k.order)) {
+                b.* = kind;
+                k.* = h;
+            }
+        }
+    }.f;
     var ri: usize = 0;
     var ii: usize = 0;
     var pi: usize = 0;
@@ -824,14 +846,6 @@ pub fn planPaintRuns(
     while (true) {
         var best: ?PaintKind = null;
         var bk: Head = undefined;
-        const consider = struct {
-            fn f(b: *?PaintKind, k: *Head, kind: PaintKind, h: Head) void {
-                if (b.* == null or h.z < k.z or (h.z == k.z and h.order < k.order)) {
-                    b.* = kind;
-                    k.* = h;
-                }
-            }
-        }.f;
         if (ri < rects.len) consider(&best, &bk, .rect, .{ .z = rects[ri].z_index, .order = if (ri < rect_orders.len) rect_orders[ri] else late });
         if (ii < images.len) consider(&best, &bk, .image, .{ .z = images[ii].z_index, .order = images[ii].draw_order });
         if (pi < paths.len) consider(&best, &bk, .path, .{ .z = paths[pi].z_index, .order = if (pi < path_orders.len) path_orders[pi] else late });
@@ -1021,6 +1035,12 @@ test "Primitive baking" {
     try store.registerNode(btn_id);
 
     try store.setStyle(btn_id, .radius, .{ .dimension = .{ .value = 6.0, .unit = .px } });
+    try store.setStyle(box_id, .background, props.PropValue.rgbA(25, 25, 25, 1));
+    try store.setLayout(box_id, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(box_id, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
+    try store.setStyle(btn_id, .background, props.PropValue.rgbA(77, 77, 77, 1));
+    try store.setLayout(btn_id, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(btn_id, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
 
     var engine = layout.LayoutEngine.init(&registry, &store, null);
     engine.solve(box_id, 0, 0, 800, 600);
@@ -1062,6 +1082,12 @@ test "A path node emits stroke segments at its z, styled, offset by geometry; no
     try store.setStyle(under, .z_index, .{ .number = 0 });
     try store.setStyle(p, .z_index, .{ .number = 1 });
     try store.setStyle(over, .z_index, .{ .number = 2 });
+    try store.setStyle(under, .background, props.PropValue.rgbA(255, 255, 255, 1));
+    try store.setLayout(under, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(under, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
+    try store.setStyle(over, .background, props.PropValue.rgbA(255, 255, 255, 1));
+    try store.setLayout(over, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(over, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
     try store.setStyle(p, .border_color, .{ .color = .{ .r = 0.2, .g = 0.4, .b = 0.6, .a = 1 } });
     try store.setStyle(p, .border_width, .{ .dimension = .{ .value = 4, .unit = .px } });
 
@@ -1088,9 +1114,10 @@ test "A path node emits stroke segments at its z, styled, offset by geometry; no
 
     try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
-    // Exactly one stroke segment, no rect body for the path node (root + 2 boxes = 3).
+    // Exactly one stroke segment, no rect body for the path node (the 2 filled
+    // boxes; the unstyled root paints nothing).
     try std.testing.expectEqual(@as(usize, 1), paths.items.len);
-    try std.testing.expectEqual(@as(usize, 3), prims.items.len);
+    try std.testing.expectEqual(@as(usize, 2), prims.items.len);
 
     const s = paths.items[0];
     try std.testing.expectEqual(@as(f32, 100), s.ax); // 100 + 0
@@ -1121,6 +1148,8 @@ test "Paint order: at equal z, a later box sibling covers an earlier path, image
     try store.setPath(p, &verts);
     try store.setModifier(img, .src, .{ .string = try store.stringAllocator().dupe(u8, "x.png") });
     try store.setStyle(caret, .background, .{ .color = .{ .r = 1, .g = 0, .b = 0, .a = 1 } });
+    try store.setLayout(caret, .width, .{ .dimension = .{ .value = 2, .unit = .px } });
+    try store.setLayout(caret, .height, .{ .dimension = .{ .value = 16, .unit = .px } });
 
     var engine = layout.LayoutEngine.init(&registry, &store, null);
     engine.solve(root, 0, 0, 800, 600);
@@ -1145,8 +1174,9 @@ test "Paint order: at equal z, a later box sibling covers an earlier path, image
     defer runs.deinit();
     try planPaintRuns(prims.items, orders.rects.items, images.items, paths.items, orders.paths.items, &texts, &runs);
 
-    // Paint sequence by kind: root+path body-less → rect(root) path rect(img bg)
-    // image rect(text box) text rect(caret). The caret rect is LAST.
+    // Paint sequence by kind: path image text rect(caret). Root, image and text
+    // bodies are transparent and emit no rect; the caret rect is the only one, LAST.
+    try std.testing.expectEqual(@as(usize, 1), prims.items.len);
     const last = runs.items[runs.items.len - 1];
     try std.testing.expectEqual(PaintKind.rect, last.kind);
     try std.testing.expectEqual(@as(f32, 1), prims.items[last.start + last.count - 1].color_r);
@@ -1157,13 +1187,81 @@ test "Paint order: at equal z, a later box sibling covers an earlier path, image
         .path => seen_path = true,
         .image => {
             seen_image = true;
-            // The image's own (transparent) box paints UNDER its texture.
-            try std.testing.expect(images.items[r.start].draw_order > orders.rects.items[1]);
+            // The image paints UNDER the later caret sibling.
+            try std.testing.expect(images.items[r.start].draw_order < orders.rects.items[0]);
         },
         .text => seen_text = true,
         .rect => {},
     };
     try std.testing.expect(seen_path and seen_image and seen_text);
+}
+
+test "transparent bodies emit no rect, so sibling text nodes coalesce into one text run" {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    store.setRegistry(&registry);
+
+    // root > [ K text, box with transparent→opaque gradient, box with border only ]
+    const K = 8;
+    const root = try registry.createNode(.box);
+    try store.registerNode(root);
+    var txts: [K]reg.NodeId = undefined;
+    for (&txts) |*t| {
+        t.* = try registry.createNode(.text);
+        registry.appendChild(root, t.*);
+        try store.registerNode(t.*);
+        try store.setLayout(t.*, .width, .{ .dimension = .{ .value = 10, .unit = .px } });
+        try store.setLayout(t.*, .height, .{ .dimension = .{ .value = 10, .unit = .px } });
+    }
+    const grad = try registry.createNode(.box);
+    const bord = try registry.createNode(.box);
+    for ([_]reg.NodeId{ grad, bord }) |id| {
+        registry.appendChild(root, id);
+        try store.registerNode(id);
+        try store.setLayout(id, .width, .{ .dimension = .{ .value = 10, .unit = .px } });
+        try store.setLayout(id, .height, .{ .dimension = .{ .value = 10, .unit = .px } });
+    }
+    try store.setStyle(grad, .background, .{ .color = .{ .r = 0, .g = 0, .b = 0, .a = 0 } });
+    try store.setStyle(grad, .gradient_type, .{ .number = 1 });
+    try store.setStyle(grad, .gradient_color2, .{ .color = .{ .r = 1, .g = 1, .b = 1, .a = 1 } });
+    try store.setStyle(bord, .border_width, .{ .dimension = .{ .value = 1, .unit = .px } });
+    try store.setStyle(bord, .border_color, .{ .color = .{ .r = 1, .g = 0, .b = 0, .a = 1 } });
+
+    var engine = layout.LayoutEngine.init(&registry, &store, null);
+    engine.solve(root, 0, 0, 800, 600);
+
+    var prims = std.array_list.Managed(RectPrimitive).init(std.testing.allocator);
+    defer prims.deinit();
+    var images = std.array_list.Managed(ImagePrimitive).init(std.testing.allocator);
+    defer images.deinit();
+    var paths = std.array_list.Managed(PathSegPrim).init(std.testing.allocator);
+    defer paths.deinit();
+    var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
+    defer hits.deinit();
+    var orders = PaintOrders.init(std.testing.allocator);
+    defer orders.deinit();
+    try bakeRegistryOrdered(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1, &orders);
+
+    // Only the gradient box and the bordered box paint a body.
+    try std.testing.expectEqual(@as(usize, 2), prims.items.len);
+    // Hit-testing is untouched: every node is still in the hit list.
+    try std.testing.expectEqual(@as(usize, K + 3), hits.items.len);
+
+    // The text pass emits one run per text node, in each node's content slot.
+    var texts: [K]TextRun = undefined;
+    for (txts, 0..) |t, i| texts[i] = .{ .z_index = 0, .order = registry.getNode(t).?.paint_order, .start = @intCast(i * 4), .count = 4 };
+    var runs = std.array_list.Managed(PaintRun).init(std.testing.allocator);
+    defer runs.deinit();
+    try planPaintRuns(prims.items, orders.rects.items, images.items, paths.items, orders.paths.items, &texts, &runs);
+
+    // One text run (K nodes coalesced) then one rect run — not 2K runs.
+    try std.testing.expectEqual(@as(usize, 2), runs.items.len);
+    try std.testing.expectEqual(PaintKind.text, runs.items[0].kind);
+    try std.testing.expectEqual(@as(u32, K * 4), runs.items[0].count);
+    try std.testing.expectEqual(PaintKind.rect, runs.items[1].kind);
+    try std.testing.expectEqual(@as(u32, 2), runs.items[1].count);
 }
 
 test "planPaintRuns coalesces same-kind neighbours and keeps z ahead of tree order" {
@@ -1246,6 +1344,8 @@ test "Uniform border_width seeds all sides; per-side keys override just their ed
     try store.setStyle(uniform, .border_width, .{ .dimension = .{ .value = 1.0, .unit = .px } });
     try store.setStyle(underline, .border_bottom, .{ .dimension = .{ .value = 2.0, .unit = .px } });
     try store.setStyle(underline, .border_style, .{ .number = 1.0 }); // dashed
+    try store.setStyle(uniform, .border_color, props.PropValue.rgbA(255, 255, 255, 1));
+    try store.setStyle(underline, .border_color, props.PropValue.rgbA(255, 255, 255, 1));
 
     var engine = layout.LayoutEngine.init(&registry, &store, null);
     engine.solve(root, 0, 0, 800, 600);
@@ -1259,17 +1359,18 @@ test "Uniform border_width seeds all sides; per-side keys override just their ed
     var hits = std.array_list.Managed(HitNode).init(std.testing.allocator);
     defer hits.deinit();
     try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
-    try std.testing.expectEqual(@as(usize, 3), prims.items.len);
+    // The unstyled root paints nothing, so emits no rect.
+    try std.testing.expectEqual(@as(usize, 2), prims.items.len);
 
-    // prims are baked root-first, then children in order.
-    const u = prims.items[1];
+    // prims are baked in tree order.
+    const u = prims.items[0];
     try std.testing.expectEqual(@as(f32, 1.0), u.border_top);
     try std.testing.expectEqual(@as(f32, 1.0), u.border_right);
     try std.testing.expectEqual(@as(f32, 1.0), u.border_bottom);
     try std.testing.expectEqual(@as(f32, 1.0), u.border_left);
     try std.testing.expectEqual(@as(f32, 0.0), u.border_style); // solid by default
 
-    const d = prims.items[2];
+    const d = prims.items[1];
     try std.testing.expectEqual(@as(f32, 2.0), d.border_bottom);
     try std.testing.expectEqual(@as(f32, 0.0), d.border_top);
     try std.testing.expectEqual(@as(f32, 0.0), d.border_left);
@@ -1289,6 +1390,8 @@ test "A box with no background bakes transparent, not an opaque slab" {
     try store.registerNode(card);
     try store.registerNode(wrapper);
     try store.setStyle(card, .background, .{ .color = .{ .r = 0.2, .g = 0.2, .b = 0.2, .a = 1 } });
+    try store.setLayout(card, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(card, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
 
     var engine = layout.LayoutEngine.init(&registry, &store, null);
     engine.solve(card, 0, 0, 800, 600);
@@ -1304,9 +1407,9 @@ test "A box with no background bakes transparent, not an opaque slab" {
     try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
     // The card keeps its explicit fill; the unstyled wrapper lets it show through
-    // instead of tiling the theme's base color over it.
+    // instead of tiling the theme's base color over it — it emits no rect at all.
+    try std.testing.expectEqual(@as(usize, 1), prims.items.len);
     try std.testing.expectEqual(@as(f32, 1.0), prims.items[0].color_a);
-    try std.testing.expectEqual(@as(f32, 0.0), prims.items[1].color_a);
 }
 
 test "an image node bakes a transparent box behind the texture, unless it has an explicit background" {
@@ -1340,12 +1443,12 @@ test "an image node bakes a transparent box behind the texture, unless it has an
     defer hits.deinit();
     try bakeRegistry(&registry, &store, &prims, &images, &paths, &hits, null, null, null, .pointer, std.testing.allocator, 1);
 
-    // prims[0] = root, prims[1] = bare image's box, prims[2] = boxed image's box.
-    // A bare image would otherwise paint an opaque near-white slab that shows
-    // straight through every transparent pixel of the PNG.
-    try std.testing.expectEqual(@as(f32, 0.0), prims.items[1].color_a);
-    try std.testing.expectEqual(@as(f32, 1.0), prims.items[2].color_a);
-    try std.testing.expectEqual(@as(f32, 0.1), prims.items[2].color_r);
+    // Only the boxed image's box is a rect: root and the bare image are
+    // transparent, so they emit none. A bare image would otherwise paint an
+    // opaque near-white slab that shows through every transparent PNG pixel.
+    try std.testing.expectEqual(@as(usize, 1), prims.items.len);
+    try std.testing.expectEqual(@as(f32, 1.0), prims.items[0].color_a);
+    try std.testing.expectEqual(@as(f32, 0.1), prims.items[0].color_r);
     try std.testing.expectEqual(@as(usize, 2), images.items.len);
 }
 
@@ -1362,6 +1465,12 @@ test "Focus ring is baked only for the focused focusable node" {
     try store.registerNode(root);
     try store.registerNode(btn);
     try store.setStyle(btn, .radius, .{ .dimension = .{ .value = 6.0, .unit = .px } });
+    try store.setStyle(root, .background, props.PropValue.rgbA(25, 25, 25, 1));
+    try store.setLayout(root, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(root, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
+    try store.setStyle(btn, .background, props.PropValue.rgbA(77, 77, 77, 1));
+    try store.setLayout(btn, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(btn, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
     // The button is focusable (the modifier value is irrelevant to the ring).
     try store.setModifier(btn, .focusable, .{ .string = try store.stringAllocator().dupe(u8, "n1") });
 
@@ -1450,6 +1559,12 @@ test "Focus ring only paints in .keyboard highlight mode, never .pointer" {
     try store.registerNode(root);
     try store.registerNode(btn);
     try store.setModifier(btn, .focusable, .{ .string = try store.stringAllocator().dupe(u8, "n1") });
+    try store.setStyle(root, .background, props.PropValue.rgbA(25, 25, 25, 1));
+    try store.setLayout(root, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(root, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
+    try store.setStyle(btn, .background, props.PropValue.rgbA(77, 77, 77, 1));
+    try store.setLayout(btn, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+    try store.setLayout(btn, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
 
     var engine = layout.LayoutEngine.init(&registry, &store, null);
     engine.solve(root, 0, 0, 800, 600);
@@ -1743,6 +1858,7 @@ test "A blurred shadow bakes as its own prim: flagged, offset, spread-inflated" 
     try store.setStyle(box_id, .shadow_offset_y, .{ .dimension = .{ .value = 18.0, .unit = .px } });
     try store.setStyle(box_id, .shadow_spread, .{ .dimension = .{ .value = -4.0, .unit = .px } });
     try store.setStyle(box_id, .shadow_color, props.PropValue.rgbA(0, 0, 0, 0.55));
+    try store.setStyle(box_id, .background, props.PropValue.rgbA(255, 255, 255, 1));
 
     var engine = layout.LayoutEngine.init(&registry, &store, null);
     engine.solve(box_id, 0, 0, 200, 100);
@@ -1798,6 +1914,9 @@ test "Blur 0 with an offset still casts a (hard-edged) shadow; a shadow going no
         try store.setStyle(box_id, .shadow_offset_x, .{ .dimension = .{ .value = c.dx, .unit = .px } });
         try store.setStyle(box_id, .shadow_offset_y, .{ .dimension = .{ .value = c.dy, .unit = .px } });
         try store.setStyle(box_id, .shadow_color, props.PropValue.rgbA(0, 0, 0, c.alpha));
+        try store.setStyle(box_id, .background, props.PropValue.rgbA(255, 255, 255, 1));
+        try store.setLayout(box_id, .width, .{ .dimension = .{ .value = 40, .unit = .px } });
+        try store.setLayout(box_id, .height, .{ .dimension = .{ .value = 20, .unit = .px } });
 
         var engine = layout.LayoutEngine.init(&registry, &store, null);
         engine.solve(box_id, 0, 0, 200, 100);
