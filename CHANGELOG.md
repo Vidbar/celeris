@@ -9,6 +9,21 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.4.3 — 2026-11-16
+
+No BREAKING changes. `CELERIS_ABI_VERSION` unchanged (8).
+
+### Fixed
+
+- Text batching regressed in 0.4.2: every node emitted a body rect even when it
+  painted nothing, so each text node split the text batch ("empty rect, text")
+  and a row of N text nodes cost about 2N draw calls. A body rect is now emitted
+  only when it paints (a visible fill, a gradient with a visible second stop, or
+  a border with width and alpha) and has non-zero area. Paint order and
+  hit-testing are unchanged.
+- If planning a frame's draw calls fails (out of memory), the frame is now
+  skipped with a warning instead of being drawn partially and out of order.
+
 ## 0.4.2 — 2026-11-16
 
 No BREAKING changes. `CELERIS_ABI_VERSION` unchanged (8).
