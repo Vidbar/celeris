@@ -898,7 +898,9 @@ pub const MenuBar = struct {
     /// highlight effect reads it together with each menu's `is_open`.
     hovered: signals.Signal(i32),
     scope: signals.Scope,
-    bound: bool = false,
+    highlight_effect: ?*signals.Effect = null,
+    /// Button count the effect was created for.
+    highlight_count: usize = 0,
 
     const Entry = struct {
         label: []const u8,
@@ -1056,7 +1058,24 @@ pub const MenuBar = struct {
         // observes `hovered` and every menu's `is_open`, so ANY close path
         // (Escape, outside click, selection, switching menus) clears the
         // open highlight — there is no imperative paint to forget.
-        try component.bindVisuals(self, &self.scope, &self.bound, updateVisuals);
+        // The effect only tracks the menus it saw on its first (tracked) run;
+        // a later rebuild re-applies it untracked. When the set of buttons
+        // changed (`addMenu` after the first build), recreate it so the new
+        // menus' `is_open` is observed too.
+        if (self.highlight_effect) |eff| {
+            if (self.highlight_count != self.entries.items.len) {
+                self.scope.destroyEffect(eff);
+                self.highlight_effect = null;
+            }
+        }
+        if (self.highlight_effect == null) {
+            self.highlight_effect = try self.scope.createEffect(self, updateVisuals);
+            self.highlight_count = self.entries.items.len;
+        } else {
+            const prev = signals.untrackedBegin();
+            updateVisuals(self);
+            signals.untrackedEnd(prev);
+        }
     }
 
     /// M3 state layers over whatever the bar paints: the theme's `text` color
@@ -2045,6 +2064,42 @@ test "MenuBar: item_radius rounds the buttons and item_gap spaces them; defaults
             try testing.expectApproxEqAbs(@as(f32, 0), g1.x - (g0.x + g0.width), 0.01);
         }
     }
+}
+
+test "MenuBar: a menu added after the first build still gets its open highlight" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+
+    const file = try Menu.init(testing.allocator, "file");
+    defer file.deinit();
+    try file.addItem("New", "new");
+    const debug = try Menu.init(testing.allocator, "debug");
+    defer debug.deinit();
+    try debug.addItem("Start", "start");
+    const bar = try MenuBar.init(testing.allocator, "mbar");
+    defer bar.deinit();
+    try bar.addMenu("File", file);
+    _ = try buildTestBar(&bld, &ctx, bar);
+
+    // Add a menu later and rebuild the same tree.
+    try bar.addMenu("Debug", debug);
+    bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+    const root = try buildTestBar(&bld, &ctx, bar);
+    env.solve(root, 800, 600);
+
+    const pressed = theme_mod.Theme.StateLayer.pressed.opacity();
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = bar.entries.items[1].btn_id });
+    try testing.expect(debug.isOpen());
+    try testing.expectApproxEqAbs(pressed, btnAlpha(&env, bar, 1), 0.01);
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = debug.panel_id, .key_code = events.Key.escape.code() });
+    try testing.expect(!debug.isOpen());
+    try testing.expectApproxEqAbs(@as(f32, 0), btnAlpha(&env, bar, 1), 0.001);
 }
 test "Accelerators: chord lookup respects every modifier" {
     var acc = Accelerators.init(testing.allocator);
