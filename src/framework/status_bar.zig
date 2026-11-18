@@ -154,7 +154,7 @@ pub const StatusBar = struct {
             if (i >= self.items.len) break;
             const item = self.items[i];
             if (slot.dot_node != reg.NULL_NODE) {
-                const c = self.colors[@intFromEnum(item.kind)];
+                const c = self.colors[@backingInt(item.kind)];
                 store.setStyle(slot.dot_node, .background, propColor(c)) catch {};
             }
             if (slot.text_node != reg.NULL_NODE) {
@@ -238,8 +238,8 @@ test "StatusBar (mountOwned) paints each dot with its kind's fallback color" {
     };
     const bar = try mountBar(&registry, &store, &mounts, .{}, .{ .items = &items });
 
-    try expectColor(&store, bar.slots.items[0].dot_node, FALLBACK[@intFromEnum(StatusKind.ok)]);
-    try expectColor(&store, bar.slots.items[1].dot_node, FALLBACK[@intFromEnum(StatusKind.neutral)]);
+    try expectColor(&store, bar.slots.items[0].dot_node, FALLBACK[@backingInt(StatusKind.ok)]);
+    try expectColor(&store, bar.slots.items[1].dot_node, FALLBACK[@backingInt(StatusKind.neutral)]);
     try testing.expectEqualStrings("Connected", store.getTextContent(bar.slots.items[0].text_node).?);
 }
 
@@ -277,7 +277,7 @@ test "StatusBar rev bump re-applies a mutated slot: dot render-only, text relayo
     rev.set(rev.peek() + 1);
 
     // Dot: recolored to err, render-only (no layout invalidation).
-    try expectColor(&store, dot, FALLBACK[@intFromEnum(StatusKind.err)]);
+    try expectColor(&store, dot, FALLBACK[@backingInt(StatusKind.err)]);
     try testing.expect(registry.getNode(dot).?.render_dirty);
     try testing.expect(!registry.getNode(dot).?.layout_dirty);
 

@@ -366,6 +366,6 @@ test "coerce: numbers and px lengths convert both ways; nothing becomes a color 
 test "every StyleKey/LayoutKey has a kind its readers accept (exhaustive switch)" {
     // The switches in styleKind/layoutKind have no `else`, so adding a key without
     // deciding how it is read is a compile error. This test just instantiates them.
-    inline for (@typeInfo(props.StyleKey).@"enum".fields) |f| _ = styleKind(@enumFromInt(f.value));
-    inline for (@typeInfo(props.LayoutKey).@"enum".fields) |f| _ = layoutKind(@enumFromInt(f.value));
+    inline for (@typeInfo(props.StyleKey).@"enum".field_values) |v| _ = styleKind(@fromBackingInt(v));
+    inline for (@typeInfo(props.LayoutKey).@"enum".field_values) |v| _ = layoutKind(@fromBackingInt(v));
 }

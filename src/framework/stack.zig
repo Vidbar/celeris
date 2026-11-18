@@ -16,8 +16,8 @@ pub fn stack(ctx: *component.BuildContext, children: anytype) !void {
     try b.width(container, 100, .percent);
     try b.height(container, 100, .percent);
 
-    inline for (std.meta.fields(@TypeOf(children)), 0..) |f, i| {
-        const child = @field(children, f.name);
+    inline for (@typeInfo(@TypeOf(children)).@"struct".field_names, 0..) |f_name, i| {
+        const child = @field(children, f_name);
         if (i == 0) {
             try component.buildChild(ctx, child);
         } else {

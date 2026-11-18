@@ -10,10 +10,7 @@
 const std = @import("std");
 const prof = @import("../core/profiler.zig");
 
-const c = @cImport({
-    @cInclude("hb.h");
-    @cInclude("hb-ot.h");
-});
+const c = @import("c_hb");
 
 pub const ShapedGlyph = struct {
     /// Glyph index in the font (post-shaping), NOT a Unicode codepoint.

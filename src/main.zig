@@ -32,9 +32,9 @@ pub const internal = struct {
 // no C-ABI symbols (the examples link the engine statically and never noticed).
 comptime {
     @setEvalBranchQuota(20000);
-    for (@typeInfo(c_api).@"struct".decls) |decl| {
-        if (@typeInfo(@TypeOf(@field(c_api, decl.name))) == .@"fn") {
-            _ = &@field(c_api, decl.name);
+    for (@typeInfo(c_api).@"struct".decl_names) |decl| {
+        if (@typeInfo(@TypeOf(@field(c_api, decl))) == .@"fn") {
+            _ = &@field(c_api, decl);
         }
     }
 }

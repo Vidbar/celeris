@@ -18,7 +18,7 @@ Drive a native Celeris window entirely from C#, over the C-ABI in
 - Windows x64 (the bindings are not packaged for Linux yet, although the same
   C-ABI is exported there as `libceleris.so`).
 - .NET SDK 9 or newer.
-- Zig 0.16.0, to build the native library.
+- Zig 0.17.1, to build the native library.
 
 ## Run the sample
 

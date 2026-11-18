@@ -170,7 +170,7 @@ fn appCallback(ev: *const celeris.c_api.CelerisEvent) callconv(.c) void {
     // hover-driven target overlay needs host follow-up here.
     const old_hover = g_tree_list.hovered_node;
     _ = g_router.dispatchEvent(ev);
-    if (ev.event_type == @intFromEnum(celeris.c_api.CelerisEventType.tick)) return;
+    if (ev.event_type == @backingInt(celeris.c_api.CelerisEventType.tick)) return;
 
     // A tree expand/collapse (routed) changes the visible row count, so refresh
     // the scroll view's content height — otherwise its scroll range stays clamped

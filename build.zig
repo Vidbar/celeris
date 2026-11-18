@@ -2,7 +2,7 @@ const std = @import("std");
 
 /// Applies the include paths, native libraries, and C/C++ sources every Celeris
 /// artifact needs, onto a module. Single source of truth for the dependency set.
-fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {
     mod.addIncludePath(b.path("vendor"));
     mod.addIncludePath(b.path("vendor/wgpu-native/include/webgpu"));
     mod.addIncludePath(b.path("vendor/wgpu-native/include/wgpu"));
@@ -39,6 +39,9 @@ fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.Resol
             const ti_h = ti_header.addOutputFileArg("text-input-unstable-v3-client-protocol.h");
             mod.addCSourceFile(.{ .file = ti_c, .flags = &.{} });
             mod.addIncludePath(ti_h.dirname());
+            const wl = addCHeader(b, mod, target, optimize, "c_wayland", &.{ "wayland-client.h", "wayland-cursor.h", "libdecor-0/libdecor.h", "xkbcommon/xkbcommon.h", "text-input-unstable-v3-client-protocol.h" });
+            wl.addIncludePath(ti_h.dirname());
+            wl.addIncludePath(.{ .cwd_relative = "/usr/include/libdecor-0" });
         },
         else => {},
     }
@@ -49,6 +52,48 @@ fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.Resol
     // HarfBuzz (text shaping) — vendored amalgamation, C++.
     mod.addIncludePath(b.path("vendor/harfbuzz/src"));
     mod.addCSourceFile(.{ .file = b.path("vendor/harfbuzz/src/harfbuzz.cc"), .flags = &.{"-std=c++17"} });
+
+    // C headers as importable modules (Zig 0.17 removed @cImport).
+    _ = addCHeader(b, mod, target, optimize, "c_hb", &.{ "hb.h", "hb-ot.h" });
+    _ = addCHeader(b, mod, target, optimize, "c_stbtt", &.{"stb_truetype.h"});
+    _ = addCHeader(b, mod, target, optimize, "c_stbi", &.{"stb_image.h"});
+    _ = addCHeader(b, mod, target, optimize, "c_wgpu", &.{ "webgpu.h", "wgpu.h" });
+}
+
+/// Translates a generated header that #includes `headers` and exposes it to
+/// `mod` as `@import(name)`. Include paths mirror linkNativeDeps'. Returns the
+/// step so callers can add platform-specific include paths.
+fn addCHeader(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+    name: []const u8,
+    headers: []const []const u8,
+) *std.Build.Step.TranslateC {
+    var src: std.ArrayList(u8) = .empty;
+    for (headers) |h| src.print(b.allocator, "#include <{s}>\n", .{h}) catch @panic("OOM");
+    const wf = b.addWriteFiles();
+    const header = wf.add(b.fmt("{s}.h", .{name}), src.items);
+    const tc = b.addTranslateC(.{ .root_source_file = header, .target = target, .optimize = optimize });
+    tc.addIncludePath(b.path("vendor"));
+    tc.addIncludePath(b.path("vendor/harfbuzz/src"));
+    tc.addIncludePath(b.path("vendor/wgpu-native/include/webgpu"));
+    tc.addIncludePath(b.path("vendor/wgpu-native/include/wgpu"));
+    mod.addImport(name, tc.createModule());
+    return tc;
+}
+
+/// Prepends `owner`'s vendored wgpu runtime directory to a run step's PATH so
+/// the child finds wgpu_native.dll. (Zig 0.17 removed Run.addPathDir and only
+/// auto-adds DLLs that are build artifacts; `owner.root` is the absolute
+/// package root, for the main build and for dependencies alike.)
+fn addWgpuToPath(owner: *std.Build, run: *std.Build.Step.Run) void {
+    const dir = owner.root.join(owner.allocator, "vendor/wgpu-native/lib") catch @panic("OOM");
+    const abs = owner.fmt("{f}", .{dir});
+    const env = run.getEnvMap();
+    const new = if (env.get("PATH")) |old| owner.fmt("{s};{s}", .{ abs, old }) else abs;
+    env.put("PATH", new) catch @panic("OOM");
 }
 
 /// Wires the wgpu runtime library into a consumer's build so apps run without
@@ -73,7 +118,7 @@ pub fn addRuntimeDeps(
         .windows => {
             const dll = dep.path("vendor/wgpu-native/lib/wgpu_native.dll");
             b.getInstallStep().dependOn(&b.addInstallBinFile(dll, "wgpu_native.dll").step);
-            if (run) |r| r.addPathDir(dep.path("vendor/wgpu-native/lib").getPath(b));
+            if (run) |r| addWgpuToPath(dep.builder, r);
         },
         .linux => {
             const so = dep.path("vendor/wgpu-native/linux-x86_64/lib/libwgpu_native.so");
@@ -136,7 +181,7 @@ pub fn build(b: *std.Build) void {
     // Codicons icon font (CC BY 4.0), embedded into the binary — icons are PUA
     // glyphs rendered through the normal text stack, no runtime asset needed.
     m_engine.addAnonymousImport("codicon_ttf", .{ .root_source_file = b.path("vendor/codicons/codicon.ttf") });
-    linkNativeDeps(b, m_engine, target);
+    linkNativeDeps(b, m_engine, target, optimize);
 
     // ─── Shared library (celeris.dll) ─────────────────────────────────────────
     const lib = b.addLibrary(.{
@@ -184,8 +229,7 @@ pub fn build(b: *std.Build) void {
 
         const run = b.addRunArtifact(exe);
         run.step.dependOn(b.getInstallStep());
-        // The child process needs wgpu_native.dll on its search path.
-        run.addPathDir("vendor/wgpu-native/lib");
+        addWgpuToPath(b, run);
         b.step(app.step, app.desc).dependOn(&run.step);
     }
 
@@ -202,36 +246,36 @@ pub fn build(b: *std.Build) void {
     const m_engine_debug = b.createModule(.{ // build-internal; not offered to dependents
         .root_source_file = b.path("src/main.zig"),
         .target = target,
-        .optimize = .Debug,
+        .optimize = .debug,
         .link_libc = true,
         .link_libcpp = true,
     });
     m_engine_debug.addOptions("build_options", build_opts);
     m_engine_debug.addAnonymousImport("codicon_ttf", .{ .root_source_file = b.path("vendor/codicons/codicon.ttf") });
-    linkNativeDeps(b, m_engine_debug, target);
+    linkNativeDeps(b, m_engine_debug, target, .debug);
 
     const fuzz_api_gate_mod = b.createModule(.{
         .root_source_file = b.path("examples/fuzz_api.zig"),
         .target = target,
-        .optimize = .Debug,
+        .optimize = .debug,
     });
     fuzz_api_gate_mod.addImport("celeris", m_engine_debug);
     const fuzz_api_gate_exe = b.addExecutable(.{ .name = "fuzz_api_ci", .root_module = fuzz_api_gate_mod });
     const run_fuzz_api_gate = b.addRunArtifact(fuzz_api_gate_exe);
     run_fuzz_api_gate.step.dependOn(b.getInstallStep());
-    run_fuzz_api_gate.addPathDir("vendor/wgpu-native/lib");
+    addWgpuToPath(b, run_fuzz_api_gate);
 
     // ─── Unit tests ───────────────────────────────────────────────────────────
     const tf = b.option([]const u8, "tf", "test filter") orelse "";
     const main_tests = b.addTest(.{ .root_module = m_engine, .filters = if (tf.len > 0) &.{tf} else &.{} });
     const run_main_tests = b.addRunArtifact(main_tests);
-    run_main_tests.addPathDir("vendor/wgpu-native/lib");
+    addWgpuToPath(b, run_main_tests);
 
     const fmt_step = b.addFmt(.{
-        .paths = &.{ "src", "examples", "build.zig" },
+        .paths = b.pathList(&.{ "src", "examples", "build.zig" }),
     });
     const check_fmt = b.addFmt(.{
-        .paths = &.{ "src", "examples", "build.zig" },
+        .paths = b.pathList(&.{ "src", "examples", "build.zig" }),
         .check = true,
     });
     b.step("fmt", "Format all source files").dependOn(&fmt_step.step);
@@ -246,7 +290,7 @@ pub fn build(b: *std.Build) void {
     c_smoke_mod.linkLibrary(lib);
     const c_smoke_exe = b.addExecutable(.{ .name = "c_smoke", .root_module = c_smoke_mod });
     const run_c_smoke = b.addRunArtifact(c_smoke_exe);
-    run_c_smoke.addPathDir("vendor/wgpu-native/lib");
+    addWgpuToPath(b, run_c_smoke);
     run_c_smoke.expectExitCode(0);
 
     // ─── Docs guard: the Quick Start snippet must match examples/counter.zig ─────

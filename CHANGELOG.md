@@ -9,6 +9,28 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No C-ABI surface change.
+
+### BREAKING
+
+- **Celeris now requires Zig 0.17.1** (`minimum_zig_version`); Zig 0.16 is no
+  longer supported. Upgrade your toolchain and your own code with the Zig 0.17
+  release notes.
+- Zig 0.17's `@hasDecl` only sees `pub` declarations. Celeris detects a
+  component's `build`, `onMount`, `onUnmount` and `deinit` that way, so they
+  must be `pub fn`. A non-`pub` `onMount`/`onUnmount`/`deinit` is now silently
+  skipped instead of called.
+
+### Changed
+
+- `addRuntimeDeps` works the same for consumers. Internally it now puts the
+  wgpu runtime directory on the run step's `PATH` itself, because Zig 0.17
+  removed `Run.addPathDir`.
+- The C headers (wgpu, stb, HarfBuzz, Wayland) are translated in `build.zig`
+  with `addTranslateC`, replacing `@cImport`, which Zig 0.17 removed.
+
 ## 0.6.4 — 2026-11-17
 
 No BREAKING changes. No C-ABI surface change.

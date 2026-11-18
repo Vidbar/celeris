@@ -66,7 +66,7 @@ pub const Router = struct {
         var idbuf: [128]u8 = undefined;
         var txtbuf: [256]u8 = undefined; // room for IME preedit/commit strings
         const ev = events.CelerisEvent{
-            .event_type = @intFromEnum(event_type),
+            .event_type = @backingInt(event_type),
             .node_id = if (node_id == reg.NULL_NODE) 0 else node_id,
             .action_id = events.toCString(&idbuf, action_id),
             .x = x,

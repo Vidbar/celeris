@@ -59,10 +59,7 @@ fn profNowNs() i64 {
     return @divFloor(ctr, g_qpc_freq) * std.time.ns_per_s +
         @divFloor(@mod(ctr, g_qpc_freq) * std.time.ns_per_s, g_qpc_freq);
 }
-const wgpu = @cImport({
-    @cInclude("webgpu.h");
-    @cInclude("wgpu.h");
-});
+const wgpu = @import("c_wgpu");
 const renderer_mod = @import("renderer.zig");
 const text = @import("text.zig");
 const reg = @import("../core/registry.zig");
@@ -70,9 +67,7 @@ const props = @import("../core/properties.zig");
 const prof = @import("../core/profiler.zig");
 const platform = @import("../platform/platform.zig");
 
-const stbi = @cImport({
-    @cInclude("stb_image.h");
-});
+const stbi = @import("c_stbi");
 
 /// Rounded clipping, shared by all four pipelines (prepended to each shader).
 /// `clips` is the per-frame table built by `renderer.internClip` — one storage
@@ -1314,7 +1309,7 @@ pub const WgpuBackend = struct {
         var channels: c_int = 0;
 
         // C-style string required by stbi_load
-        const c_path = self.allocator.dupeZ(u8, path) catch return null;
+        const c_path = self.allocator.dupeSentinel(u8, path, 0) catch return null;
         defer self.allocator.free(c_path);
 
         const img_data = stbi.stbi_load(c_path.ptr, &width, &height, &channels, 4);
@@ -2022,8 +2017,8 @@ test "The WGSL instance struct matches RectPrimitive field for field" {
     try std.testing.expectEqual(zig_floats, wgsl_fields);
     // All-f32 on both sides: no padding surprises between them.
     try std.testing.expectEqual(@as(usize, 0), @sizeOf(renderer_mod.RectPrimitive) % @sizeOf(f32));
-    inline for (std.meta.fields(renderer_mod.RectPrimitive)) |f| {
-        try std.testing.expect(f.type == f32);
+    inline for (@typeInfo(renderer_mod.RectPrimitive).@"struct".field_names) |f_name| {
+        try std.testing.expect(@FieldType(renderer_mod.RectPrimitive, f_name) == f32);
     }
 }
 

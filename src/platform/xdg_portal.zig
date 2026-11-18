@@ -54,9 +54,9 @@ const Fns = struct {
 
 fn load(lib: *std.DynLib) ?Fns {
     var f: Fns = undefined;
-    inline for (@typeInfo(Fns).@"struct".fields) |field| {
-        const sym = "dbus_" ++ comptime mapName(field.name);
-        @field(f, field.name) = lib.lookup(field.type, sym) orelse return null;
+    inline for (@typeInfo(Fns).@"struct".field_names) |field_name| {
+        const sym = "dbus_" ++ comptime mapName(field_name);
+        @field(f, field_name) = lib.lookup(@FieldType(Fns, field_name), sym) orelse return null;
     }
     return f;
 }
@@ -196,7 +196,7 @@ pub fn fileDialog(allocator: std.mem.Allocator, title: ?[]const u8, save: bool, 
     var req_ptr: [*:0]const u8 = undefined;
     f.iter_get_basic(&rit, @ptrCast(&req_ptr));
     var path_buf: [512]u8 = undefined;
-    const req_path = std.fmt.bufPrintZ(&path_buf, "{s}", .{std.mem.span(req_ptr)}) catch {
+    const req_path = std.fmt.bufPrintSentinel(&path_buf, "{s}", .{std.mem.span(req_ptr)}, 0) catch {
         f.msg_unref(rep);
         return null;
     };
@@ -204,7 +204,7 @@ pub fn fileDialog(allocator: std.mem.Allocator, title: ?[]const u8, save: bool, 
 
     // Subscribe to that Request's Response signal and pump until it arrives.
     var rule_buf: [640]u8 = undefined;
-    const rule = std.fmt.bufPrintZ(&rule_buf, "type='signal',interface='org.freedesktop.portal.Request',member='Response',path='{s}'", .{req_path}) catch return null;
+    const rule = std.fmt.bufPrintSentinel(&rule_buf, "type='signal',interface='org.freedesktop.portal.Request',member='Response',path='{s}'", .{req_path}, 0) catch return null;
     f.add_match(conn, rule, &err);
     f.flush(conn);
 

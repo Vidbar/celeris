@@ -296,7 +296,7 @@ They return `error.NotBaked` until `h.bakeHits()` has run, and again after any n
 
 ## Framework-Owned Widgets
 
-Celeris ships a suite of pre-built widgets in `src/framework`. In the modern model you **do not** `init`/`register`/`deinit` them yourself. Instead you `ctx.mountOwned(Widget, .{ ...props })`: the framework allocates the instance on first mount, reuses it across rebuilds (preserving its internal state — hover, caret, value), and frees it on unmount.
+Celeris ships a suite of pre-built widgets in `src/framework`. In the modern model you **do not** `init`/`register`/`deinit` them yourself. Instead you `ctx.mountOwned(Widget, .{ ...props })`: the framework allocates the instance on first mount, reuses it across rebuilds (preserving its internal state — hover, caret, value), and frees it on unmount. Component hooks (`build`, `onMount`, `onUnmount`, `deinit`) must be `pub fn`: Celeris finds them with `@hasDecl`, which only sees public declarations, so a private `onMount` is never called.
 
 ```zig
 pub fn build(self: *MyForm, ctx: *fw.component.BuildContext) !void {

@@ -68,8 +68,8 @@ pub const ToastHost = struct {
     router: ?*events.EventRouter = null,
     theme: theme_mod.Theme = .{},
     container_id: reg.NodeId = reg.NULL_NODE,
-    panel_ids: [MAX_TOASTS]reg.NodeId = [_]reg.NodeId{reg.NULL_NODE} ** MAX_TOASTS,
-    text_ids: [MAX_TOASTS]reg.NodeId = [_]reg.NodeId{reg.NULL_NODE} ** MAX_TOASTS,
+    panel_ids: [MAX_TOASTS]reg.NodeId = @splat(reg.NULL_NODE),
+    text_ids: [MAX_TOASTS]reg.NodeId = @splat(reg.NULL_NODE),
     bound: bool = false,
 
     pub fn onMount(self: *ToastHost, allocator: std.mem.Allocator) void {

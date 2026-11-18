@@ -96,9 +96,9 @@ const testing = std.testing;
 /// Every `pub const` in this file is an icon string; tests iterate them all, so
 /// a new constant is checked with no list to update.
 const all_icons = blk: {
-    const decls = @typeInfo(@This()).@"struct".decls;
+    const decls = @typeInfo(@This()).@"struct".decl_names;
     var out: [decls.len][]const u8 = undefined;
-    for (decls, 0..) |d, i| out[i] = @field(@This(), d.name);
+    for (decls, 0..) |d, i| out[i] = @field(@This(), d);
     const frozen = out;
     break :blk frozen;
 };

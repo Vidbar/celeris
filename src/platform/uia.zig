@@ -107,7 +107,7 @@ pub fn variantBool(v: bool) VARIANT {
 /// the UTF-16 conversion fails, so a bad string degrades to "no value" not a crash.
 pub fn variantBStr(text: []const u8) VARIANT {
     var buf: [1024]u16 = undefined;
-    const n = std.unicode.utf8ToUtf16Le(buf[0 .. buf.len - 1], text) catch return .{ .vt = VT_EMPTY, .u = .{ .padding = [_]u8{0} ** 8 } };
+    const n = std.unicode.utf8ToUtf16Le(buf[0 .. buf.len - 1], text) catch return .{ .vt = VT_EMPTY, .u = .{ .padding = @splat(0) } };
     buf[n] = 0;
     return .{ .vt = VT_BSTR, .u = .{ .bstrVal = SysAllocString(@ptrCast(&buf)) } };
 }
@@ -1371,7 +1371,7 @@ pub const CelerisUiaProvider = struct {
             p.focused = self.focused;
             p.engine_id = self.engine_id;
             p.actions = self.actions;
-            const empty = VARIANT{ .vt = VT_EMPTY, .u = .{ .padding = [_]u8{0} ** 8 } };
+            const empty = VARIANT{ .vt = VT_EMPTY, .u = .{ .padding = @splat(0) } };
             _ = UiaRaiseAutomationPropertyChangedEvent(&p.simple, prop_id, empty, value);
             _ = p.release();
         } else |_| {}

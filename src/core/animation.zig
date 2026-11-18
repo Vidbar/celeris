@@ -70,7 +70,7 @@ pub const AnimTarget = union(enum) {
     }
 
     pub fn eql(a: AnimTarget, b: AnimTarget) bool {
-        if (@intFromEnum(a) != @intFromEnum(b)) return false;
+        if (@backingInt(a) != @backingInt(b)) return false;
         return switch (a) {
             .layout => |la| la.node_id == b.layout.node_id and la.key == b.layout.key,
             .style => |sa| sa.node_id == b.style.node_id and sa.key == b.style.key,

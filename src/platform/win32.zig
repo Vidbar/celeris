@@ -84,7 +84,7 @@ fn applyCornerPreference(hwnd: HWND, corners: platform.CornerPreference) void {
     if (corners == .default) return;
     // DWM_WINDOW_CORNER_PREFERENCE: DEFAULT=0, DONOTROUND=1, ROUND=2, ROUNDSMALL=3 —
     // the same order as platform.CornerPreference, so the tag value maps directly.
-    const pref: u32 = @intFromEnum(corners);
+    const pref: u32 = @backingInt(corners);
     _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, @sizeOf(u32));
 }
 
@@ -192,7 +192,7 @@ pub fn clipboardSetText(text: []const u8) bool {
         _ = GlobalUnlock(mem);
     }
 
-    if (@intFromEnum(OpenClipboard(null)) == 0) {
+    if (@backingInt(OpenClipboard(null)) == 0) {
         _ = GlobalFree(mem);
         return false;
     }
@@ -209,7 +209,7 @@ pub fn clipboardSetText(text: []const u8) bool {
 /// Reads CF_UNICODETEXT from the clipboard as UTF-8 (caller owns the slice), or
 /// null if the clipboard has no text / is unavailable.
 pub fn clipboardGetText(allocator: std.mem.Allocator) ?[]u8 {
-    if (@intFromEnum(OpenClipboard(null)) == 0) return null;
+    if (@backingInt(OpenClipboard(null)) == 0) return null;
     defer _ = CloseClipboard();
 
     const mem = GetClipboardData(CF_UNICODETEXT) orelse return null;
@@ -306,7 +306,7 @@ fn runFileDialog(
         (if (save) OFN_OVERWRITEPROMPT else OFN_FILEMUSTEXIST);
 
     const ok = if (save) GetSaveFileNameW(&ofn) else GetOpenFileNameW(&ofn);
-    if (@intFromEnum(ok) == 0) return null; // cancelled or error
+    if (@backingInt(ok) == 0) return null; // cancelled or error
 
     const path16 = std.mem.span(@as([*:0]const u16, @ptrCast(&file_buf)));
     return std.unicode.utf16LeToUtf8Alloc(allocator, path16) catch null;
@@ -787,7 +787,7 @@ pub const Win32Window = struct {
         // to it instead of to some unrelated window.
         if (self.modal) {
             if (self.parent_hwnd) |p| {
-                _ = EnableWindow(p, @enumFromInt(1));
+                _ = EnableWindow(p, @fromBackingInt(@intCast(1)));
                 _ = SetForegroundWindow(p);
             }
         }
@@ -1126,7 +1126,7 @@ pub fn initWindow(config: platform.WindowConfig) !platform.PlatformWindow {
 
     // Owner-modal: disable the parent so input can't reach it until this closes.
     if (config.modal) {
-        if (parent_hwnd) |p| _ = EnableWindow(p, @enumFromInt(0));
+        if (parent_hwnd) |p| _ = EnableWindow(p, @fromBackingInt(@intCast(0)));
     }
 
     const win32_win = try std.heap.page_allocator.create(Win32Window);
@@ -1203,7 +1203,7 @@ pub fn pollSystemEvents(ctx: ?*anyopaque, input_cb: ?platform.InputCallback) boo
                                 .hwndTrack = hwnd,
                                 .dwHoverTime = 0,
                             };
-                            if (@intFromEnum(TrackMouseEvent(&tme)) != 0) g_mouse_leave_armed = true;
+                            if (@backingInt(TrackMouseEvent(&tme)) != 0) g_mouse_leave_armed = true;
                         },
                         else => {},
                     }

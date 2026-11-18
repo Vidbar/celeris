@@ -22,9 +22,9 @@ const prop_parse = @import("core/prop_parse.zig");
 const uia = @import("platform/uia.zig");
 const builtin = @import("builtin");
 
-/// Null-terminated allocPrint (std.fmt.allocPrintZ was removed in Zig 0.16).
+/// Null-terminated print (std.fmt.allocPrintZ was removed in Zig 0.16).
 fn allocPrintZ(a: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![:0]u8 {
-    return std.fmt.allocPrintSentinel(a, fmt, args, 0);
+    return a.printSentinel(fmt, args, 0);
 }
 
 // ─── std.Io shim (Zig 0.16) ───────────────────────────────────────────────────
@@ -337,7 +337,7 @@ const ReleaseGpa = struct {
         return .ok;
     }
 };
-const EngineGpa = if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else ReleaseGpa;
+const EngineGpa = if (builtin.mode == .debug) std.heap.DebugAllocator(.{}) else ReleaseGpa;
 
 // ─── Global engine state (singleton) ─────────────────────────────────────────
 /// A pointer position in logical px.
@@ -695,7 +695,7 @@ pub const EngineState = struct {
 pub var debug_leak_count: std.atomic.Value(u32) = .init(0);
 
 var g_engines: [16]EngineState = undefined;
-var g_engines_active: [16]bool = [_]bool{false} ** 16;
+var g_engines_active: [16]bool = @splat(false);
 
 /// Debug/ReleaseSafe cross-thread misuse detector for the "mutate engine state
 /// only from the UI thread" contract documented on `celeris_request_redraw` and
@@ -865,7 +865,7 @@ fn inputRouter(engine: *EngineState) input_routing.Router {
 // a host can tell apart, say, a semantic error from an exhausted engine pool or a
 // cancelled dialog. Single-threaded contract (see celeris.h): one global slot,
 // overwritten by the most recent failing call.
-var g_last_error: [256]u8 = [_]u8{0} ** 256;
+var g_last_error: [256]u8 = @splat(0);
 
 fn setLastError(comptime fmt: []const u8, args: anytype) void {
     const s = std.fmt.bufPrint(g_last_error[0 .. g_last_error.len - 1], fmt, args) catch {
@@ -1098,7 +1098,7 @@ pub export fn celeris_display_work_area(x: ?*i32, y: ?*i32, w: ?*u32, h: ?*u32) 
 
 /// Engines queued for destruction by `celeris_window_destroy_deferred`, drained at
 /// the top of the next loop iteration.
-var g_pending_destroy = [_]bool{false} ** 16;
+var g_pending_destroy: [16]bool = @splat(false);
 
 /// Schedules `celeris_deinit(engine_id)` for the start of the next loop iteration.
 /// This is what a *handler* must call: `overlay.close()` typically runs from a
@@ -1246,7 +1246,7 @@ pub export fn celeris_create_window(config: ?*const CelerisWindowConfig) i32 {
         .parent = parent_handle,
         .modal = c.modal,
         .corners = if (c.corner_preference <= 3)
-            @enumFromInt(c.corner_preference)
+            @fromBackingInt(@intCast(c.corner_preference))
         else
             .default,
         .border_color = if (c.border_color == 0) null else c.border_color,
@@ -1523,7 +1523,7 @@ fn uiaPropertyChanged(ctx: ?*anyopaque, node_id: reg.NodeId, changed: props.Chan
                     // A control is a Toggle or a SelectionItem, never both (UIA rule).
                     if (uia.roleSupportsToggle(role)) {
                         const state: uia.ToggleState = if (on) .On else .Off;
-                        prov.raisePropertyChanged(node_id, uia.UIA_ToggleToggleStatePropertyId, uia.variantI4(@intFromEnum(state)));
+                        prov.raisePropertyChanged(node_id, uia.UIA_ToggleToggleStatePropertyId, uia.variantI4(@backingInt(state)));
                     } else if (uia.roleSupportsSelectionItem(role)) {
                         prov.raisePropertyChanged(node_id, uia.UIA_SelectionItemIsSelectedPropertyId, uia.variantBool(on));
                     }
@@ -1532,7 +1532,7 @@ fn uiaPropertyChanged(ctx: ?*anyopaque, node_id: reg.NodeId, changed: props.Chan
                     if (uia.roleSupportsExpandCollapse(role)) {
                         const ex = a11y.stateFlag(&engine.store, node_id, .expanded);
                         const state: uia.ExpandCollapseState = if (ex) .Expanded else .Collapsed;
-                        prov.raisePropertyChanged(node_id, uia.UIA_ExpandCollapseExpandCollapseStatePropertyId, uia.variantI4(@intFromEnum(state)));
+                        prov.raisePropertyChanged(node_id, uia.UIA_ExpandCollapseExpandCollapseStatePropertyId, uia.variantI4(@backingInt(state)));
                     }
                 },
                 // Roving focus: a container (a `Menu` panel) redirects the
@@ -2546,7 +2546,7 @@ pub export fn celeris_post_task(callback: *const fn (ctx: ?*anyopaque) callconv(
 
 /// Per-engine "please repaint" flags, set from any thread by
 /// `celeris_request_redraw` and consumed on the UI thread each loop iteration.
-var g_redraw_req = [_]bool{false} ** 16;
+var g_redraw_req: [16]bool = @splat(false);
 
 /// Requests a repaint of `engine_id` from any thread (thread-safe). Marks the
 /// engine render-dirty on the next loop iteration and wakes an idle loop. Note
@@ -3605,7 +3605,7 @@ const EvLog = struct {
     fn count(t: events_mod.EventType, n: reg.NodeId) u32 {
         var c: u32 = 0;
         for (buf[0..len]) |e| {
-            if (e.t == @intFromEnum(t) and e.n == n) c += 1;
+            if (e.t == @backingInt(t) and e.n == n) c += 1;
         }
         return c;
     }
@@ -3761,9 +3761,9 @@ test "a press with no prior motion refreshes hover before global_mouse_down" {
     engine.event_callback = EvLog.record;
     handleOSInput(&engine, .{ .event_type = .mouse_down, .x = 150, .y = 150 });
     try std.testing.expect(EvLog.len >= 2);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(events_mod.EventType.mouse_enter)), EvLog.buf[0].t);
+    try std.testing.expectEqual(@as(c_int, @backingInt(events_mod.EventType.mouse_enter)), EvLog.buf[0].t);
     try std.testing.expectEqual(box, EvLog.buf[0].n);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(events_mod.EventType.global_mouse_down)), EvLog.buf[1].t);
+    try std.testing.expectEqual(@as(c_int, @backingInt(events_mod.EventType.global_mouse_down)), EvLog.buf[1].t);
 }
 
 test "pointer motion updates hover before the global mouse_move" {
@@ -3778,16 +3778,16 @@ test "pointer motion updates hover before the global mouse_move" {
     try engine.hit_list.append(.{ .id = box, .z_index = 0, .draw_order = 0, .clip_rect = .{ .x = 0, .y = 0, .w = 500, .h = 500 } });
     EvLog.reset();
     engine.event_callback = EvLog.record;
-    const move: c_int = @intFromEnum(events_mod.EventType.mouse_move);
+    const move: c_int = @backingInt(events_mod.EventType.mouse_move);
     // Entering: mouse_enter, then the global mouse_move.
     handleOSInput(&engine, .{ .event_type = .mouse_move, .x = 150, .y = 150 });
     try std.testing.expectEqual(@as(usize, 2), EvLog.len);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(events_mod.EventType.mouse_enter)), EvLog.buf[0].t);
+    try std.testing.expectEqual(@as(c_int, @backingInt(events_mod.EventType.mouse_enter)), EvLog.buf[0].t);
     try std.testing.expectEqual(move, EvLog.buf[1].t);
     // Leaving: mouse_leave, then the global mouse_move.
     handleOSInput(&engine, .{ .event_type = .mouse_move, .x = 300, .y = 300 });
     try std.testing.expectEqual(@as(usize, 4), EvLog.len);
-    try std.testing.expectEqual(@as(c_int, @intFromEnum(events_mod.EventType.mouse_leave)), EvLog.buf[2].t);
+    try std.testing.expectEqual(@as(c_int, @backingInt(events_mod.EventType.mouse_leave)), EvLog.buf[2].t);
     try std.testing.expectEqual(move, EvLog.buf[3].t);
 }
 

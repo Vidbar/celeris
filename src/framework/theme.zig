@@ -55,8 +55,8 @@ pub const ListColors = struct {
     /// Fields set in `over` replace the ones in `self`.
     pub fn merged(self: ListColors, over: ListColors) ListColors {
         var out = self;
-        inline for (std.meta.fields(ListColors)) |f| {
-            if (@field(over, f.name)) |v| @field(out, f.name) = v;
+        inline for (@typeInfo(ListColors).@"struct".field_names) |f_name| {
+            if (@field(over, f_name)) |v| @field(out, f_name) = v;
         }
         return out;
     }
@@ -383,9 +383,9 @@ pub const Theme = struct {
 
 test "Theme presets — dark and light have every token set (alpha > 0)" {
     inline for (.{ Theme.dark(), Theme.light() }) |t| {
-        inline for (std.meta.fields(Theme)) |f| {
-            if (f.type == Color) {
-                const c = @field(t, f.name);
+        inline for (@typeInfo(Theme).@"struct".field_names) |f_name| {
+            if (@FieldType(Theme, f_name) == Color) {
+                const c = @field(t, f_name);
                 try std.testing.expect(c.a > 0); // no "unset" (transparent) token
             }
         }

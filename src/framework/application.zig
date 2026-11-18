@@ -16,7 +16,7 @@ const platform = @import("../platform/platform.zig");
 /// is `anytype` (generic). Lets `runApp` pick the reactive `*BuildContext` entry
 /// point vs the legacy `*UIBuilder` one at comptime.
 fn appBuildParam(comptime T: type) ?type {
-    return @typeInfo(@TypeOf(T.build)).@"fn".params[1].type;
+    return @typeInfo(@TypeOf(T.build)).@"fn".param_types[1];
 }
 
 /// Which framework-owned title bar `runApp` mounts. `.classic` is the system
@@ -123,7 +123,7 @@ pub const MAX_WINDOWS = 16;
 /// Longest window title, in UTF-8 bytes (the platform backends' limit too).
 pub const TITLE_MAX_BYTES = 255;
 
-var g_hosts: [MAX_WINDOWS]?*WindowHost = [_]?*WindowHost{null} ** MAX_WINDOWS;
+var g_hosts: [MAX_WINDOWS]?*WindowHost = @splat(null);
 
 /// Monotonic counter behind `WindowHost.generation`.
 var g_generation: u64 = 0;
@@ -659,7 +659,7 @@ pub const WindowHandle = struct {
 /// the router (and the mounts, and the host) there is a use-after-free the moment
 /// `route` reads the next handler. So the frees wait for the next loop tick, in
 /// step with the engine's own deferred destroy.
-var g_pending_teardown: [MAX_WINDOWS]?*WindowHost = [_]?*WindowHost{null} ** MAX_WINDOWS;
+var g_pending_teardown: [MAX_WINDOWS]?*WindowHost = @splat(null);
 
 /// Tears a secondary host down: hide first (so nothing renders against a tree that
 /// is going away), unhook it so nothing new can reach it, then queue both the
@@ -866,7 +866,7 @@ pub const window = struct {
             .parent_engine_id = parent.engine_id,
             .modal = false,
             .title = options.title.ptr,
-            .corner_preference = @intFromEnum(options.window_corners),
+            .corner_preference = @backingInt(options.window_corners),
             .border_color = if (options.window_outline) |c|
                 0xFF00_0000 | (@as(u32, c.r) << 16) | (@as(u32, c.g) << 8) | @as(u32, c.b)
             else
@@ -1055,7 +1055,7 @@ pub fn runApp(app_instance: anytype, router: *events.EventRouter, options: AppOp
         .parent_engine_id = 0,
         .modal = false,
         .title = options.title.ptr,
-        .corner_preference = @intFromEnum(options.window_corners),
+        .corner_preference = @backingInt(options.window_corners),
         // The outline also drives DWM's frame border. Rounding the window turns
         // that border on in a system color, so without this the app shows two
         // hairlines in different colors — the one we draw, and the one outside it.
@@ -1255,7 +1255,7 @@ test "Each window slot gets its own build and event trampoline, routing to its o
 
     const CelerisEvent = @import("../core/events.zig").CelerisEvent;
     var ev = CelerisEvent{
-        .event_type = @intFromEnum(@import("../core/events.zig").EventType.click),
+        .event_type = @backingInt(@import("../core/events.zig").EventType.click),
         .node_id = 7,
         .action_id = "n7",
         .x = 0,
@@ -1375,7 +1375,7 @@ test "Close() from a handler of the same window defers the teardown past the dis
 
     const CelerisEvent = @import("../core/events.zig").CelerisEvent;
     const ev = CelerisEvent{
-        .event_type = @intFromEnum(@import("../core/events.zig").EventType.click),
+        .event_type = @backingInt(@import("../core/events.zig").EventType.click),
         .node_id = 9,
         .action_id = "stop",
         .x = 0,

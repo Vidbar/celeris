@@ -87,7 +87,7 @@ Implemented today, natively in Zig:
 
 ## Using Celeris from another Zig project
 
-Requirements: Zig 0.16.0, x86_64 Windows 10+ or Linux (Wayland). On Linux you
+Requirements: Zig 0.17.1, x86_64 Windows 10+ or Linux (Wayland). On Linux you
 also need `wayland-client`, `wayland-cursor`, `xkbcommon`, `libdecor-0`,
 `wayland-protocols` and `wayland-scanner` from your distro. macOS is not
 supported yet. The API is pre-1.0 and may change between minor versions.

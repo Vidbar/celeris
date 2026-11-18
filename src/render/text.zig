@@ -51,9 +51,7 @@ pub fn fallbackCharWidth(size: f32) f32 {
     return size * FALLBACK_ADVANCE_RATIO;
 }
 
-const stb = @cImport({
-    @cInclude("stb_truetype.h");
-});
+const stb = @import("c_stbtt");
 
 /// True if `ttf` maps `codepoint` to a real (non-.notdef) glyph, using the same
 /// bounded stb lookup the atlas uses to pick a fallback face. False for a font
@@ -329,7 +327,7 @@ pub const FontRole = enum(u8) {
 /// clamping out-of-range values to `.default`.
 pub fn roleFromOrdinal(n: f32) FontRole {
     if (n < 0 or n > 3) return .default;
-    return @enumFromInt(@as(u8, @intFromFloat(n)));
+    return @fromBackingInt(@intCast(@as(u8, @intFromFloat(n))));
 }
 
 pub const FontAtlas = struct {

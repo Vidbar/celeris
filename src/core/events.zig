@@ -379,7 +379,7 @@ fn fireCallback(
     if (ctx.sink != null or ctx.event_callback != null) {
         var idbuf: [128]u8 = undefined;
         const ev = CelerisEvent{
-            .event_type = @intFromEnum(event_type),
+            .event_type = @backingInt(event_type),
             .node_id = node_id,
             .action_id = toCString(&idbuf, id_str),
             .x = x,

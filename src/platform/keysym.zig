@@ -72,9 +72,9 @@ pub fn toVk(sym: u32) u32 {
         Insert, KP_Insert => .insert,
         Delete, KP_Delete => .delete,
         // Letters: keysyms 'A'..'Z' already equal the VK codes; 'a'..'z' fold onto them.
-        'A'...'Z', '0'...'9' => @enumFromInt(sym),
-        'a'...'z' => @enumFromInt(sym - 0x20),
-        F1...F12 => @enumFromInt(Key.f1.code() + (sym - F1)),
+        'A'...'Z', '0'...'9' => @fromBackingInt(@intCast(sym)),
+        'a'...'z' => @fromBackingInt(@intCast(sym - 0x20)),
+        F1...F12 => @fromBackingInt(@intCast(Key.f1.code() + (sym - F1))),
         else => null,
     };
     return if (k) |key| key.code() else 0;

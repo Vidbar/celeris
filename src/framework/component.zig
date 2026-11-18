@@ -861,14 +861,14 @@ const RESERVED_PROPS = [_][]const u8{ "key", "fill", "hug" };
 /// silently does nothing forever — it compiles, it just never applies.
 fn validateProps(comptime T: type, comptime IP: type) void {
     comptime {
-        for (std.meta.fields(IP)) |f| {
-            if (@hasField(T, f.name)) continue;
+        for (@typeInfo(IP).@"struct".field_names) |f_name| {
+            if (@hasField(T, f_name)) continue;
             var reserved = false;
             for (RESERVED_PROPS) |r| {
-                if (std.mem.eql(u8, r, f.name)) reserved = true;
+                if (std.mem.eql(u8, r, f_name)) reserved = true;
             }
             if (reserved) continue;
-            @compileError("unknown prop '." ++ f.name ++ "' for " ++ @typeName(T) ++
+            @compileError("unknown prop '." ++ f_name ++ "' for " ++ @typeName(T) ++
                 " — it is not a field of the component and not a reserved prop (.key/.fill/.hug)");
         }
     }
@@ -899,19 +899,19 @@ fn assignProp(comptime FT: type, dst: *FT, value: anytype) void {
         if (comptime VT != Inner and @typeInfo(Inner) == .@"struct" and
             @typeInfo(VT) == .@"struct" and !@typeInfo(VT).@"struct".is_tuple)
         {
-            comptime for (std.meta.fields(VT)) |vf| {
-                if (!@hasField(Inner, vf.name)) @compileError("unknown field '." ++ vf.name ++
+            comptime for (@typeInfo(VT).@"struct".field_names) |vf_name| {
+                if (!@hasField(Inner, vf_name)) @compileError("unknown field '." ++ vf_name ++
                     "' in the literal for a " ++ @typeName(Inner) ++ " prop");
             };
             var built: Inner = undefined;
-            inline for (std.meta.fields(Inner)) |inf| {
-                if (@hasField(VT, inf.name)) {
-                    @field(built, inf.name) = @field(value, inf.name);
-                } else if (inf.default_value_ptr) |ptr| {
-                    @field(built, inf.name) = @as(*const inf.type, @ptrCast(@alignCast(ptr))).*;
+            inline for (@typeInfo(Inner).@"struct".field_names, @typeInfo(Inner).@"struct".field_attrs) |inf_name, inf_attrs| {
+                if (@hasField(VT, inf_name)) {
+                    @field(built, inf_name) = @field(value, inf_name);
+                } else if (inf_attrs.default_value_ptr) |ptr| {
+                    @field(built, inf_name) = @as(*const @FieldType(Inner, inf_name), @ptrCast(@alignCast(ptr))).*;
                 } else {
                     @compileError("literal for a " ++ @typeName(Inner) ++ " prop is missing '." ++
-                        inf.name ++ "', which has no default — write " ++ @typeName(Inner) ++ "{...}");
+                        inf_name ++ "', which has no default — write " ++ @typeName(Inner) ++ "{...}");
                 }
             }
             dst.* = built;
@@ -924,13 +924,13 @@ fn assignProp(comptime FT: type, dst: *FT, value: anytype) void {
 fn initInstance(comptime T: type, inst: *T, init_props: anytype) void {
     const IP = @TypeOf(init_props);
     comptime validateProps(T, IP);
-    inline for (std.meta.fields(T)) |f| {
-        if (@hasField(IP, f.name)) {
-            assignProp(f.type, &@field(inst, f.name), @field(init_props, f.name));
-        } else if (f.default_value_ptr) |ptr| {
-            @field(inst, f.name) = @as(*const f.type, @ptrCast(@alignCast(ptr))).*;
+    inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_attrs) |f_name, f_attrs| {
+        if (@hasField(IP, f_name)) {
+            assignProp(@FieldType(T, f_name), &@field(inst, f_name), @field(init_props, f_name));
+        } else if (f_attrs.default_value_ptr) |ptr| {
+            @field(inst, f_name) = @as(*const @FieldType(T, f_name), @ptrCast(@alignCast(ptr))).*;
         } else {
-            @field(inst, f.name) = undefined;
+            @field(inst, f_name) = undefined;
         }
     }
 }
@@ -939,11 +939,11 @@ fn initInstance(comptime T: type, inst: *T, init_props: anytype) void {
 /// rebuild; state fields (absent from `init_props`) are left untouched.
 fn applyProps(comptime T: type, inst: *T, init_props: anytype) void {
     comptime validateProps(T, @TypeOf(init_props));
-    inline for (std.meta.fields(@TypeOf(init_props))) |f| {
-        if (@hasField(T, f.name)) assignProp(
-            @FieldType(T, f.name),
-            &@field(inst, f.name),
-            @field(init_props, f.name),
+    inline for (@typeInfo(@TypeOf(init_props)).@"struct".field_names) |f_name| {
+        if (@hasField(T, f_name)) assignProp(
+            @FieldType(T, f_name),
+            &@field(inst, f_name),
+            @field(init_props, f_name),
         );
     }
 }
@@ -981,7 +981,7 @@ fn destroyTramp(comptime T: type) *const fn (*anyopaque, std.mem.Allocator) void
 /// `Signal`/`Scope` state fields — or nothing (`onMount(self)`).
 fn callOnMount(comptime T: type, inst: *T, alloc: std.mem.Allocator) void {
     if (!@hasDecl(T, "onMount")) return;
-    const params = @typeInfo(@TypeOf(T.onMount)).@"fn".params;
+    const params = @typeInfo(@TypeOf(T.onMount)).@"fn".param_types;
     if (params.len >= 2) inst.onMount(alloc) else inst.onMount();
 }
 
@@ -1522,9 +1522,9 @@ pub fn childOf(comptime T: type, instance: *T) Child {
 fn applyBoxProps(ctx: *BuildContext, id: NodeId, props_: anytype) !void {
     const store = ctx.builder.store;
     const T = @TypeOf(props_);
-    inline for (std.meta.fields(T)) |f| {
-        const v = @field(props_, f.name);
-        const name = f.name;
+    inline for (@typeInfo(T).@"struct".field_names) |f_name| {
+        const v = @field(props_, f_name);
+        const name = f_name;
         if (comptime std.mem.eql(u8, name, "width")) {
             try store.setLayout(id, .width, asDim(v).toProp());
         } else if (comptime std.mem.eql(u8, name, "height")) {
@@ -1711,7 +1711,7 @@ fn hashKey(v: anytype) u64 {
     const T = @TypeOf(v);
     return switch (@typeInfo(T)) {
         .int, .comptime_int => @intCast(v),
-        .@"enum" => @intFromEnum(v),
+        .@"enum" => @backingInt(v),
         .pointer => |p| blk: {
             if (p.size == .slice and p.child == u8) break :blk std.hash.Wyhash.hash(0, v);
             // String literals arrive as *const [N:0]u8 — coerce to a slice.
@@ -1748,8 +1748,8 @@ fn numF32(v: anytype) f32 {
 
 pub fn buildChildren(ctx: *BuildContext, children: anytype) !void {
     const T = @TypeOf(children);
-    inline for (std.meta.fields(T)) |f| {
-        try buildChild(ctx, @field(children, f.name));
+    inline for (@typeInfo(T).@"struct".field_names) |f_name| {
+        try buildChild(ctx, @field(children, f_name));
     }
 }
 
@@ -3034,7 +3034,7 @@ test "on_resize: C-ABI resize event carries width/height in x/y and routes by no
     const t = try buildResizeTree(&env, &probe);
     const core_events = @import("../core/events.zig");
     const cev = core_events.CelerisEvent{
-        .event_type = @intFromEnum(core_events.EventType.resize),
+        .event_type = @backingInt(core_events.EventType.resize),
         .node_id = t.panel,
         .action_id = "",
         .x = 321,
@@ -3121,7 +3121,7 @@ test "ctx.onScroll / onScrollH wire scroll handlers on a raw-builder node, like 
 
 test "columnAtXStyled: mono hit-test lands on the right column far into a long line" {
     const m = @import("testkit.zig").measureStub();
-    const line = "x" ** 200;
+    const line: []const u8 = &@as([200]u8, @splat('x'));
     // Mono advance is 12px; the old un-styled columnAtX reads the same x with 10px
     // per char and is off by 20% — 33 columns by column 166.
     const x: f32 = 166 * 12 + 1;
@@ -3140,7 +3140,7 @@ test "columnAtXStyled: mono hit-test lands on the right column far into a long l
 test "columnAtXStyled measures prefixes (kerning) and returns codepoint boundaries" {
     const m = @import("testkit.zig").measureStub();
     // "AVAV…": each A|V pair kerns −3px. Prefix widths: A=10, AV=17, AVA=27, AVAV=34.
-    const line = "AV" ** 40;
+    const line: []const u8 = @ptrCast(&@as([40][2]u8, @splat("AV".*)));
     // Column 60 starts at 30 pairs * 17 = 510px. Summing single chars would put it at 600.
     try testing.expectEqual(@as(usize, 60), columnAtXStyled(m, line, 16, .{}, 511));
     try testing.expect(columnAtX(m, line, 16, 511) != 60);

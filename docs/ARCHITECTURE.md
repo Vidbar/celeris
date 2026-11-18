@@ -331,7 +331,7 @@ allowed but must be listed in `CHANGELOG.md`.
 
 ---
 
-## How to verify (Zig 0.16)
+## How to verify (Zig 0.17)
 
 - `zig build test` — unit tests, the adversarial C-API fuzz gate, the C host smoke
   test (`examples/c_smoke.c`) and a `zig fmt` check. Headless: no window needed.

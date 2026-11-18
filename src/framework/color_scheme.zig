@@ -312,9 +312,9 @@ test "themeFromSeed: every token set (alpha > 0) for both brightnesses" {
     for (SEEDS) |seed| {
         inline for (.{ Brightness.light, Brightness.dark }) |b| {
             const t = themeFromSeed(seed, b);
-            inline for (std.meta.fields(Theme)) |f| {
-                if (f.type == Color) {
-                    try testing.expect(@field(t, f.name).a > 0);
+            inline for (@typeInfo(Theme).@"struct".field_names) |f_name| {
+                if (@FieldType(Theme, f_name) == Color) {
+                    try testing.expect(@field(t, f_name).a > 0);
                 }
             }
         }

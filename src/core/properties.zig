@@ -237,9 +237,9 @@ pub const ModifierKey = enum {
     hover_within,
 };
 
-const layout_count = @typeInfo(LayoutKey).@"enum".fields.len;
-const style_count = @typeInfo(StyleKey).@"enum".fields.len;
-const modifier_count = @typeInfo(ModifierKey).@"enum".fields.len;
+const layout_count = @typeInfo(LayoutKey).@"enum".field_names.len;
+const style_count = @typeInfo(StyleKey).@"enum".field_names.len;
+const modifier_count = @typeInfo(ModifierKey).@"enum".field_names.len;
 
 // ── NodeProps ─────────────────────────────────────────────────────────────────
 /// Per-node property bag stored directly in a contiguous array indexed by NodeId.
@@ -250,9 +250,9 @@ const modifier_count = @typeInfo(ModifierKey).@"enum".fields.len;
 /// overflow footgun, and is smaller (no key bytes, no length field, sized to the
 /// exact number of keys).
 pub const NodeProps = struct {
-    layout: [layout_count]?PropValue = [_]?PropValue{null} ** layout_count,
-    style: [style_count]?PropValue = [_]?PropValue{null} ** style_count,
-    modifier: [modifier_count]?PropValue = [_]?PropValue{null} ** modifier_count,
+    layout: [layout_count]?PropValue = @splat(null),
+    style: [style_count]?PropValue = @splat(null),
+    modifier: [modifier_count]?PropValue = @splat(null),
     text_content: ?[]const u8 = null,
     /// Vertices of a `NodeType.path` node. Store-owned (allocated by `setPath`,
     /// freed by `freeEntryStrings`), variable-length, per-node — the same
@@ -366,7 +366,7 @@ pub const PropertyStore = struct {
         const shaping_keys = [_]StyleKey{ .font_size, .font_role, .letter_spacing, .line_height, .text_wrap };
         var had_shaping_style = false;
         for (shaping_keys) |k| {
-            if (entry.style[@intFromEnum(k)] != null) had_shaping_style = true;
+            if (entry.style[@backingInt(k)] != null) had_shaping_style = true;
         }
 
         self.freeEntryStrings(entry);
@@ -473,7 +473,7 @@ pub const PropertyStore = struct {
         // dirty only — the next full solve recomputes the same positions (flexbox
         // adds the offset when placing this node's children), so both paths agree.
         if (key == .scroll_offset_y or key == .scroll_offset_x) {
-            const slot = &self.props.items[node_id].layout[@intFromEnum(key)];
+            const slot = &self.props.items[node_id].layout[@backingInt(key)];
             const old_val: f32 = if (slot.*) |p| scrollOffsetValue(p) else 0.0;
             const changed = self.writeSlot(slot, value);
             if (changed) {
@@ -495,7 +495,7 @@ pub const PropertyStore = struct {
             return;
         }
 
-        const changed = self.writeSlot(&self.props.items[node_id].layout[@intFromEnum(key)], value);
+        const changed = self.writeSlot(&self.props.items[node_id].layout[@backingInt(key)], value);
         if (changed) {
             if (self.registry) |r| {
                 r.global_layout_dirty = true;
@@ -515,7 +515,7 @@ pub const PropertyStore = struct {
 
     pub fn setStyle(self: *PropertyStore, node_id: reg.NodeId, key: StyleKey, value: PropValue) !void {
         if (node_id >= self.props.items.len) return self.discardUnowned(value);
-        const changed = self.writeSlot(&self.props.items[node_id].style[@intFromEnum(key)], value);
+        const changed = self.writeSlot(&self.props.items[node_id].style[@backingInt(key)], value);
         if (changed) {
             if (self.registry) |r| {
                 // font_size changes the measured text size, so it must invalidate
@@ -547,7 +547,7 @@ pub const PropertyStore = struct {
 
     pub fn setModifier(self: *PropertyStore, node_id: reg.NodeId, key: ModifierKey, value: PropValue) !void {
         if (node_id >= self.props.items.len) return self.discardUnowned(value);
-        const changed = self.writeSlot(&self.props.items[node_id].modifier[@intFromEnum(key)], value);
+        const changed = self.writeSlot(&self.props.items[node_id].modifier[@backingInt(key)], value);
         if (changed) self.firePropChanged(node_id, .{ .modifier = key });
     }
 
@@ -662,17 +662,17 @@ pub const PropertyStore = struct {
 
     pub fn getLayout(self: *const PropertyStore, node_id: reg.NodeId, key: LayoutKey) ?PropValue {
         if (node_id >= self.props.items.len) return null;
-        return self.props.items[node_id].layout[@intFromEnum(key)];
+        return self.props.items[node_id].layout[@backingInt(key)];
     }
 
     pub fn getStyle(self: *const PropertyStore, node_id: reg.NodeId, key: StyleKey) ?PropValue {
         if (node_id >= self.props.items.len) return null;
-        return self.props.items[node_id].style[@intFromEnum(key)];
+        return self.props.items[node_id].style[@backingInt(key)];
     }
 
     pub fn getModifier(self: *const PropertyStore, node_id: reg.NodeId, key: ModifierKey) ?PropValue {
         if (node_id >= self.props.items.len) return null;
-        return self.props.items[node_id].modifier[@intFromEnum(key)];
+        return self.props.items[node_id].modifier[@backingInt(key)];
     }
 
     /// Reads an on/off modifier (`disabled`, `pointer_events_none`, `overflow_hidden`,
@@ -840,11 +840,11 @@ test "Property store is O(1) direct-indexed across every key, smaller footprint"
     // Every layout key is independently settable/readable by direct index (no scan,
     // no fixed-cap overflow possible).
     inline for (0..layout_count) |i| {
-        const k: LayoutKey = @enumFromInt(i);
+        const k: LayoutKey = @fromBackingInt(@intCast(i));
         try store.setLayout(0, k, .{ .number = @floatFromInt(i) });
     }
     inline for (0..layout_count) |i| {
-        const k: LayoutKey = @enumFromInt(i);
+        const k: LayoutKey = @fromBackingInt(@intCast(i));
         try std.testing.expectEqual(@as(f32, @floatFromInt(i)), store.getLayout(0, k).?.number);
     }
 

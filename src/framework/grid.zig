@@ -14,7 +14,7 @@ pub fn grid(ctx: *component.BuildContext, comptime columns: usize, children: any
     try b.flexColumn(container);
     try b.width(container, 100, .percent);
 
-    const fields = std.meta.fields(@TypeOf(children));
+    const fields = @typeInfo(@TypeOf(children)).@"struct".field_names;
     if (fields.len > 0 and columns > 0) {
         comptime var i: usize = 0;
         inline while (i < fields.len) : (i += columns) {
@@ -26,7 +26,7 @@ pub fn grid(ctx: *component.BuildContext, comptime columns: usize, children: any
             inline while (c < columns and i + c < fields.len) : (c += 1) {
                 const cell = try b.openNodeKeyed(.box, null);
                 try b.flexGrow(cell, 1);
-                try component.buildChild(ctx, @field(children, fields[i + c].name));
+                try component.buildChild(ctx, @field(children, fields[i + c]));
                 b.close(); // cell
             }
 

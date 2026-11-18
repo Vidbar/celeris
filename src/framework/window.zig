@@ -83,7 +83,7 @@ pub const Window = struct {
 // Per-engine window tracking, indexed by (engine_id - 1). The engine assigns
 // contiguous ids starting at 1, so this doubles as the trampoline slot index.
 const MAX_WINDOWS = 16;
-var g_windows: [MAX_WINDOWS]?*Window = [_]?*Window{null} ** MAX_WINDOWS;
+var g_windows: [MAX_WINDOWS]?*Window = @splat(null);
 
 const core_events = @import("../core/events.zig");
 const CelerisEvent = core_events.CelerisEvent;
@@ -142,7 +142,7 @@ test "Per-engine trampoline routes only to the owning window's router" {
     try w2.router.onNode(5, .click, .{ .ptr = null, .call = Sink.onW2 });
 
     var ev = CelerisEvent{
-        .event_type = @intFromEnum(core_events.EventType.click),
+        .event_type = @backingInt(core_events.EventType.click),
         .node_id = 5,
         .action_id = "n5",
         .x = 0,

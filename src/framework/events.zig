@@ -161,11 +161,11 @@ pub const Key = enum(u32) {
     /// Null for 0 (no key / unmapped on the platform side).
     pub fn fromCode(raw: u32) ?Key {
         if (raw == 0) return null;
-        return @enumFromInt(raw);
+        return @fromBackingInt(@intCast(raw));
     }
 
     pub fn code(self: Key) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 
@@ -663,7 +663,7 @@ pub const EventRouter = struct {
 
     /// Routes a structured C-ABI event (the live path) — no JSON parsing.
     pub fn dispatchEvent(self: *EventRouter, ev: *const core_events.CelerisEvent) usize {
-        const et: core_events.EventType = @enumFromInt(ev.event_type);
+        const et: core_events.EventType = @fromBackingInt(@intCast(ev.event_type));
         if (et == .resize) return self.route(.{
             .name = et.name(),
             .id = std.mem.span(ev.action_id),
@@ -945,8 +945,8 @@ test "Event.key names key events and ignores overloaded key_code uses" {
     try t.expectEqual(@as(?Key, null), (Event{ .name = "double_click", .id = "", .key_code = 2 }).key());
     try t.expectEqual(@as(?Key, null), (Event{ .name = "char_input", .id = "", .key_code = 'a' }).key());
     // fromCode/code round-trip across every named key.
-    inline for (@typeInfo(Key).@"enum".fields) |f| {
-        const k: Key = @enumFromInt(f.value);
+    inline for (@typeInfo(Key).@"enum".field_values) |v| {
+        const k: Key = @fromBackingInt(v);
         try t.expectEqual(k, Key.fromCode(k.code()).?);
     }
 }

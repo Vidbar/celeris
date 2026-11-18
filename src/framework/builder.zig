@@ -730,7 +730,7 @@ pub const UIBuilder = struct {
     /// mono-bold). Requires the corresponding face to have been registered on the
     /// atlas (`FontAtlas.addRoleFont`); an unregistered role renders as the primary.
     pub fn fontRole(self: *UIBuilder, id: NodeId, font_role: FontRole) !void {
-        try self.store.setStyle(id, .font_role, .{ .number = @floatFromInt(@intFromEnum(font_role)) });
+        try self.store.setStyle(id, .font_role, .{ .number = @floatFromInt(@backingInt(font_role)) });
     }
 
     fn currentRole(self: *UIBuilder, id: NodeId) FontRole {

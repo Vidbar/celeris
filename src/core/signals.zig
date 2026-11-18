@@ -362,7 +362,7 @@ pub fn Signal(comptime T: type) type {
         /// opens a propagation so dependents run once, in dependency order, after it.
         pub fn set(self: *Self, v: T) void {
             if (valuesEqual(T, self.value, v)) return;
-            if (builtin.mode == .Debug and isBuildSelfWrite(self.subscribers.items)) {
+            if (builtin.mode == .debug and isBuildSelfWrite(self.subscribers.items)) {
                 @panic("Signal.set inside build() on a signal this build already read with get(): " ++
                     "the re-run is dropped (stale UI) or runs re-entrantly. Read it with peek(), " ++
                     "or move the write to an event handler / effect. See FRAMEWORK_API.md, " ++
