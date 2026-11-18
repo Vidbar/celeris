@@ -9,6 +9,29 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.6.4 — 2026-11-17
+
+No BREAKING changes. No C-ABI surface change.
+
+### Added
+
+- `IconButton.size` (default 32) and `IconButton.icon_size` (default 16): button
+  side and glyph size, independently. Defaults keep today's look. Also exported:
+  `fw.icon_button.DEFAULT_SIZE` / `DEFAULT_ICON_SIZE`.
+- `MenuBar.item_radius` and `MenuBar.item_gap` (both default 0): rounded
+  highlights and spacing for the top-level buttons, e.g. a menu bar embedded in a
+  custom caption.
+- `Theme.StateLayer.opacity()` is now public.
+
+### Changed
+
+- `MenuBar` buttons now show a highlight: the theme's `text` color at the M3
+  hover opacity under the pointer, and at the pressed opacity while the button's
+  menu is open. Before, a hover painted nothing and an open menu left its button
+  unmarked. It is a render-only effect over each menu's `is_open`, so every close
+  path clears it. `MenuBar.deinit` must run before its menus' `deinit` (the
+  natural `defer` order).
+
 ## 0.6.3 — 2026-11-17
 
 No BREAKING changes. No C-ABI surface change.
