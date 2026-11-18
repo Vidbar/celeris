@@ -39,8 +39,12 @@ Implemented today, natively in Zig:
 - **Widget suite (20+):** Button, IconButton, Checkbox, Radio, RadioGroup,
   Slider, Dropdown, TextInput, TextArea (selection, undo/redo, password, IME),
   Tabs, SplitPane, ScrollView, TreeView, VirtualList (10k+ items, dozens of live
-  nodes), Menu/MenuBar, Dialog, Tooltip, Toast, ProgressBar,
-  AppBar/StatusBar/BottomBar.
+  nodes), VirtualGrid (2D windowing: a 100k × 40 grid materializes only the
+  visible cells), Grid, Stack, Menu/MenuBar, Dialog, Tooltip, Toast, ProgressBar,
+  AppBar/StatusBar/BottomBar, and WindowChrome for custom title bars.
+- **Icons:** the Codicons font is embedded and rendered through the normal text
+  pipeline (tints with `color`, scales with `font_size`/DPI); named constants in
+  `fw.icons`.
 - **Focus & keyboard:** every widget focusable and keyboard-operable (Tab order,
   Enter/Space/arrows), rendered focus ring, focus scopes that trap and restore
   (modals/menus), engine-level accelerator table.
