@@ -9,6 +9,17 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## 0.6.2 — 2026-11-17
+
+No BREAKING changes. No C-ABI surface change.
+
+### Added
+
+- Run and debug icons in `icons`: `debug`, `debug_start`, `debug_stop`,
+  `debug_alt` and `debug_alt_small` (codicons EAD8, EAD3, EAD7, EB91, EBA8), for
+  Run / Stop / Debug buttons in a title bar. A test checks that each glyph is in
+  the embedded `codicon.ttf`.
+
 ## 0.6.1 — 2026-11-17
 
 No BREAKING changes. No C-ABI surface change.
