@@ -191,7 +191,7 @@ pub const Theme = struct {
         pressed,
 
         /// M3-specified overlay opacities per state.
-        fn opacity(self: StateLayer) f32 {
+        pub fn opacity(self: StateLayer) f32 {
             return switch (self) {
                 .hover => 0.08,
                 .focus => 0.10,

@@ -17,11 +17,21 @@ const theme_mod = @import("theme.zig");
 const BuildContext = component.BuildContext;
 const Text = component.Text;
 
+/// Default button side and glyph size, in px.
+pub const DEFAULT_SIZE: f32 = 32;
+pub const DEFAULT_ICON_SIZE: f32 = 16;
+
 pub const IconButton = struct {
     // Props (set from mountOwned's init_props; re-applied on rebuild).
     icon: []const u8,
     on_click: ?events.Handler = null,
     disabled: bool = false,
+    /// Side of the square button, in px. Default 32 (unchanged look). Smaller
+    /// values fit dense strips, e.g. 26 inside a 35 px custom caption.
+    size: f32 = DEFAULT_SIZE,
+    /// Glyph size in px, independent of `size`; the glyph stays centered. Not
+    /// clamped — keep it below `size`.
+    icon_size: f32 = DEFAULT_ICON_SIZE,
 
     // State (auto-created in onMount; preserved across rebuilds).
     hovered: signals.Signal(bool) = undefined,
@@ -54,8 +64,8 @@ pub const IconButton = struct {
         self.store = ctx.builder.store;
 
         self.root = try ctx.boxNode(.{
-            .width = 32,
-            .height = 32,
+            .width = self.size,
+            .height = self.size,
             .direction = .row,
             .@"align" = .center,
             .justify = .center,
@@ -66,7 +76,7 @@ pub const IconButton = struct {
             .on_hover = if (self.disabled) null else ctx.hoverPressSetter(self),
             .on_press = if (self.disabled) null else ctx.signalSetter(&self.pressed),
         }, .{
-            Text{ .content = self.icon, .color = component.rgb(t.text.r, t.text.g, t.text.b), .size = 16 },
+            Text{ .content = self.icon, .color = component.rgb(t.text.r, t.text.g, t.text.b), .size = self.icon_size },
         });
 
         // Overlay is a fine-grained render-only effect (created once, re-applied
@@ -184,4 +194,78 @@ test "IconButton click fires the typed on_click handler" {
 
     _ = router.route(.{ .name = "click", .id = "", .node_id = boxn });
     try testing.expectEqual(@as(u32, 1), Sink.clicks);
+}
+
+const ts = @import("test_support.zig");
+
+const Solved = struct { box: reg.Geometry, glyph: reg.Geometry, glyph_size: f32, radius: f32 };
+
+/// Mounts an IconButton under a fixed-size root and solves layout — assertions
+/// are on resolved geometry, not just on what the store holds.
+fn solvedIconButton(env: *ts.Harness, init_props: anytype) !Solved {
+    return solvedIconButtonWith(env, null, init_props);
+}
+
+fn solvedIconButtonWith(env: *ts.Harness, atlas: ?*@import("../render/text.zig").FontAtlas, init_props: anytype) !Solved {
+    var b = component.UIBuilder.init(&env.registry, &env.store);
+    b.theme = dark;
+    var ctx = BuildContext{ .builder = &b, .router = &env.router, .mounts = &env.mounts };
+    const root = try b.openNodeKeyed(.box, null);
+    try b.width(root, 200, .px);
+    try b.height(root, 100, .px);
+    try ctx.mountOwned(IconButton, init_props);
+    b.close();
+    if (atlas) |at| env.solveWith(at, root, 200, 100) else env.solve(root, 200, 100);
+    const anchor = env.registry.getNode(root).?.first_child;
+    const boxn = env.registry.getNode(anchor).?.first_child;
+    const glyph = env.registry.getNode(boxn).?.first_child;
+    return .{
+        .box = env.geom(boxn),
+        .glyph = env.geom(glyph),
+        .glyph_size = env.store.getStyle(glyph, .font_size).?.dimension.value,
+        .radius = env.store.getStyle(boxn, .radius).?.dimension.value,
+    };
+}
+
+test "IconButton defaults: 32x32 box, 16px glyph, theme radius (regression)" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    const r = try solvedIconButton(&env, .{ .icon = "O" });
+    try testing.expectApproxEqAbs(@as(f32, 32), r.box.width, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 32), r.box.height, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 16), r.glyph_size, 0.01);
+    try testing.expectApproxEqAbs(dark.radius_base, r.radius, 0.01);
+}
+
+test "IconButton .size = 26: 26x26 box, glyph centered, same radius" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    const ttf = try ts.loadSystemFont(testing.allocator);
+    defer testing.allocator.free(ttf);
+    var atlas = try @import("../render/text.zig").FontAtlas.init(testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+    const r = try solvedIconButtonWith(&env, &atlas, .{ .icon = "O", .size = 26 });
+    try testing.expectApproxEqAbs(@as(f32, 26), r.box.width, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 26), r.box.height, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 16), r.glyph_size, 0.01);
+    try testing.expectApproxEqAbs(dark.radius_base, r.radius, 0.01);
+    try testing.expect(r.glyph.width > 0 and r.glyph.height > 0);
+    const left = r.glyph.x - r.box.x;
+    const right = (r.box.x + r.box.width) - (r.glyph.x + r.glyph.width);
+    const top = r.glyph.y - r.box.y;
+    const bottom = (r.box.y + r.box.height) - (r.glyph.y + r.glyph.height);
+    try testing.expectApproxEqAbs(left, right, 0.5);
+    try testing.expectApproxEqAbs(top, bottom, 0.5);
+}
+
+test "IconButton .icon_size changes the glyph, not the box" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    const r = try solvedIconButton(&env, .{ .icon = "O", .icon_size = 12 });
+    try testing.expectApproxEqAbs(@as(f32, 32), r.box.width, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 32), r.box.height, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 12), r.glyph_size, 0.01);
 }

@@ -887,6 +887,18 @@ pub const MenuBar = struct {
     /// Only takes effect if the host places the bar inside a flex row — a
     /// hugged bar in a flex column still gets the row's full width.
     hug: bool = false,
+    /// Corner radius (px) of each top-level button's highlight (hover and
+    /// open menu). 0 = square corners.
+    item_radius: f32 = 0,
+    /// Horizontal space (px) between adjacent top-level buttons, so two
+    /// highlights side by side don't touch.
+    item_gap: f32 = 0,
+
+    /// Index of the button under the pointer (-1 = none). Internal state; the
+    /// highlight effect reads it together with each menu's `is_open`.
+    hovered: signals.Signal(i32),
+    scope: signals.Scope,
+    bound: bool = false,
 
     const Entry = struct {
         label: []const u8,
@@ -900,11 +912,18 @@ pub const MenuBar = struct {
             .allocator = allocator,
             .id = id,
             .entries = std.array_list.Managed(Entry).init(allocator),
+            .hovered = signals.Signal(i32).init(allocator, -1),
+            .scope = signals.Scope.init(allocator),
         };
         return self;
     }
 
+    /// Deinit the bar BEFORE its menus (the natural `defer` order when the
+    /// menus are created first): the highlight effect observes each menu's
+    /// `is_open` signal.
     pub fn deinit(self: *MenuBar) void {
+        self.scope.deinit();
+        self.hovered.deinit();
         self.entries.deinit();
         self.allocator.destroy(self);
         // Menus are host-owned; not freed here.
@@ -919,6 +938,20 @@ pub const MenuBar = struct {
     /// matching the event's node against the button ids (no per-button
     /// routing strings).
     fn onButton(self: *MenuBar, ev: events.Event) void {
+        const enter = std.mem.eql(u8, ev.name, "mouse_enter");
+        if (enter or std.mem.eql(u8, ev.name, "mouse_leave")) {
+            for (self.entries.items, 0..) |e, i| {
+                if (e.btn_id != ev.node_id) continue;
+                const idx: i32 = @intCast(i);
+                if (enter) {
+                    self.hovered.set(idx);
+                } else if (self.hovered.peek() == idx) {
+                    self.hovered.set(-1);
+                }
+                return;
+            }
+            return;
+        }
         if (!std.mem.eql(u8, ev.name, "click")) return;
         for (self.entries.items) |e| {
             if (e.btn_id != ev.node_id) continue;
@@ -972,6 +1005,7 @@ pub const MenuBar = struct {
         try b.alignItems(bar, .stretch);
         const bg = self.background orelse self.theme.surface_high;
         try b.backgroundAlpha(bar, bg.r, bg.g, bg.b, @as(f32, @floatFromInt(bg.a)) / 255.0);
+        if (self.item_gap > 0) try b.gap(bar, self.item_gap);
 
         for (self.entries.items) |*e| {
             const btn = try b.openNodeKeyed(.box, null);
@@ -1000,7 +1034,13 @@ pub const MenuBar = struct {
             // the menu, not start a window drag (the caption's drag region is an
             // ancestor of this button and would otherwise also see the mouse_down).
             try b.noDrag(btn);
-            if (ctx.router) |r| try r.onNode(btn, .click, ctx.handler(self, onButton));
+            if (self.item_radius > 0) try b.radius(btn, self.item_radius);
+            if (ctx.router) |r| {
+                const h = ctx.handler(self, onButton);
+                try r.onNode(btn, .click, h);
+                try r.onNode(btn, .mouse_enter, h);
+                try r.onNode(btn, .mouse_leave, h);
+            }
             const lbl = try b.addText(e.label);
             try b.fontSize(lbl, 14);
             try b.flexShrink(lbl, 0);
@@ -1011,6 +1051,28 @@ pub const MenuBar = struct {
 
         // Each menu is an overlay sibling of the bar.
         for (self.entries.items) |e| try e.menu.build(ctx);
+
+        // Button highlight: one fine effect, render-only (no rebuild). It
+        // observes `hovered` and every menu's `is_open`, so ANY close path
+        // (Escape, outside click, selection, switching menus) clears the
+        // open highlight — there is no imperative paint to forget.
+        try component.bindVisuals(self, &self.scope, &self.bound, updateVisuals);
+    }
+
+    /// M3 state layers over whatever the bar paints: the theme's `text` color
+    /// at the hover opacity, and at the pressed opacity while the button's
+    /// menu is open (the open menu wins over hover).
+    fn updateVisuals(self: *MenuBar) void {
+        const store = self.store orelse return;
+        const hov = self.hovered.get();
+        const on = self.theme.text;
+        const SL = theme_mod.Theme.StateLayer;
+        for (self.entries.items, 0..) |e, i| {
+            const open = e.menu.is_open.get();
+            if (e.btn_id == reg.NULL_NODE) continue;
+            const a: f32 = if (open) SL.pressed.opacity() else if (hov == @as(i32, @intCast(i))) SL.hover.opacity() else 0.0;
+            store.setStyle(e.btn_id, .background, props.PropValue.rgbA(on.r, on.g, on.b, a)) catch {};
+        }
     }
 };
 
@@ -1866,6 +1928,124 @@ test "MenuBar: clicking a button opens its menu below it; switching closes the o
     try testing.expect(!edit.isOpen());
 }
 
+/// Builds the bar (and its menus) under a 100% x 600 px app root; returns the root.
+fn buildTestBar(bld: *component.UIBuilder, ctx: *component.BuildContext, bar: *MenuBar) !reg.NodeId {
+    const app_root = try bld.openBox();
+    try bld.width(app_root, 100, .percent);
+    try bld.height(app_root, 600, .px);
+    try bar.build(ctx);
+    bld.close();
+    return app_root;
+}
+
+fn btnAlpha(env: *ts.Harness, bar: *MenuBar, i: usize) f32 {
+    return env.store.getStyle(bar.entries.items[i].btn_id, .background).?.color.a;
+}
+
+test "MenuBar: hover and open-menu highlight are a fine effect cleared by every close path" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+
+    const file = try Menu.init(testing.allocator, "file");
+    defer file.deinit();
+    try file.addItem("New", "new");
+    const edit = try Menu.init(testing.allocator, "edit");
+    defer edit.deinit();
+    try edit.addItem("Undo", "undo");
+    const bar = try MenuBar.init(testing.allocator, "mbar");
+    defer bar.deinit();
+    try bar.addMenu("File", file);
+    try bar.addMenu("Edit", edit);
+    const root = try buildTestBar(&bld, &ctx, bar);
+    env.solve(root, 800, 600);
+
+    const SL = theme_mod.Theme.StateLayer;
+    const hov = SL.hover.opacity();
+    const pressed = SL.pressed.opacity();
+    const File = bar.entries.items[0].btn_id;
+    try testing.expectApproxEqAbs(@as(f32, 0), btnAlpha(&env, bar, 0), 0.001);
+
+    for (env.registry.nodes.items) |*n| {
+        n.layout_dirty = false;
+        n.render_dirty = false;
+    }
+    // Hover → state layer, render-only.
+    _ = env.router.route(.{ .name = "mouse_enter", .id = "", .node_id = File });
+    try testing.expectApproxEqAbs(hov, btnAlpha(&env, bar, 0), 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 0), btnAlpha(&env, bar, 1), 0.001);
+    var any_layout = false;
+    for (env.registry.nodes.items) |*n| {
+        if (n.alive and n.layout_dirty) any_layout = true;
+    }
+    try testing.expect(!any_layout);
+
+    // Click → open highlight (wins over hover).
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = File });
+    try testing.expect(file.isOpen());
+    try testing.expectApproxEqAbs(pressed, btnAlpha(&env, bar, 0), 0.01);
+
+    // Escape closes the menu WITHOUT going through the bar → highlight drops
+    // back to hover.
+    _ = env.router.route(.{ .name = "key_down", .id = "", .node_id = file.panel_id, .key_code = events.Key.escape.code() });
+    try testing.expect(!file.isOpen());
+    try testing.expectApproxEqAbs(hov, btnAlpha(&env, bar, 0), 0.01);
+
+    // Leave → idle.
+    _ = env.router.route(.{ .name = "mouse_leave", .id = "", .node_id = File });
+    try testing.expectApproxEqAbs(@as(f32, 0), btnAlpha(&env, bar, 0), 0.001);
+
+    // Open Edit, then an outside click on the backdrop closes it → no highlight.
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = bar.entries.items[1].btn_id });
+    try testing.expectApproxEqAbs(pressed, btnAlpha(&env, bar, 1), 0.01);
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = edit.backdrop_id });
+    try testing.expect(!edit.isOpen());
+    try testing.expectApproxEqAbs(@as(f32, 0), btnAlpha(&env, bar, 1), 0.001);
+}
+
+test "MenuBar: item_radius rounds the buttons and item_gap spaces them; defaults unchanged" {
+    for ([_]bool{ false, true }) |custom| {
+        var env = ts.Harness.init(testing.allocator);
+        defer env.deinit();
+        env.store.setRegistry(&env.registry);
+        var bld = component.UIBuilder.init(&env.registry, &env.store);
+        bld.theme = testTheme();
+        var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+
+        const file = try Menu.init(testing.allocator, "file");
+        defer file.deinit();
+        const edit = try Menu.init(testing.allocator, "edit");
+        defer edit.deinit();
+        const bar = try MenuBar.init(testing.allocator, "mbar");
+        defer bar.deinit();
+        try bar.addMenu("File", file);
+        try bar.addMenu("Edit", edit);
+        bar.height = 26;
+        if (custom) {
+            bar.item_radius = 4;
+            bar.item_gap = 6;
+        }
+        const root = try buildTestBar(&bld, &ctx, bar);
+        env.solve(root, 800, 600);
+
+        const b0 = bar.entries.items[0].btn_id;
+        const g0 = env.geom(b0);
+        const g1 = env.geom(bar.entries.items[1].btn_id);
+        // Height still comes from MenuBar.height in both cases.
+        try testing.expectApproxEqAbs(@as(f32, 26), g0.height, 0.01);
+        try testing.expectApproxEqAbs(@as(f32, 26), g1.height, 0.01);
+        if (custom) {
+            try testing.expectApproxEqAbs(@as(f32, 4), env.store.getStyle(b0, .radius).?.dimension.value, 0.001);
+            try testing.expectApproxEqAbs(@as(f32, 6), g1.x - (g0.x + g0.width), 0.01);
+        } else {
+            try testing.expect(env.store.getStyle(b0, .radius) == null);
+            try testing.expectApproxEqAbs(@as(f32, 0), g1.x - (g0.x + g0.width), 0.01);
+        }
+    }
+}
 test "Accelerators: chord lookup respects every modifier" {
     var acc = Accelerators.init(testing.allocator);
     defer acc.deinit();
