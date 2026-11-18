@@ -55,6 +55,15 @@ const stb = @cImport({
     @cInclude("stb_truetype.h");
 });
 
+/// True if `ttf` maps `codepoint` to a real (non-.notdef) glyph, using the same
+/// bounded stb lookup the atlas uses to pick a fallback face. False for a font
+/// stb cannot parse.
+pub fn fontHasGlyph(ttf: []const u8, codepoint: u21) bool {
+    var info: stb.stbtt_fontinfo = undefined;
+    if (stb.stbtt_InitFontBounded(&info, ttf.ptr, @intCast(ttf.len), stb.stbtt_GetFontOffsetForIndex(ttf.ptr, 0)) == 0) return false;
+    return stb.stbtt_FindGlyphIndex(&info, codepoint) != 0;
+}
+
 pub const ATLAS_WIDTH = 2048;
 pub const ATLAS_HEIGHT = 2048;
 /// Reference rasterization size (px). UI text (≤ this) scales down → crisp.

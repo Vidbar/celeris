@@ -9,6 +9,25 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No BREAKING changes. No C-ABI surface change.
+
+### Documentation
+
+- README and `docs/FRAMEWORK_API.md` now list the whole widget suite (VirtualList,
+  VirtualGrid, Grid, Stack, Dialog, Menu/MenuBar, TooltipHost, ToastHost,
+  ProgressBar, AppBar, WindowChrome, StatusBar, BottomBar, OverlayWindow), and
+  `FRAMEWORK_API.md` has a section on `fw.icons`, including how to draw an icon
+  that has no named constant.
+- `ARCHITECTURE.md`: the deferred data-grid item says that the windowing it
+  needs already exists as `VirtualGrid`.
+
+### Tests
+
+- The icon tests cover every constant in `fw.icons`, with no list to maintain.
+  They check each glyph with the same stb lookup the font atlas uses.
+
 ## 0.6.2 — 2026-11-17
 
 No BREAKING changes. No C-ABI surface change.

@@ -14,7 +14,7 @@ Any other language can use the C header directly.
 **0.6.2 — early, usable, pre-1.0.** The retained-mode core (**no virtual DOM**:
 granular dirty-tracking, keyed reconciliation, fine-grained signals) and the
 reactive framework on top of it are feature-complete for desktop apps and covered
-by a ~630-test suite. Windows is the primary platform; Linux (Wayland) is
+by a 600+ test suite. Windows is the primary platform; Linux (Wayland) is
 supported and built in CI. The Zig API and the C-ABI may still change before 1.0;
 breaking changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
