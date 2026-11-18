@@ -353,8 +353,13 @@ The engine keeps a separate measure cache for this content-width pass, as Yoga d
 
 **Available widgets:**
 
-1. **Buttons & Inputs:** `fw.button.Button`, `fw.icon_button.IconButton`, `fw.checkbox.Checkbox`, `fw.radio.Radio`, `fw.slider.Slider`, `fw.dropdown.Dropdown`, `fw.text_input.TextInput`, `fw.text_area.TextArea`.
+1. **Buttons & Inputs:** `fw.button.Button`, `fw.icon_button.IconButton`, `fw.checkbox.Checkbox`, `fw.radio.Radio`, `fw.slider.Slider`, `fw.dropdown.Dropdown`, `fw.radio_group.RadioGroup`, `fw.text_input.TextInput`, `fw.text_area.TextArea`.
 2. **Layout & Containers:** `fw.tabs.Tabs`, `fw.split_pane.SplitPane`, `fw.stack.Stack`, `fw.grid.Grid`, `fw.scroll_view.ScrollView`, `fw.scrollbar.Scrollbar`, `fw.tree_view.TreeView`.
+3. **Large data:** `fw.virtual_list.VirtualList(Item)` (windowed list), `fw.VirtualGrid(Datum)` (2D windowing over a pull source; see below).
+4. **Overlays & feedback:** `fw.dialog.Dialog`, `fw.menu.Menu` / `fw.menu.MenuBar`, `fw.tooltip.TooltipHost` (and `b.tooltip`), `fw.toast.ToastHost` (`fw.toast.show(text, kind, duration_ms)`), `fw.progress.ProgressBar`.
+5. **Window chrome & bars:** `fw.app_bar.AppBar`, `fw.window_chrome.WindowChrome` (custom caption; see `AppOptions`), `fw.status_bar.StatusBar`, `fw.bottom_bar.BottomBar`, `fw.OverlayWindow` (see *Windows*).
+
+**Icons (`fw.icons`).** The Codicons font is embedded and registered as a font fallback, so an icon is just a string constant drawn by the ordinary text pipeline: it tints with `color` and scales with `font_size` and DPI. Pass one as `IconButton`'s `.icon`, or as the text of any node. The constants are a curated subset — window chrome, navigation, actions (`play`, `stop_circle`, …), objects/status, and run/debug (`debug`, `debug_start`, `debug_stop`, `debug_alt`, `debug_alt_small`); the full name→codepoint table is `vendor/codicons/codicon.csv`, and a missing icon is one `cp(0x…)` line in `src/framework/icons.zig`.
 
 Widgets that host children (Tabs, SplitPane, ScrollView) take a `Child` via `fw.component.childOf(ChildType, &instance)`; `ChildType` needs both `pub fn build(self, ctx) !void` and `pub fn deinit(self) void` (an empty `deinit` is fine; it runs when the child unmounts); some (e.g. a `Button` with composed content) take a slot via `fw.component.slot(&.{ ... })`. See `examples/dashboard.zig` for the full showcase.
 

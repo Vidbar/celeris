@@ -367,7 +367,7 @@ Large follow-ups needing dedicated design, real hardware, or OS services to veri
   waits for a control that needs miter (same gate as the tri-state); per-path
   opacity needs an offscreen coverage pass (overlapping capsules double-blend at
   joints otherwise); dashes are a fast-follow once AA is proven on hardware.
-- **data-grid** widget; **grid layout** algorithm; intrinsic `min-width: auto`
+- **data-grid** widget (headers, sorting, cell editing — the windowing underneath exists as `VirtualGrid`); **grid layout** algorithm; intrinsic `min-width: auto`
   (text min-content).
 - **Text:** color emoji (COLR/CPAL), bidi/RTL (UAX#9), rich text runs, full UAX#14
   pair table.
