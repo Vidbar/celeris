@@ -27,6 +27,9 @@ listed here as well.
   memory; and a write from a widget's `deinit` could re-run a build mid-teardown.
   The effect now has an `on_destroy` hook (new `Effect.on_destroy`): whichever of
   the scope and the mount goes first cleans up the other.
+- **Debug guard: destroying a running effect panics.** A `build()` that deinits the
+  `Scope` holding its own build-effect used to free the effect mid-run; debug builds
+  now panic with a pointer to *Writing signals during build*.
 
 ## 0.7.0 — 2026-11-18
 

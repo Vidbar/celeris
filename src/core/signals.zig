@@ -273,6 +273,15 @@ pub const Effect = struct {
     }
 
     fn destroy(self: *Effect) void {
+        // Destroying the effect that is running right now (e.g. a `build()` that
+        // deinits the Scope holding its own build-effect) frees it under its own
+        // feet: the rest of the run would subscribe a freed effect, and the
+        // component layer would rebuild through a freed mount record.
+        if (builtin.mode == .debug and tracker.current == self) {
+            @panic("Effect destroyed while it is running: a build()/effect deinit'd the Scope " ++
+                "that owns its own effect. Reset that Scope in onUnmount or an event handler " ++
+                "instead. See FRAMEWORK_API.md, \"Writing signals during build\".");
+        }
         self.clearDeps();
         self.deps.deinit(self.allocator);
         self.alive = false;

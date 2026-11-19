@@ -890,6 +890,8 @@ Mutate with `list_signal.set(new_items)`; the rebuild is isolated to `list_conta
 - **Allowed:** writing a signal this build has only `peek()`-ed or not read yet, or a signal owned by another component. The typical case is reconciling your own state against new props before building from it. `TreeView` does this with `selected`/`hovered`/`focus_state`: it `peek()`s them, clears any whose row no longer exists, and only then builds. Writes that reach other effects run after this build, in the same propagation.
 - **Not allowed:** writing a signal this build already read with `get()`. Inside a propagation the re-run it schedules is skipped, because this build already counts as the subtree's rebuild, so the UI keeps the stale value. On a first mount it re-enters the same build instead. Debug builds panic on it (`Signal.set` checks whether the running build-effect is subscribed to the signal). Read the signal with `peek()` if build only needs its current value, or move the write to an event handler or a separate effect.
 
+Likewise, `build` must not `deinit` the `Scope` that owns its own build-effect (for a `mountReactive` component, the scope you passed in): that frees the effect that is running. Debug builds panic on it. Reset that scope in `onUnmount` or an event handler instead.
+
 The same applies to host callbacks invoked from `build`: whatever they `set()` is subject to this rule. To react to a user change, prefer the widget's `on_change` handler, for example `Scrollbar.on_change`, over diffing in `build`.
 
 ## Recipes
