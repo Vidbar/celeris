@@ -181,7 +181,15 @@ pub const Query = struct {
     pub fn expectVisible(self: Query, node_id: reg.NodeId) AssertError!void {
         if (!self.h.isVisible(node_id)) return AssertError.NodeNotVisible;
     }
+
+    /// The face bits, decoration lines and faintness `node_id` draws with
+    /// (see `TextStyle`).
+    pub fn textStyle(self: Query, node_id: reg.NodeId) TextStyle {
+        return testkit_textStyle(&self.h.store, node_id);
+    }
 };
+
+const testkit_textStyle = textStyle;
 
 fn matchesModifierId(h: *Harness, node_id: reg.NodeId, key: props.ModifierKey, id: []const u8) bool {
     const modifier = h.store.getModifier(node_id, key) orelse return false;
@@ -189,6 +197,39 @@ fn matchesModifierId(h: *Harness, node_id: reg.NodeId, key: props.ModifierKey, i
         .string => |s| std.mem.eql(u8, s, id),
         else => false,
     };
+}
+
+// ── Text style read-back ──────────────────────────────────────────────────────
+
+const text_mod = @import("../render/text.zig");
+
+/// Everything a text node draws with beyond its string, decoded from the store —
+/// the values `b.fontBold` / `fontMono` / `fontItalic` / `textDecoration` /
+/// `decorationColorOf` / `textFaint` (or a `bindStyle` on their keys) wrote.
+/// `role.isItalic()` etc. read the face bits; `decoration` is the full line set.
+pub const TextStyle = struct {
+    role: text_mod.FontRole = .default,
+    decoration: text_mod.TextDecoration = .{},
+    /// RGBA 0..1, or null when unset (the lines then use the text color).
+    decoration_color: ?[4]f32 = null,
+    faint: bool = false,
+};
+
+pub fn textStyle(store: *const props.PropertyStore, node_id: reg.NodeId) TextStyle {
+    var s: TextStyle = .{};
+    if (store.getStyle(node_id, .font_role)) |v| {
+        if (v == .number) s.role = text_mod.roleFromOrdinal(v.number);
+    }
+    if (store.getStyle(node_id, .text_decoration)) |v| {
+        if (v == .number) s.decoration = text_mod.TextDecoration.fromNumber(v.number);
+    }
+    if (store.getStyle(node_id, .text_decoration_color)) |v| {
+        if (v == .color) s.decoration_color = .{ v.color.r, v.color.g, v.color.b, v.color.a };
+    }
+    if (store.getStyle(node_id, .text_faint)) |v| {
+        if (v == .boolean) s.faint = v.boolean;
+    }
+    return s;
 }
 
 // ── Text measurement stub ─────────────────────────────────────────────────────
@@ -199,10 +240,12 @@ const builder_mod = @import("builder.zig");
 /// window or fonts. Install it with `b.measure = fw.testkit.measureStub();`.
 ///
 /// Metrics (per codepoint, so UTF-8 text measures by character, not by byte):
-/// - `.default` → `default_advance` (10px), `.bold` → `bold_advance` (11px),
-///   `.mono` / `.mono_bold` → `mono_advance` (12px);
+/// - `.default` → `default_advance` (10px), `.bold` / `.bold_italic` →
+///   `bold_advance` (11px), `.italic` → `italic_advance` (9px — an italic face
+///   measures differently, so a widget that ignores the role is caught), any
+///   mono role (upright or italic) → `mono_advance` (12px: mono keeps the cell);
 /// - plus `letter_spacing` per codepoint, as the renderer applies tracking;
-/// - in `.default` and `.bold`, the pair "AV" kerns by `kern_av` (−3px), so a
+/// - in every proportional role, the pair "AV" kerns by `kern_av` (−3px), so a
 ///   widget that sums single-character widths instead of measuring prefixes
 ///   drifts here the way it would against a real font.
 /// The advances don't scale with `font_size`; tests compare columns and x, not size.
@@ -210,6 +253,7 @@ pub const MeasureStub = struct {
     pub const default_advance: f32 = 10;
     pub const bold_advance: f32 = 11;
     pub const mono_advance: f32 = 12;
+    pub const italic_advance: f32 = 9;
     pub const kern_av: f32 = -3;
 
     var ctx_byte: u8 = 0;
@@ -219,12 +263,16 @@ pub const MeasureStub = struct {
     }
 
     pub fn styled(_: *anyopaque, text: []const u8, _: f32, style: builder_mod.TextMeasure.MeasureStyle) f32 {
-        const adv: f32 = switch (style.role) {
-            .default => default_advance,
-            .bold => bold_advance,
-            .mono, .mono_bold => mono_advance,
-        };
-        const kerns = style.role == .default or style.role == .bold;
+        const r = style.role;
+        const adv: f32 = if (r.isMono())
+            mono_advance
+        else if (r.isBold())
+            bold_advance
+        else if (r.isItalic())
+            italic_advance
+        else
+            default_advance;
+        const kerns = !r.isMono();
         var w: f32 = 0;
         var prev: u21 = 0;
         var i: usize = 0;

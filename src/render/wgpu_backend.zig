@@ -62,6 +62,7 @@ fn profNowNs() i64 {
 const wgpu = @import("c_wgpu");
 const renderer_mod = @import("renderer.zig");
 const text = @import("text.zig");
+const text_deco = @import("text_decoration.zig");
 const reg = @import("../core/registry.zig");
 const props = @import("../core/properties.zig");
 const prof = @import("../core/profiler.zig");
@@ -1167,7 +1168,26 @@ pub const WgpuBackend = struct {
                     cb = c.color.b;
                     ca = c.color.a;
                 }
+                // Faint (SGR 2): the text and its lines at reduced alpha over the
+                // background — Ghostty's `faint-opacity` model.
+                const faint = if (store.getStyle(node_id, .text_faint)) |v| (v == .boolean and v.boolean) else false;
+                if (faint) ca *= text.FAINT_OPACITY;
                 const c_arr = [4]f32{ cr, cg, cb, ca };
+
+                const deco: text.TextDecoration = if (store.getStyle(node_id, .text_decoration)) |v|
+                    (if (v == .number) text.TextDecoration.fromNumber(v.number) else .{})
+                else
+                    .{};
+                const deco_col: [4]f32 = if (store.getStyle(node_id, .text_decoration_color)) |v| blk: {
+                    if (v != .color) break :blk c_arr;
+                    break :blk .{ v.color.r, v.color.g, v.color.b, v.color.a * (if (faint) text.FAINT_OPACITY else 1.0) };
+                } else c_arr;
+                const role: text.FontRole = if (store.getStyle(node_id, .font_role)) |v|
+                    (if (v == .number) text.roleFromOrdinal(v.number) else .default)
+                else
+                    .default;
+                const resolved = self.atlas.resolveRole(role);
+                const shear: f32 = if (resolved.synthetic_italic) text.SYNTHETIC_ITALIC_SHEAR else 0;
 
                 var text_align: enum { left, center, right } = .left;
                 if (store.getStyle(node_id, .text_align)) |ta| {
@@ -1200,7 +1220,44 @@ pub const WgpuBackend = struct {
                 // Shaping is done once and cached on the layout (ensureShaped) — this
                 // hot path only looks up rasterized glyphs and appends vertices.
                 const Draw = struct {
-                    fn run(be: *WgpuBackend, verts: anytype, glyphs: []const text.ShapedGlyph, physical_sz: f32, origin_x: f32, baseline_y: f32, icon_baseline: f32, clip: anytype, clip_id: f32, col: anytype) void {
+                    /// Emits the decoration lines of one text line (`x0..x1` at
+                    /// `baseline_y`, logical px) that paint in `layer`, as quads
+                    /// sampling the atlas line sprite — same pipeline, same clip,
+                    /// so they z-order with their glyphs.
+                    fn lines(be: *WgpuBackend, verts: anytype, d: text.TextDecoration, layer: text_deco.Layer, face_idx: u32, physical_sz: f32, x0: f32, x1: f32, baseline_y: f32, clip: anytype, clip_id: f32, col: anytype) void {
+                        if (d.isNone()) return;
+                        var quads = std.array_list.Managed(text_deco.Quad).init(be.allocator);
+                        defer quads.deinit();
+                        text_deco.emit(.{
+                            .x0 = x0 * be.scale,
+                            .x1 = x1 * be.scale,
+                            .baseline = @round(baseline_y * be.scale),
+                            .size = physical_sz,
+                            .metrics = be.atlas.decorationOf(face_idx),
+                            .ascent_ratio = be.atlas.ascent_ratio,
+                            .deco = d,
+                        }, layer, &quads) catch {}; // OOM drops the rest of the line; never fails the frame
+                        const inv = 1.0 / be.scale;
+                        const u = text.LINE_SPRITE.u;
+                        for (quads.items) |q| {
+                            const a0 = [2]f32{ q.a0[0] * inv, q.a0[1] * inv };
+                            const a1 = [2]f32{ q.a1[0] * inv, q.a1[1] * inv };
+                            const b0 = [2]f32{ q.b0[0] * inv, q.b0[1] * inv };
+                            const b1 = [2]f32{ q.b1[0] * inv, q.b1[1] * inv };
+                            verts.appendSlice(&.{
+                                .{ .pos = a0, .uv = .{ u, q.va }, .clip = clip, .color = col, .clip_id = clip_id },
+                                .{ .pos = a1, .uv = .{ u, q.va }, .clip = clip, .color = col, .clip_id = clip_id },
+                                .{ .pos = b0, .uv = .{ u, q.vb }, .clip = clip, .color = col, .clip_id = clip_id },
+                                .{ .pos = b0, .uv = .{ u, q.vb }, .clip = clip, .color = col, .clip_id = clip_id },
+                                .{ .pos = a1, .uv = .{ u, q.va }, .clip = clip, .color = col, .clip_id = clip_id },
+                                .{ .pos = b1, .uv = .{ u, q.vb }, .clip = clip, .color = col, .clip_id = clip_id },
+                            }) catch {};
+                        }
+                    }
+
+                    /// `shear` > 0 slants every non-icon glyph about the baseline
+                    /// (synthetic italic): x shifts by `shear` × height above it.
+                    fn run(be: *WgpuBackend, verts: anytype, glyphs: []const text.ShapedGlyph, physical_sz: f32, origin_x: f32, baseline_y: f32, icon_baseline: f32, clip: anytype, clip_id: f32, col: anytype, shear_k: f32) void {
                         // The pen advances in exact physical px and only *snaps* when a
                         // quad is emitted. Rounding each advance instead (the obvious
                         // way to keep glyphs on whole pixels) accumulates: over a label
@@ -1225,17 +1282,20 @@ pub const WgpuBackend = struct {
                                 const x1_phys = x0_phys + @as(f32, @floatFromInt(gl.w));
                                 const y1_phys = y0_phys + @as(f32, @floatFromInt(gl.h));
 
+                                const sh: f32 = if (is_icon) 0 else shear_k;
+                                const top_dx = (base - y0_phys) * sh * inv_scale;
+                                const bot_dx = (base - y1_phys) * sh * inv_scale;
                                 const x0 = x0_phys * inv_scale;
                                 const y0 = y0_phys * inv_scale;
                                 const x1 = x1_phys * inv_scale;
                                 const y1 = y1_phys * inv_scale;
                                 verts.appendSlice(&.{
-                                    .{ .pos = .{ x0, y0 }, .uv = .{ gl.s0, gl.t0 }, .clip = clip, .color = col, .clip_id = clip_id },
-                                    .{ .pos = .{ x1, y0 }, .uv = .{ gl.s1, gl.t0 }, .clip = clip, .color = col, .clip_id = clip_id },
-                                    .{ .pos = .{ x0, y1 }, .uv = .{ gl.s0, gl.t1 }, .clip = clip, .color = col, .clip_id = clip_id },
-                                    .{ .pos = .{ x0, y1 }, .uv = .{ gl.s0, gl.t1 }, .clip = clip, .color = col, .clip_id = clip_id },
-                                    .{ .pos = .{ x1, y0 }, .uv = .{ gl.s1, gl.t0 }, .clip = clip, .color = col, .clip_id = clip_id },
-                                    .{ .pos = .{ x1, y1 }, .uv = .{ gl.s1, gl.t1 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x0 + top_dx, y0 }, .uv = .{ gl.s0, gl.t0 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x1 + top_dx, y0 }, .uv = .{ gl.s1, gl.t0 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x0 + bot_dx, y1 }, .uv = .{ gl.s0, gl.t1 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x0 + bot_dx, y1 }, .uv = .{ gl.s0, gl.t1 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x1 + top_dx, y0 }, .uv = .{ gl.s1, gl.t0 }, .clip = clip, .color = col, .clip_id = clip_id },
+                                    .{ .pos = .{ x1 + bot_dx, y1 }, .uv = .{ gl.s1, gl.t1 }, .clip = clip, .color = col, .clip_id = clip_id },
                                 }) catch {};
                             }
                             pen_x_phys += sg.x_advance * be.scale;
@@ -1258,7 +1318,10 @@ pub const WgpuBackend = struct {
                             t_x += slack;
                         }
                         const glyphs = layout.shaped.items[line.glyph_start .. line.glyph_start + line.glyph_count];
-                        Draw.run(self, t_verts, glyphs, physical_size, t_x, current_y, icon_baseline_y, glyph_clip, glyph_clip_id, c_arr);
+                        // CSS paint order: underline/overline, glyphs, strikethrough.
+                        Draw.lines(self, t_verts, deco, .below_text, face, physical_size, t_x, t_x + line.width, current_y, glyph_clip, glyph_clip_id, deco_col);
+                        Draw.run(self, t_verts, glyphs, physical_size, t_x, current_y, icon_baseline_y, glyph_clip, glyph_clip_id, c_arr, shear);
+                        Draw.lines(self, t_verts, deco, .above_text, face, physical_size, t_x, t_x + line.width, current_y, glyph_clip, glyph_clip_id, deco_col);
                         current_y += line_height;
                         icon_baseline_y += line_height;
                     }
@@ -1267,16 +1330,17 @@ pub const WgpuBackend = struct {
                     // shape inline this frame as a fallback.
                     var shaped = std.array_list.Managed(text.ShapedGlyph).init(self.allocator);
                     defer shaped.deinit();
-                    const pref = if (store.getStyle(node_id, .font_role)) |v|
-                        (if (v == .number) self.atlas.fontIndexForRole(text.roleFromOrdinal(v.number)) else 0)
-                    else
-                        0;
+                    const pref = resolved.font_index;
                     const ls: f32 = if (store.getStyle(node_id, .letter_spacing)) |v|
                         (if (v == .number) v.number else 0)
                     else
                         0;
                     self.atlas.shapePref(content, target_size, pref, ls, &shaped) catch {};
-                    Draw.run(self, t_verts, shaped.items, physical_size, g.x, current_y, icon_baseline_y, glyph_clip, glyph_clip_id, c_arr);
+                    var run_w: f32 = 0;
+                    for (shaped.items) |sg| run_w += sg.x_advance;
+                    Draw.lines(self, t_verts, deco, .below_text, pref, physical_size, g.x, g.x + run_w, current_y, glyph_clip, glyph_clip_id, deco_col);
+                    Draw.run(self, t_verts, shaped.items, physical_size, g.x, current_y, icon_baseline_y, glyph_clip, glyph_clip_id, c_arr, shear);
+                    Draw.lines(self, t_verts, deco, .above_text, pref, physical_size, g.x, g.x + run_w, current_y, glyph_clip, glyph_clip_id, deco_col);
                 }
             }
 

@@ -112,8 +112,9 @@ try fw.runApp(&app, &router, .{
 ```
 
 Bytes, not paths — the app stays asset-free the way the bundled Codicons icon font
-is. Only `.primary` is required; the role faces (`bold`/`mono`/`mono_bold`) are the
-ones `b.fontBold()` / `b.fontMono()` select, and an absent role degrades to the
+is. Only `.primary` is required; the role faces (`bold`/`mono`/`mono_bold`, and the
+italic cuts `italic`/`bold_italic`/`mono_italic`/`mono_bold_italic`) are the ones
+`b.fontBold()` / `b.fontMono()` / `b.fontItalic()` select, and an absent role degrades to the
 primary rather than mixing in an unrelated host face — one family carrying every
 role, as Material's type system reads it. Leaving `.fonts` unset keeps the OS
 discovery that has always run, so nothing changes for apps that don't set it.
@@ -1523,10 +1524,73 @@ Underneath the widgets and bindings, `UIBuilder` (`ctx.builder`, aka `b`) provid
 - `try b.letterSpacing(text_node, 0.5)` — extra px between glyphs (negative tightens)
 - `try b.lineHeight(text_node, 1.4)` — line-height multiplier; see
   [Text line height and metrics](#text-line-height-and-metrics-line_height-fwtext)
-- `try b.fontBold(text_node, true)` / `try b.fontMono(text_node, true)` — face role
+- `try b.fontBold(text_node, true)` / `try b.fontMono(text_node, true)` /
+  `try b.fontItalic(text_node, true)` — face role; the three compose in any order
+- `try b.textDecoration(text_node, .{ .underline = .wavy, .strikethrough = true })`,
+  `b.decorationColor(text_node, r, g, b)` / `decorationColorOf`, `b.textFaint(text_node, true)`
+  — lines and dimming; see [Text styles](#text-styles-italic-decorations-faint)
 - `try b.textAlign(text_node, .center)` — `.left` (default), `.center` or `.right` within
   the text node's own box. The box must be wider than the text for this to show, so
   give it a `width` (or let it stretch in a column).
+
+### Text styles: italic, decorations, faint
+
+Everything a terminal's SGR sequences, a code view or a markdown renderer asks of a
+run of text. The names follow CSS (`text-decoration-line` / `-style` / `-color`,
+`font-style`); the terminal codes are listed for hosts that translate SGR.
+
+| What | API | Store key (`bindStyle`) | SGR |
+|---|---|---|---|
+| Italic | `b.fontItalic(id, on)` | `.font_role` bit 4 (`FontRole.ITALIC`) | 3 / 23 |
+| Underline | `b.textDecoration(id, .{ .underline = .single })` | `.text_decoration` | 4 / 24 |
+| Underline style | `.double` `.wavy` `.dotted` `.dashed` | `.text_decoration` | 21, 4:2, 4:3, 4:4, 4:5 |
+| Underline color | `b.decorationColor(id, r, g, b)` | `.text_decoration_color` | 58 / 59 |
+| Strikethrough | `.{ .strikethrough = true }` | `.text_decoration` | 9 / 29 |
+| Overline | `.{ .overline = true }` | `.text_decoration` | 53 / 55 |
+| Faint | `b.textFaint(id, on)` | `.text_faint` | 2 / 22 |
+
+**Changing them after the build.** `.font_role` holds the face bits as a number
+(`FontRole.bits()`: 1 bold, 2 mono, 4 italic). `.text_decoration` holds the whole
+line set as one number (`fw.text.TextDecoration.toNumber()`), so one signal drives a
+run's lines:
+
+```zig
+var deco = fw.signals.Signal(fw.PropValue).init(a, .{ .number = 0 });
+try fw.signals.bindStyle(&scope, store, run_node, .text_decoration, &deco);
+deco.set(.{ .number = (fw.text.TextDecoration{ .underline = .wavy, .strikethrough = true }).toNumber() });
+```
+
+**Testing what you draw.** `fw.testkit.textStyle(store, id)` (or `Query.textStyle(id)`)
+decodes all of it: `.role` (`isBold()` / `isMono()` / `isItalic()`), `.decoration`,
+`.decoration_color` (null = text color) and `.faint`. `MeasureStub` measures italic
+with its own advance (9px), so a widget that ignores the italic face shows up.
+
+**Faces.** An italic role uses its own face when one is registered
+(`AppOptions.fonts.italic` / `.bold_italic` / `.mono_italic` / `.mono_bold_italic`,
+`celeris_set_app_italic_fonts` for C, `CelerisFonts.SetItalic` for C#; otherwise the
+host's italic cut). Without one it keeps its family and weight and slants the upright
+face by 14° (`fw.text.synthetic_italic_shear`, the CSS `oblique` angle) — it never
+falls back to another weight or family to get a slant. When the app supplies an
+upright face, its italic must come from the app too, or it is slanted. Measurement
+follows the face used: a real italic cut measures with its own advances, a synthetic
+one with the upright advances.
+
+**Lines.** Decorations are paint-only: they never change measurement or layout, and
+setting them marks the node render-dirty only. They span each laid-out line of the
+node, from its first glyph to the end of its advance (spaces included, as in
+terminals). Position and thickness come from the face's `post` (underline) and `OS/2`
+(strikeout) tables, snapped to whole device pixels, at least 1px thick; the overline
+sits at the ascent. Paint order is CSS's: underline and overline under the glyphs,
+strikethrough over them. Differences from CSS, chosen to match terminals: the style
+applies to the underline only (strikethrough and overline are always solid), and the
+underline does not skip descenders (no `text-decoration-skip-ink`). No thickness or
+offset override yet.
+
+**Faint** draws the text and its lines at `fw.text.faint_opacity` (0.5) over what is
+behind them, Ghostty's `faint-opacity` model; it composes with bold.
+
+`examples/text_styles.zig` (`zig build text_styles`) shows every style at three sizes,
+proportional and mono.
 
 **Pointer input and stacking:**
 

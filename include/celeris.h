@@ -38,7 +38,7 @@ extern "C" {
 
 /* C-ABI version of this header / build. Compare against celeris_abi_version() at
  * load time; a mismatch means the .dll/.so doesn't match this header. */
-#define CELERIS_ABI_VERSION 9u
+#define CELERIS_ABI_VERSION 10u
 uint32_t celeris_abi_version(void);
 
 /* ── Diagnostics: zone profiler ───────────────────────────────────────────────
@@ -253,6 +253,12 @@ int32_t celeris_node_remove(int32_t engine_id, uint32_t node_id);
  *             letter_spacing, line_height (unitless multiplier, e.g. "1.4"),
  *             text_wrap ("false" = one line at natural width, overflowing a
  *             narrower parent; hard newlines still break),
+ *             font_role (bit set: 1 bold, 2 mono, 4 italic; 0..7),
+ *             text_decoration (number: underline style 0 none, 1 single,
+ *             2 double, 3 wavy, 4 dotted, 5 dashed; +8 strikethrough,
+ *             +16 overline; paint-only, never relayouts),
+ *             text_decoration_color (unset = the text color),
+ *             text_faint ("true" = text and lines at 0.5 alpha),
  *             border_width, border_color, shadow_color, shadow_blur, …
  *   layout:   width, height, padding_*, margin_*, flex_direction, flex_grow,
  *             justify_content, align_items, gap, position, left, top, …
@@ -337,6 +343,20 @@ typedef struct CelerisFontConfig {
  * re-based afterwards. The bytes are copied, so the caller may free them on return;
  * NULL clears back to OS discovery. Returns 0, or -1 on allocation failure. */
 int32_t celeris_set_app_fonts(const CelerisFontConfig *config);
+
+/* The italic cuts (ABI v10), set separately so CelerisFontConfig keeps its layout.
+ * Same contract as celeris_set_app_fonts (copied; NULL clears this group only).
+ * A role left empty uses the system italic, unless its upright face was
+ * app-supplied: then that face is slanted synthetically (14 degrees) rather than
+ * mixed with another family. */
+typedef struct CelerisItalicFontConfig {
+    CelerisFontFace italic;
+    CelerisFontFace bold_italic;
+    CelerisFontFace mono_italic;
+    CelerisFontFace mono_bold_italic;
+} CelerisItalicFontConfig;
+
+int32_t celeris_set_app_italic_fonts(const CelerisItalicFontConfig *config);
 
 /* ── DevTools / introspection ─────────────────────────────────────────────── */
 /* Returned buffers are engine-owned (arena-backed); see celeris_free_string. */

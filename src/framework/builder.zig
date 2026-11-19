@@ -12,6 +12,8 @@ pub const NodeId = reg.NodeId;
 pub const DimUnit = props.DimUnit;
 pub const Keyword = props.Keyword;
 pub const FontRole = text_mod.FontRole;
+pub const TextDecoration = text_mod.TextDecoration;
+pub const UnderlineStyle = text_mod.UnderlineStyle;
 const PropValue = props.PropValue;
 
 /// A px-unit dimension value — the overwhelmingly common layout setter shape.
@@ -740,31 +742,52 @@ pub const UIBuilder = struct {
         return .default;
     }
 
-    /// Toggles bold on a text node, composing with its family (bold+mono →
-    /// mono_bold). Orthogonal to `fontMono`, so the two may be called in any order.
+    /// Toggles bold on a text node, composing with its family and slant (bold+mono
+    /// → mono_bold). `fontBold` / `fontMono` / `fontItalic` are orthogonal, so they
+    /// may be called in any order.
     pub fn fontBold(self: *UIBuilder, id: NodeId, on: bool) !void {
-        const is_mono = switch (self.currentRole(id)) {
-            .mono, .mono_bold => true,
-            else => false,
-        };
-        const r: FontRole = if (is_mono)
-            (if (on) .mono_bold else .mono)
-        else
-            (if (on) .bold else .default);
-        try self.fontRole(id, r);
+        try self.fontRole(id, self.currentRole(id).with(FontRole.BOLD, on));
     }
 
-    /// Toggles the monospace family on a text node, composing with its weight.
+    /// Toggles the monospace family on a text node, composing with its weight and slant.
     pub fn fontMono(self: *UIBuilder, id: NodeId, on: bool) !void {
-        const is_bold = switch (self.currentRole(id)) {
-            .bold, .mono_bold => true,
-            else => false,
-        };
-        const r: FontRole = if (on)
-            (if (is_bold) .mono_bold else .mono)
-        else
-            (if (is_bold) .bold else .default);
-        try self.fontRole(id, r);
+        try self.fontRole(id, self.currentRole(id).with(FontRole.MONO, on));
+    }
+
+    /// Toggles italic (CSS `font-style: italic`, SGR 3) on a text node, composing
+    /// with its family and weight. Uses the role's italic face when one is
+    /// registered; otherwise the upright face of the same family and weight,
+    /// slanted synthetically (`text.SYNTHETIC_ITALIC_SHEAR`, 14°). Measurement
+    /// follows the face actually used.
+    pub fn fontItalic(self: *UIBuilder, id: NodeId, on: bool) !void {
+        try self.fontRole(id, self.currentRole(id).with(FontRole.ITALIC, on));
+    }
+
+    /// Sets the lines drawn with a text node: underline (with its style),
+    /// strikethrough, overline — CSS `text-decoration-line` + `-style`, terminal
+    /// SGR 4/4:x/21/9/53. `.{}` clears them. Paint-only: never relayouts. To drive
+    /// it after the build, `bindStyle(.text_decoration, sig)` with
+    /// `.{ .number = deco.toNumber() }`.
+    pub fn textDecoration(self: *UIBuilder, id: NodeId, deco: TextDecoration) !void {
+        try self.store.setStyle(id, .text_decoration, .{ .number = deco.toNumber() });
+    }
+
+    /// Color of the decoration lines (CSS `text-decoration-color`, SGR 58), opaque.
+    /// Without one, they use the text color.
+    pub fn decorationColor(self: *UIBuilder, id: NodeId, r: u8, g: u8, b_val: u8) !void {
+        try self.store.setStyle(id, .text_decoration_color, props.PropValue.rgbA(r, g, b_val, 1.0));
+    }
+
+    /// Color of the decoration lines (CSS `text-decoration-color`, SGR 58).
+    /// Without one, they use the text color.
+    pub fn decorationColorOf(self: *UIBuilder, id: NodeId, c: theme_mod.Color) !void {
+        try self.store.setStyle(id, .text_decoration_color, colorValue(c));
+    }
+
+    /// Faint / dim text (SGR 2): the text and its lines drawn at
+    /// `text.FAINT_OPACITY` (0.5, Ghostty's default). Composes with bold.
+    pub fn textFaint(self: *UIBuilder, id: NodeId, on: bool) !void {
+        try self.store.setStyle(id, .text_faint, .{ .boolean = on });
     }
 
     pub fn zIndex(self: *UIBuilder, id: NodeId, z: f32) !void {

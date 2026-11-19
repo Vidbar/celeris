@@ -59,10 +59,10 @@ pub const Kind = enum {
 
 pub fn styleKind(key: props.StyleKey) Kind {
     return switch (key) {
-        .background, .color, .border_color, .shadow_color, .gradient_color2 => .color,
-        .opacity, .font_role, .letter_spacing, .line_height, .border_style, .gradient_type, .z_index => .number,
+        .background, .color, .border_color, .shadow_color, .gradient_color2, .text_decoration_color => .color,
+        .opacity, .font_role, .letter_spacing, .line_height, .border_style, .gradient_type, .z_index, .text_decoration => .number,
         .text_align => .keyword,
-        .text_wrap => .boolean,
+        .text_wrap, .text_faint => .boolean,
         .radius, .font_size, .border_width, .border_top, .border_right, .border_bottom, .border_left => .px,
         .shadow_blur, .shadow_offset_x, .shadow_offset_y, .shadow_spread => .px,
     };

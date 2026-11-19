@@ -68,6 +68,10 @@ pub const AppFonts = struct {
     bold: ?[]const u8 = null,
     mono: ?[]const u8 = null,
     mono_bold: ?[]const u8 = null,
+    italic: ?[]const u8 = null,
+    bold_italic: ?[]const u8 = null,
+    mono_italic: ?[]const u8 = null,
+    mono_bold_italic: ?[]const u8 = null,
 };
 
 /// Borrowed: the bytes must outlive every engine created afterwards. Trivially
@@ -111,42 +115,95 @@ fn faceSlice(f: CelerisFontFace) ?[]const u8 {
     return f.data[0..f.len];
 }
 
-fn freeAppFontsCopy(f: AppFonts) void {
+/// The italic faces, set separately (`celeris_set_app_italic_fonts`) so the
+/// original `CelerisFontConfig` keeps its size and every compiled host keeps
+/// working. Same rules: zeroed = discover, bytes copied.
+pub const CelerisItalicFontConfig = extern struct {
+    italic: CelerisFontFace = .{},
+    bold_italic: CelerisFontFace = .{},
+    mono_italic: CelerisFontFace = .{},
+    mono_bold_italic: CelerisFontFace = .{},
+};
+
+const upright_face_fields = .{ "primary", "bold", "mono", "mono_bold" };
+const italic_face_fields = .{ "italic", "bold_italic", "mono_italic", "mono_bold_italic" };
+
+fn freeAppFontsCopy(f: AppFonts, comptime fields: anytype) void {
     const a = std.heap.page_allocator;
-    inline for (.{ "primary", "bold", "mono", "mono_bold" }) |field| {
+    inline for (fields) |field| {
         if (@field(f, field)) |bytes| a.free(bytes);
     }
 }
 
 fn freeOwnedAppFonts() void {
-    freeAppFontsCopy(g_app_fonts_owned);
+    freeAppFontsCopy(g_app_fonts_owned, upright_face_fields);
+    freeAppFontsCopy(g_app_fonts_owned, italic_face_fields);
     g_app_fonts_owned = .{};
+}
+
+/// Copies one group of faces (`fields`) from a C config into the registered set,
+/// leaving the other group untouched. null clears the group back to discovery.
+fn setFaceGroup(comptime Config: type, comptime fields: anytype, comptime name: []const u8, config: ?*const Config) i32 {
+    const a = std.heap.page_allocator;
+    var copy: AppFonts = .{};
+    if (config) |c| {
+        inline for (fields) |field| {
+            if (faceSlice(@field(c.*, field))) |bytes| {
+                @field(copy, field) = a.dupe(u8, bytes) catch {
+                    freeAppFontsCopy(copy, fields);
+                    setLastError(name ++ ": out of memory copying {s}", .{field});
+                    return -1;
+                };
+            }
+        }
+    }
+    freeAppFontsCopy(g_app_fonts_owned, fields);
+    inline for (fields) |field| {
+        @field(g_app_fonts_owned, field) = @field(copy, field);
+        @field(g_app_fonts, field) = @field(copy, field);
+    }
+    return 0;
 }
 
 /// Sets the app's typefaces from a C host. The bytes are copied, so the caller may
 /// free its buffers on return. Passing null clears back to OS discovery. Returns 0
 /// on success, -1 if a copy could not be allocated (the previous set is kept).
+/// Leaves the italic faces (`celeris_set_app_italic_fonts`) as they are.
 pub export fn celeris_set_app_fonts(config: ?*const CelerisFontConfig) i32 {
-    const a = std.heap.page_allocator;
-    const c = config orelse {
-        freeOwnedAppFonts();
-        g_app_fonts = .{};
-        return 0;
-    };
-    var copy: AppFonts = .{};
-    inline for (.{ "primary", "bold", "mono", "mono_bold" }) |field| {
-        if (faceSlice(@field(c.*, field))) |bytes| {
-            @field(copy, field) = a.dupe(u8, bytes) catch {
-                freeAppFontsCopy(copy);
-                setLastError("celeris_set_app_fonts: out of memory copying {s}", .{field});
-                return -1;
-            };
+    return setFaceGroup(CelerisFontConfig, upright_face_fields, "celeris_set_app_fonts", config);
+}
+
+/// Sets the app's italic faces (SGR 3 / `b.fontItalic`). Same contract as
+/// `celeris_set_app_fonts`; a role left null uses the system italic if one is
+/// found, else its upright face slanted synthetically.
+pub export fn celeris_set_app_italic_fonts(config: ?*const CelerisItalicFontConfig) i32 {
+    return setFaceGroup(CelerisItalicFontConfig, italic_face_fields, "celeris_set_app_italic_fonts", config);
+}
+
+/// Font indices in an atlas whose face the app supplied (at most the primary and
+/// the seven role faces).
+const AppFaces = struct {
+    buf: [8]u32 = undefined,
+    len: usize = 0,
+
+    fn append(self: *AppFaces, idx: u32) void {
+        if (self.len < self.buf.len) {
+            self.buf[self.len] = idx;
+            self.len += 1;
         }
     }
-    freeOwnedAppFonts();
-    g_app_fonts_owned = copy;
-    g_app_fonts = copy;
-    return 0;
+    fn slice(self: *const AppFaces) []const u32 {
+        return self.buf[0..self.len];
+    }
+};
+
+/// Whether italic `role`'s upright counterpart draws with an app-supplied face —
+/// the face the atlas actually resolves it to, not which `AppFonts` fields are set:
+/// an app primary with no app bold still draws bold with the host's bold, whose
+/// host italic cut is the right match.
+fn uprightIsAppFace(atlas: *const text_mod.FontAtlas, role: text_mod.FontRole, app_faces: []const u32) bool {
+    const idx = atlas.fontIndexForRole(role.with(text_mod.FontRole.ITALIC, false));
+    return std.mem.indexOfScalar(u32, app_faces, idx) != null;
 }
 
 /// Loads a font atlas from the first available system font for the OS.
@@ -194,10 +251,13 @@ fn loadFontAtlas(allocator: std.mem.Allocator) ?text_mod.FontAtlas {
     var atlas: text_mod.FontAtlas = undefined;
     var have_primary = false;
     var primary_path: []const u8 = "";
+    // Font indices whose face the app supplied (0 = an app primary).
+    var app_faces: AppFaces = .{};
     if (g_app_fonts.primary) |ttf| {
         if (text_mod.FontAtlas.init(allocator, ttf, 72.0)) |a| {
             atlas = a;
             have_primary = true;
+            app_faces.append(0);
             log.info("font (app-supplied primary): {d} bytes\n", .{ttf.len});
         } else |err| {
             // A corrupt blob must not leave the app textless: warn and fall through
@@ -264,6 +324,10 @@ fn loadFontAtlas(allocator: std.mem.Allocator) ?text_mod.FontAtlas {
             .{ .role = .bold, .paths = &.{ "C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf" } },
             .{ .role = .mono, .paths = &.{ "C:/Windows/Fonts/consola.ttf", "C:/Windows/Fonts/cour.ttf" } },
             .{ .role = .mono_bold, .paths = &.{ "C:/Windows/Fonts/consolab.ttf", "C:/Windows/Fonts/courbd.ttf" } },
+            .{ .role = .italic, .paths = &.{ "C:/Windows/Fonts/segoeuii.ttf", "C:/Windows/Fonts/ariali.ttf" } },
+            .{ .role = .bold_italic, .paths = &.{ "C:/Windows/Fonts/segoeuiz.ttf", "C:/Windows/Fonts/arialbi.ttf" } },
+            .{ .role = .mono_italic, .paths = &.{ "C:/Windows/Fonts/consolai.ttf", "C:/Windows/Fonts/couri.ttf" } },
+            .{ .role = .mono_bold_italic, .paths = &.{ "C:/Windows/Fonts/consolaz.ttf", "C:/Windows/Fonts/courbi.ttf" } },
         },
         else => &.{
             .{ .role = .bold, .paths = &.{
@@ -278,6 +342,22 @@ fn loadFontAtlas(allocator: std.mem.Allocator) ?text_mod.FontAtlas {
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
                 "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
             } },
+            .{ .role = .italic, .paths = &.{
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
+            } },
+            .{ .role = .bold_italic, .paths = &.{
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf",
+            } },
+            .{ .role = .mono_italic, .paths = &.{
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Oblique.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationMono-Italic.ttf",
+            } },
+            .{ .role = .mono_bold_italic, .paths = &.{
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-BoldOblique.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationMono-BoldItalic.ttf",
+            } },
         },
     };
     // 4a. App-supplied role faces win outright over the scan: an app that ships its
@@ -287,16 +367,27 @@ fn loadFontAtlas(allocator: std.mem.Allocator) ?text_mod.FontAtlas {
         .{ text_mod.FontRole.bold, "bold" },
         .{ text_mod.FontRole.mono, "mono" },
         .{ text_mod.FontRole.mono_bold, "mono_bold" },
+        .{ text_mod.FontRole.italic, "italic" },
+        .{ text_mod.FontRole.bold_italic, "bold_italic" },
+        .{ text_mod.FontRole.mono_italic, "mono_italic" },
+        .{ text_mod.FontRole.mono_bold_italic, "mono_bold_italic" },
     }) |entry| {
         if (@field(g_app_fonts, entry[1])) |ttf| {
-            atlas.addRoleFont(entry[0], ttf) catch |err| {
+            if (atlas.addRoleFont(entry[0], ttf)) |_| {
+                app_faces.append(atlas.fontIndexForRole(entry[0]));
+            } else |err| {
                 log.info("app-supplied {s} font rejected ({s})\n", .{ entry[1], @errorName(err) });
-            };
+            }
         }
     }
     for (role_faces) |rf| {
         // Already satisfied by the app: don't load a second, unrelated face for it.
         if (atlas.hasRoleFont(rf.role)) continue;
+        // An italic must match the face its upright role actually draws with. When
+        // that face came from the app, a host italic would be another family, so the
+        // role slants synthetically instead. `role_faces` lists the upright roles
+        // first, so by now they are resolved.
+        if (rf.role.isItalic() and uprightIsAppFace(&atlas, rf.role, app_faces.slice())) continue;
         for (rf.paths) |path| {
             const data = readFileAlloc(allocator, path) catch continue;
             defer allocator.free(data);
@@ -896,8 +987,10 @@ pub export fn celeris_last_error() [*:0]const u8 {
 /// v5 adds the CELERIS_EVENT_RESIZE event type; v6 adds the `line_height` style
 /// key and celeris_get_caret_metrics_ex / celeris_get_char_index_at_ex; v8 adds
 /// celeris_window_set_title; v9 adds the CELERIS_EVENT_POINTER_LEFT_WINDOW event type.
+/// v10 adds celeris_set_app_italic_fonts and the text_decoration,
+/// text_decoration_color and text_faint style keys (font_role takes 0..7).
 pub export fn celeris_abi_version() u32 {
-    return 9;
+    return 10;
 }
 
 // ─── Diagnostics: zone profiler ────────────────────────────────────────────────
@@ -5326,4 +5419,29 @@ test "rebuildUI hands widgets a TextMeasure with the styled hooks wired" {
     const d0 = m.verticalWith(14, 40, 2, 1.2);
     const d1 = m.verticalStyled(14, 40, 2, 1.2, .default);
     try std.testing.expectApproxEqAbs(d0.baseline, d1.baseline, 0.001);
+}
+
+test "italic scan: a host italic is skipped only when the upright face it must match came from the app" {
+    const a = std.testing.allocator;
+    const ttf = @import("framework/test_support.zig").loadSystemFont(a) catch return error.SkipZigTest;
+    defer a.free(ttf);
+    var atlas = try text_mod.FontAtlas.init(a, ttf, 72.0);
+    defer atlas.deinit();
+
+    // App primary (index 0); bold comes from the host scan.
+    var app: AppFaces = .{};
+    app.append(0);
+    try atlas.addRoleFont(.bold, ttf);
+    // Plain italic matches the app primary → slant it, don't load a host italic.
+    try std.testing.expect(uprightIsAppFace(&atlas, .italic, app.slice()));
+    // Bold italic matches the HOST bold → its host italic cut is the right one.
+    try std.testing.expect(!uprightIsAppFace(&atlas, .bold_italic, app.slice()));
+
+    // App-supplied mono: mono italic must come from the app too.
+    try atlas.addRoleFont(.mono, ttf);
+    app.append(atlas.fontIndexForRole(.mono));
+    try std.testing.expect(uprightIsAppFace(&atlas, .mono_italic, app.slice()));
+    // Host mono_bold registered → mono_bold_italic may use the host cut.
+    try atlas.addRoleFont(.mono_bold, ttf);
+    try std.testing.expect(!uprightIsAppFace(&atlas, .mono_bold_italic, app.slice()));
 }

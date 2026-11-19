@@ -60,6 +60,41 @@ public static class CelerisFonts
         }
     }
 
+    /// <summary>Registers the italic cuts (SGR 3, <c>font_role</c> bit 4). A role left
+    /// null slants its upright face synthetically (14°) when that face was supplied
+    /// through <see cref="Set"/>, else uses the system italic.</summary>
+    /// <exception cref="InvalidOperationException">The native copy failed (OOM).</exception>
+    public static void SetItalic(byte[]? italic = null, byte[]? boldItalic = null, byte[]? monoItalic = null, byte[]? monoBoldItalic = null)
+    {
+        var handles = new GCHandle[4];
+        var faces = new CelerisFontFace[4];
+        var arrays = new[] { italic, boldItalic, monoItalic, monoBoldItalic };
+        try
+        {
+            for (int i = 0; i < arrays.Length; i++)
+            {
+                var bytes = arrays[i];
+                if (bytes is null || bytes.Length == 0) continue;
+                handles[i] = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+                faces[i] = new CelerisFontFace { Data = handles[i].AddrOfPinnedObject(), Len = (nuint)bytes.Length };
+            }
+            var config = new CelerisItalicFontConfig
+            {
+                Italic = faces[0],
+                BoldItalic = faces[1],
+                MonoItalic = faces[2],
+                MonoBoldItalic = faces[3],
+            };
+            if (CelerisInterop.celeris_set_app_italic_fonts(ref config) != 0)
+                throw new InvalidOperationException("celeris_set_app_italic_fonts failed (out of memory).");
+        }
+        finally
+        {
+            foreach (var h in handles)
+                if (h.IsAllocated) h.Free();
+        }
+    }
+
     /// <summary>Clears back to the engine's OS font discovery.</summary>
     public static void Clear()
     {

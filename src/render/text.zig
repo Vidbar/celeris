@@ -235,6 +235,8 @@ const Font = struct {
     /// `FontAtlas.baselineInSlot`), and it varies enough between faces (a bold or a
     /// mono is not the primary) that it has to be per-font.
     cap_ratio: f32,
+    /// Underline / strikethrough placement from the face's own tables.
+    decoration: DecorationMetrics,
 
     fn init(allocator: std.mem.Allocator, ttf_data: []const u8) !Font {
         const ttf = try allocator.dupe(u8, ttf_data);
@@ -260,7 +262,69 @@ const Font = struct {
             .shaper = shaper,
             .ref_scale = stb.stbtt_ScaleForMappingEmToPixels(&info, REF_PX),
             .cap_ratio = capRatio(&info),
+            .decoration = decorationMetrics(ttf, @intCast(@max(info.fontstart, 0)), stb.stbtt_ScaleForMappingEmToPixels(&info, 1.0), capRatio(&info)),
         };
+    }
+
+    /// Reads underline (`post`) and strikeout (`OS/2`) placement, as fractions of
+    /// the em. stb_truetype doesn't expose these, so the table directory is walked
+    /// here — every read bounds-checked against `ttf` (the same malformed-font
+    /// discipline as `stbtt_InitFontBounded`). A missing or degenerate value keeps
+    /// the default, with the strikeout default centred on the x-height band.
+    fn decorationMetrics(ttf: []const u8, fontstart: usize, inv_upem: f32, cap_ratio: f32) DecorationMetrics {
+        var m: DecorationMetrics = .{};
+        // Default strike: centred at ~half the x-height (≈ 0.7 × cap height).
+        m.strike_top = cap_ratio * 0.35 + m.strike_thickness / 2.0;
+        if (findTable(ttf, fontstart, "post")) |t| {
+            if (t.len >= 12) {
+                const pos = readI16(t, 8);
+                const thick = readI16(t, 10);
+                if (thick > 0) {
+                    m.underline_thickness = @as(f32, @floatFromInt(thick)) * inv_upem;
+                    // `underlinePosition` is the top of the stroke (OpenType `post`),
+                    // negative below the baseline.
+                    if (pos < 0) m.underline_top = -@as(f32, @floatFromInt(pos)) * inv_upem;
+                }
+            }
+        }
+        if (findTable(ttf, fontstart, "OS/2")) |t| {
+            if (t.len >= 30) {
+                const size = readI16(t, 26);
+                const pos = readI16(t, 28);
+                if (size > 0 and pos > 0) {
+                    m.strike_thickness = @as(f32, @floatFromInt(size)) * inv_upem;
+                    m.strike_top = @as(f32, @floatFromInt(pos)) * inv_upem;
+                }
+            }
+        }
+        return m;
+    }
+
+    fn readU16(b: []const u8, off: usize) u16 {
+        return (@as(u16, b[off]) << 8) | b[off + 1];
+    }
+    fn readI16(b: []const u8, off: usize) i16 {
+        return @bitCast(readU16(b, off));
+    }
+    fn readU32(b: []const u8, off: usize) u32 {
+        return (@as(u32, readU16(b, off)) << 16) | readU16(b, off + 2);
+    }
+
+    /// The bytes of table `tag`, or null if absent or out of bounds.
+    fn findTable(ttf: []const u8, fontstart: usize, tag: *const [4]u8) ?[]const u8 {
+        if (fontstart > ttf.len or ttf.len - fontstart < 12) return null;
+        const n = readU16(ttf, fontstart + 4);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const rec = fontstart + 12 + i * 16;
+            if (rec + 16 > ttf.len) return null;
+            if (!std.mem.eql(u8, ttf[rec .. rec + 4], tag)) continue;
+            const off: usize = readU32(ttf, rec + 8);
+            const len: usize = readU32(ttf, rec + 12);
+            if (off > ttf.len or len > ttf.len - off) return null;
+            return ttf[off .. off + len];
+        }
+        return null;
     }
 
     /// Cap height / em, from 'H'’s bounding box. A face with no 'H' (icon fonts,
@@ -313,22 +377,136 @@ fn decodeNext(text: []const u8, i: *usize) u32 {
     return cp;
 }
 
-/// Semantic font selection for a text node. Orthogonal weight×family collapsed
-/// into four roles; each maps to a registered face (see `FontAtlas.addRoleFont`).
-/// A role with no registered face degrades gracefully to the primary font.
+/// Semantic font selection for a text node: three orthogonal bits — bold (1),
+/// mono (2), italic (4) — so the ordinal stored in `font_role` is the bit set and
+/// every combination is a value. The pre-italic ordinals (0..3) are unchanged.
+/// Each role maps to a registered face (see `FontAtlas.addRoleFont`); a missing
+/// face resolves as CSS font matching does (`FontAtlas.resolveRole`).
 pub const FontRole = enum(u8) {
     default = 0,
     bold = 1,
     mono = 2,
     mono_bold = 3,
+    italic = 4,
+    bold_italic = 5,
+    mono_italic = 6,
+    mono_bold_italic = 7,
+
+    pub const BOLD: u8 = 1;
+    pub const MONO: u8 = 2;
+    pub const ITALIC: u8 = 4;
+
+    pub fn bits(self: FontRole) u8 {
+        return @backingInt(self);
+    }
+    pub fn fromBits(b: u8) FontRole {
+        return @fromBackingInt(@as(u8, b & 7));
+    }
+    pub fn isBold(self: FontRole) bool {
+        return self.bits() & BOLD != 0;
+    }
+    pub fn isMono(self: FontRole) bool {
+        return self.bits() & MONO != 0;
+    }
+    pub fn isItalic(self: FontRole) bool {
+        return self.bits() & ITALIC != 0;
+    }
+    /// The same role with `flag` set or cleared — how `b.fontBold` / `fontMono` /
+    /// `fontItalic` compose without knowing about each other.
+    pub fn with(self: FontRole, flag: u8, on: bool) FontRole {
+        return fromBits(if (on) self.bits() | flag else self.bits() & ~flag);
+    }
 };
 
 /// Decodes a `font_role` style ordinal (stored as `.number`) into a `FontRole`,
 /// clamping out-of-range values to `.default`.
 pub fn roleFromOrdinal(n: f32) FontRole {
-    if (n < 0 or n > 3) return .default;
-    return @fromBackingInt(@intCast(@as(u8, @intFromFloat(n))));
+    if (!(n >= 0 and n <= 7)) return .default;
+    return FontRole.fromBits(@intFromFloat(n));
 }
+
+/// Shear applied to glyph quads when an italic role has no italic face of its
+/// own: tan(14°), the angle of CSS `font-style: oblique` and Skia's fake italic.
+pub const SYNTHETIC_ITALIC_SHEAR: f32 = 0.2493;
+
+/// What a role resolved to: the face to shape/measure/draw with, and whether the
+/// glyphs must be slanted because that face is not italic.
+pub const ResolvedRole = struct {
+    font_index: u32,
+    synthetic_italic: bool,
+};
+
+/// Underline style of a text node — CSS `text-decoration-style` names, which map
+/// one-to-one onto the terminal's SGR 4:x styles (`wavy` is SGR 4:3 "curly").
+pub const UnderlineStyle = enum(u3) {
+    none = 0,
+    single = 1,
+    double = 2,
+    wavy = 3,
+    dotted = 4,
+    dashed = 5,
+};
+
+/// The lines drawn with a text node (CSS `text-decoration-line` +
+/// `text-decoration-style`, terminal SGR 4/9/53/21). Paint-only: none of it
+/// changes measurement or layout. As in terminals, the style applies to the
+/// underline only — strikethrough and overline are always solid.
+///
+/// Stored as one `.number` in the `text_decoration` style (`toNumber`), so a
+/// terminal run's whole decoration set is a single `bindStyle`.
+pub const TextDecoration = struct {
+    underline: UnderlineStyle = .none,
+    strikethrough: bool = false,
+    overline: bool = false,
+
+    pub fn toNumber(self: TextDecoration) f32 {
+        var n: u8 = @backingInt(self.underline);
+        if (self.strikethrough) n |= 8;
+        if (self.overline) n |= 16;
+        return @floatFromInt(n);
+    }
+
+    pub fn fromNumber(v: f32) TextDecoration {
+        if (!(v >= 0 and v < 32)) return .{};
+        const n: u8 = @intFromFloat(v);
+        const u: u3 = @intCast(n & 7);
+        return .{
+            .underline = if (u <= 5) @fromBackingInt(u) else .none,
+            .strikethrough = n & 8 != 0,
+            .overline = n & 16 != 0,
+        };
+    }
+
+    pub fn isNone(self: TextDecoration) bool {
+        return self.underline == .none and !self.strikethrough and !self.overline;
+    }
+};
+
+/// Opacity factor of faint / dim text (SGR 2): the text and its lines are drawn
+/// at this alpha over whatever is behind them — Ghostty's `faint-opacity` default.
+pub const FAINT_OPACITY: f32 = 0.5;
+
+/// Where a face draws its lines, as fractions of the em (positive = below the
+/// baseline for `*_top`). From the font's `post` / `OS/2` tables when present.
+pub const DecorationMetrics = struct {
+    /// Top edge of the underline, below the baseline.
+    underline_top: f32 = 0.1,
+    underline_thickness: f32 = 0.05,
+    /// Top edge of the strikethrough, ABOVE the baseline.
+    strike_top: f32 = 0.3,
+    strike_thickness: f32 = 0.05,
+};
+
+/// Atlas coordinates of the line sprite `FontAtlas.init` reserves: `u` is the
+/// middle column; `v_solid` samples full coverage, `v_clear` none, and `v_edge`
+/// the first solid row's centre — so a 1px quad running v_clear→v_edge is a
+/// linear 0→1 antialiasing ramp.
+pub const LINE_SPRITE = struct {
+    pub const u: f32 = (@as(f32, PAD) + 1.5) / ATLAS_WIDTH;
+    pub const v_clear: f32 = (@as(f32, PAD) + 0.5) / ATLAS_HEIGHT;
+    pub const v_edge: f32 = (@as(f32, PAD) + 1.5) / ATLAS_HEIGHT;
+    pub const v_solid: f32 = (@as(f32, PAD) + 2.0) / ATLAS_HEIGHT;
+};
 
 pub const FontAtlas = struct {
     allocator: std.mem.Allocator,
@@ -350,9 +528,8 @@ pub const FontAtlas = struct {
     icon_font_index: ?u32 = null,
     /// Indices (in `fonts`) of the faces registered for the non-default roles, if
     /// any. Unset roles resolve to the primary (font 0) — see `fontIndexForRole`.
-    bold_font_index: ?u32 = null,
-    mono_font_index: ?u32 = null,
-    mono_bold_font_index: ?u32 = null,
+    /// Indexed by `FontRole.bits()`; slot 0 (`.default`) is always null.
+    role_font_index: [8]?u32 = @splat(null),
     /// Signed offset (as a fraction of font size) from a line-slot's vertical
     /// center down to where the icon font's baseline must sit so the em-box
     /// midline lands on that center: `(ascent + descent) / (2 * unitsPerEm)`.
@@ -377,6 +554,12 @@ pub const FontAtlas = struct {
 
         const pixels = try allocator.alloc(u8, ATLAS_WIDTH * ATLAS_HEIGHT);
         @memset(pixels, 0);
+        // The line sprite (see `LINE_SPRITE`): a clear row over two solid rows, so
+        // decoration lines draw through the glyph pipeline with exact coverage and
+        // their antialiased edges come from bilinear filtering across that step.
+        for (1..3) |row| {
+            for (0..3) |col| pixels[(PAD + row) * ATLAS_WIDTH + PAD + col] = 255;
+        }
 
         // Vertical metrics of the primary face, normalized to the em — the basis
         // for `baselineInSlot`.
@@ -391,9 +574,9 @@ pub const FontAtlas = struct {
             .pixels = pixels,
             .fonts = fonts,
             .glyphs = std.AutoHashMap(u64, Glyph).init(allocator),
-            .pen_x = PAD,
+            .pen_x = PAD + 3 + PAD, // after the line sprite
             .pen_y = PAD,
-            .row_h = 0,
+            .row_h = 3,
             .dirty = true,
             .ascent_ratio = @as(f32, @floatFromInt(asc)) * inv_upem,
             .descent_ratio = -@as(f32, @floatFromInt(desc)) * inv_upem, // hhea descent is negative
@@ -486,35 +669,45 @@ pub const FontAtlas = struct {
     pub fn addRoleFont(self: *FontAtlas, role: FontRole, ttf_data: []const u8) !void {
         if (role == .default) return;
         try self.addFallback(ttf_data);
-        const idx: u32 = @intCast(self.fonts.items.len - 1);
-        switch (role) {
-            .default => unreachable,
-            .bold => self.bold_font_index = idx,
-            .mono => self.mono_font_index = idx,
-            .mono_bold => self.mono_bold_font_index = idx,
-        }
+        self.role_font_index[role.bits()] = @intCast(self.fonts.items.len - 1);
     }
 
     /// Whether `role` has a face of its own registered (as opposed to degrading to
     /// the primary). `.default` is always satisfied — `fonts[0]` exists by construction.
     pub fn hasRoleFont(self: *const FontAtlas, role: FontRole) bool {
-        return switch (role) {
-            .default => true,
-            .bold => self.bold_font_index != null,
-            .mono => self.mono_font_index != null,
-            .mono_bold => self.mono_bold_font_index != null,
-        };
+        return role == .default or self.role_font_index[role.bits()] != null;
     }
 
-    /// Resolves a role to a concrete font index, degrading to a related face and
-    /// finally the primary (0) when the exact face isn't registered.
+    /// Resolves a role to a face, the way CSS font matching does:
+    /// - the exact face, if registered;
+    /// - an italic role without an italic face keeps its family and weight (the
+    ///   upright role, resolved by these same rules) and is slanted synthetically
+    ///   (`SYNTHETIC_ITALIC_SHEAR`) — it never trades weight or family for a slant;
+    /// - `mono_bold` without its face degrades to `mono`, then `bold`, then the
+    ///   primary; `bold` / `mono` degrade to the primary.
+    pub fn resolveRole(self: *const FontAtlas, role: FontRole) ResolvedRole {
+        if (role == .default) return .{ .font_index = 0, .synthetic_italic = false };
+        if (self.role_font_index[role.bits()]) |idx| return .{ .font_index = idx, .synthetic_italic = false };
+        if (role.isItalic()) {
+            const upright = self.resolveRole(role.with(FontRole.ITALIC, false));
+            return .{ .font_index = upright.font_index, .synthetic_italic = true };
+        }
+        const idx: u32 = if (role == .mono_bold)
+            self.role_font_index[FontRole.mono.bits()] orelse self.role_font_index[FontRole.bold.bits()] orelse 0
+        else
+            0;
+        return .{ .font_index = idx, .synthetic_italic = false };
+    }
+
+    /// The face `role` shapes, measures and draws with (see `resolveRole`).
     pub fn fontIndexForRole(self: *const FontAtlas, role: FontRole) u32 {
-        return switch (role) {
-            .default => 0,
-            .bold => self.bold_font_index orelse 0,
-            .mono => self.mono_font_index orelse 0,
-            .mono_bold => self.mono_bold_font_index orelse self.mono_font_index orelse self.bold_font_index orelse 0,
-        };
+        return self.resolveRole(role).font_index;
+    }
+
+    /// Line placement for face `font_index` (out of range → the primary).
+    pub fn decorationOf(self: *const FontAtlas, font_index: u32) DecorationMetrics {
+        const idx = if (font_index < self.fonts.items.len) font_index else 0;
+        return self.fonts.items[idx].decoration;
     }
 
     pub fn deinit(self: *FontAtlas) void {
@@ -1045,7 +1238,7 @@ test "FontRole: a registered role routes ASCII shaping to its face; unregistered
 
     // Register the same TTF as the mono face — it becomes a new stack index.
     try atlas.addRoleFont(.mono, ttf);
-    const mono_idx = atlas.mono_font_index.?;
+    const mono_idx = atlas.role_font_index[FontRole.mono.bits()].?;
     try testing.expect(mono_idx != 0);
     try testing.expectEqual(mono_idx, atlas.fontIndexForRole(.mono));
     // mono_bold has no dedicated face → degrades to the mono face, not the primary.
@@ -1096,7 +1289,7 @@ test "FontRole: the preferred face travels on the layout so ensureShaped stays c
     var atlas = try FontAtlas.init(testing.allocator, ttf, 72.0);
     defer atlas.deinit();
     try atlas.addRoleFont(.mono, ttf);
-    const mono_idx = atlas.mono_font_index.?;
+    const mono_idx = atlas.role_font_index[FontRole.mono.bits()].?;
 
     var layout = try atlas.measureTextMultilinePref("hello", 16, 0, mono_idx, 0, LINE_HEIGHT_FACTOR, testing.allocator);
     defer layout.deinit();
@@ -1342,4 +1535,99 @@ test "line_height factor travels from measurement to total_height, caret and hit
     var dflt = try atlas.measureTextMultilinePref(s, 16, 0, 0, 0, std.math.nan(f32), testing.allocator);
     defer dflt.deinit();
     try testing.expectApproxEqAbs(LINE_HEIGHT_FACTOR, dflt.line_height_factor, 0.0001);
+}
+
+test "FontRole: bits compose; pre-italic ordinals are unchanged; out-of-range clamps" {
+    try testing.expectEqual(FontRole.mono_bold, FontRole.mono.with(FontRole.BOLD, true));
+    try testing.expectEqual(FontRole.mono_bold_italic, FontRole.mono_bold.with(FontRole.ITALIC, true));
+    try testing.expectEqual(FontRole.bold, FontRole.bold_italic.with(FontRole.ITALIC, false));
+    try testing.expectEqual(FontRole.mono_bold, roleFromOrdinal(3));
+    try testing.expectEqual(FontRole.mono_italic, roleFromOrdinal(6));
+    try testing.expectEqual(FontRole.default, roleFromOrdinal(8));
+    try testing.expectEqual(FontRole.default, roleFromOrdinal(-1));
+    try testing.expectEqual(FontRole.default, roleFromOrdinal(std.math.nan(f32)));
+}
+
+test "resolveRole: italic without a face keeps family and weight and slants synthetically" {
+    const ttf = try loadTestFont(testing.allocator);
+    defer testing.allocator.free(ttf);
+    var atlas = try FontAtlas.init(testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+    try atlas.addRoleFont(.mono, ttf);
+    try atlas.addRoleFont(.bold, ttf);
+    const mono = atlas.role_font_index[FontRole.mono.bits()].?;
+    const bold = atlas.role_font_index[FontRole.bold.bits()].?;
+
+    // mono_italic → the mono face, slanted; never the italic of another family.
+    const mi = atlas.resolveRole(.mono_italic);
+    try testing.expectEqual(mono, mi.font_index);
+    try testing.expect(mi.synthetic_italic);
+    // bold_italic → the bold face, slanted.
+    try testing.expectEqual(bold, atlas.resolveRole(.bold_italic).font_index);
+    // Plain italic → the primary, slanted.
+    const it = atlas.resolveRole(.italic);
+    try testing.expectEqual(@as(u32, 0), it.font_index);
+    try testing.expect(it.synthetic_italic);
+
+    // A registered italic face is used as-is, with no synthetic slant.
+    try atlas.addRoleFont(.mono_italic, ttf);
+    const real = atlas.resolveRole(.mono_italic);
+    try testing.expectEqual(atlas.role_font_index[FontRole.mono_italic.bits()].?, real.font_index);
+    try testing.expect(!real.synthetic_italic);
+    // ...but it does not stand in for mono_bold_italic: that keeps the weight.
+    try testing.expect(atlas.resolveRole(.mono_bold_italic).synthetic_italic);
+    // Upright roles never slant.
+    try testing.expect(!atlas.resolveRole(.mono).synthetic_italic);
+}
+
+test "TextDecoration round-trips through its stored number" {
+    const cases = [_]TextDecoration{
+        .{},
+        .{ .underline = .wavy },
+        .{ .underline = .double, .strikethrough = true },
+        .{ .underline = .dashed, .strikethrough = true, .overline = true },
+        .{ .overline = true },
+    };
+    for (cases) |d| try testing.expectEqual(d, TextDecoration.fromNumber(d.toNumber()));
+    try testing.expect(TextDecoration.fromNumber(0).isNone());
+    try testing.expect(TextDecoration.fromNumber(-3).isNone());
+    try testing.expect(TextDecoration.fromNumber(99).isNone());
+    // An undefined underline code (6, 7) is no underline, not a crash.
+    try testing.expectEqual(UnderlineStyle.none, TextDecoration.fromNumber(6).underline);
+}
+
+test "decoration metrics come from the face's post / OS/2 tables" {
+    const ttf = try loadTestFont(testing.allocator);
+    defer testing.allocator.free(ttf);
+    var atlas = try FontAtlas.init(testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+    const m = atlas.decorationOf(0);
+    // Any real text face: a thin underline below the baseline, a strike above it
+    // and under the cap height.
+    try testing.expect(m.underline_thickness > 0.01 and m.underline_thickness < 0.2);
+    try testing.expect(m.underline_top > 0 and m.underline_top < 0.4);
+    try testing.expect(m.strike_thickness > 0.01 and m.strike_thickness < 0.2);
+    try testing.expect(m.strike_top > 0.1 and m.strike_top < atlas.fonts.items[0].cap_ratio);
+    // Truncated / garbage bytes never read out of bounds.
+    try testing.expect(Font.findTable(ttf[0..20], 0, "post") == null);
+    try testing.expect(Font.findTable(&.{}, 0, "post") == null);
+    try testing.expect(Font.findTable(ttf, ttf.len + 5, "post") == null);
+}
+
+test "the line sprite reserves solid and clear texels glyphs never overwrite" {
+    const ttf = try loadTestFont(testing.allocator);
+    defer testing.allocator.free(ttf);
+    var atlas = try FontAtlas.init(testing.allocator, ttf, 72.0);
+    defer atlas.deinit();
+    for ("ABCdefg@#W") |c| _ = atlas.getGlyph(0, atlas.glyphIndex(c), 32);
+    const at = struct {
+        fn px(a: *const FontAtlas, u: f32, v: f32) u8 {
+            const x: usize = @intFromFloat(u * ATLAS_WIDTH);
+            const y: usize = @intFromFloat(v * ATLAS_HEIGHT);
+            return a.pixels[y * ATLAS_WIDTH + x];
+        }
+    };
+    try testing.expectEqual(@as(u8, 255), at.px(&atlas, LINE_SPRITE.u, LINE_SPRITE.v_solid));
+    try testing.expectEqual(@as(u8, 255), at.px(&atlas, LINE_SPRITE.u, LINE_SPRITE.v_edge));
+    try testing.expectEqual(@as(u8, 0), at.px(&atlas, LINE_SPRITE.u, LINE_SPRITE.v_clear));
 }

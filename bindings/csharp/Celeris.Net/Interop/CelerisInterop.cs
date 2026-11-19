@@ -196,6 +196,11 @@ internal static class CelerisInterop
     /// pass null to clear back to OS discovery. Returns 0, or -1 on OOM.</summary>
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern int celeris_set_app_fonts(ref CelerisFontConfig config);
+
+    /// <summary>Registers the app's italic faces (ABI v10). Same contract as
+    /// celeris_set_app_fonts; touches only the italic group.</summary>
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int celeris_set_app_italic_fonts(ref CelerisItalicFontConfig config);
 }
 
 /// <summary>One face: bytes + length, or {IntPtr.Zero, 0} for "not supplied".</summary>
@@ -215,4 +220,15 @@ public struct CelerisFontConfig
     public CelerisFontFace Bold;
     public CelerisFontFace Mono;
     public CelerisFontFace MonoBold;
+}
+
+/// <summary>The italic cuts. A zeroed role uses the system italic, or slants its
+/// upright face when that face was app-supplied.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct CelerisItalicFontConfig
+{
+    public CelerisFontFace Italic;
+    public CelerisFontFace BoldItalic;
+    public CelerisFontFace MonoItalic;
+    public CelerisFontFace MonoBoldItalic;
 }

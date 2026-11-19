@@ -39,6 +39,13 @@ pub const Fonts = struct {
     bold: ?[]const u8 = null,
     mono: ?[]const u8 = null,
     mono_bold: ?[]const u8 = null,
+    /// Italic cuts (`b.fontItalic`). A missing one slants its upright face
+    /// synthetically when that face is supplied here, never a host italic from
+    /// another family.
+    italic: ?[]const u8 = null,
+    bold_italic: ?[]const u8 = null,
+    mono_italic: ?[]const u8 = null,
+    mono_bold_italic: ?[]const u8 = null,
 };
 
 /// Hands `AppOptions.fonts` to the engine. Null leaves whatever is registered
@@ -51,6 +58,10 @@ fn registerAppFonts(fonts: ?Fonts) void {
         .bold = f.bold,
         .mono = f.mono,
         .mono_bold = f.mono_bold,
+        .italic = f.italic,
+        .bold_italic = f.bold_italic,
+        .mono_italic = f.mono_italic,
+        .mono_bold_italic = f.mono_bold_italic,
     });
 }
 

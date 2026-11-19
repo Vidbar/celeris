@@ -128,6 +128,15 @@ pub const StyleKey = enum {
     /// overflowing a narrower parent. Affects shaping, so it relayouts.
     text_wrap,
     text_align,
+    /// Lines drawn with a text node — underline (+ its style), strikethrough,
+    /// overline — packed into one `.number` (`text.TextDecoration.toNumber`).
+    /// Paint-only: never changes measurement or layout.
+    text_decoration,
+    /// Color of the decoration lines (`.color`). Unset = the text `color`.
+    text_decoration_color,
+    /// Faint / dim text (SGR 2) (`.boolean`): the text and its lines drawn at
+    /// `text.FAINT_OPACITY`. Paint-only; composes with bold.
+    text_faint,
     border_width,
     border_color,
     /// Per-side border widths (px). Unset sides fall back to `border_width`. Like

@@ -51,6 +51,15 @@ pub const text = struct {
     /// box. Get one from `TextMeasure.vertical` / `verticalWith` (engine-exact) or
     /// `fw.builder.verticalFallback` / `verticalFallbackWith`.
     pub const VerticalLayout = t.VerticalLayout;
+    /// Face selection bits (bold / mono / italic) — `b.fontBold` / `fontMono` / `fontItalic`.
+    pub const FontRole = t.FontRole;
+    /// Underline / strikethrough / overline set — `b.textDecoration`, `.text_decoration`.
+    pub const TextDecoration = t.TextDecoration;
+    pub const UnderlineStyle = t.UnderlineStyle;
+    /// Alpha of faint text (SGR 2) — `b.textFaint`.
+    pub const faint_opacity = t.FAINT_OPACITY;
+    /// Shear of synthetic italic (tan 14°) when a role has no italic face.
+    pub const synthetic_italic_shear = t.SYNTHETIC_ITALIC_SHEAR;
 };
 pub const theme = @import("framework/theme.zig");
 pub const color = @import("core/color.zig");

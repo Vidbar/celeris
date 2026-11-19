@@ -9,6 +9,47 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+C-ABI v10: adds `celeris_set_app_italic_fonts` and the `text_decoration`,
+`text_decoration_color` and `text_faint` style keys; `font_role` takes 0..7. No
+BREAKING changes: the `font_role` ordinals 0..3 keep their meaning and
+`CelerisFontConfig` keeps its layout.
+
+### Added
+
+- **Text styles for terminals, code views and rich text** (see *Text styles* in
+  `docs/FRAMEWORK_API.md`; `zig build text_styles` shows them all):
+  - **Italic**, `b.fontItalic(id, on)`: a third face bit (`FontRole.ITALIC`) that
+    composes with bold and mono. A role uses its italic cut when one is registered;
+    otherwise it keeps its family and weight and slants the upright face 14°, as CSS
+    does. Measurement follows the face that is drawn.
+  - **Decorations**, `b.textDecoration(id, .{ … })`: underline in `single`, `double`,
+    `wavy`, `dotted` and `dashed` styles, plus `strikethrough` and `overline`. Lines
+    are positioned and sized from the font's `post` / `OS/2` tables, pixel-snapped,
+    and never change measurement or layout.
+  - **Decoration color**, `b.decorationColor` / `decorationColorOf`. Without one,
+    lines use the text color.
+  - **Faint**, `b.textFaint(id, on)`: text and lines at 0.5 alpha (Ghostty's model).
+  - All of it can be driven after the build with `bindStyle` on `.font_role`,
+    `.text_decoration`, `.text_decoration_color` and `.text_faint`. All of it can be
+    read back with `fw.testkit.textStyle` / `Query.textStyle`.
+- Italic faces: `AppOptions.fonts.italic` / `.bold_italic` / `.mono_italic` /
+  `.mono_bold_italic`, `celeris_set_app_italic_fonts` (C) and
+  `CelerisFonts.SetItalic` (C#). Host discovery adds Segoe UI / Consolas italics on
+  Windows and DejaVu / Liberation obliques on Linux. A host italic is never paired
+  with an app-supplied upright face.
+- `fw.text` now exports `FontRole`, `TextDecoration`, `UnderlineStyle`,
+  `faint_opacity` and `synthetic_italic_shear`.
+- `MeasureStub` gives italic its own advance (`italic_advance`, 9px). Mono italic
+  keeps the mono cell.
+
+### Changed
+
+- `FontAtlas.fontIndexForRole` now resolves through `resolveRole`, which also
+  reports whether the slant is synthetic. The per-role `bold_font_index` /
+  `mono_font_index` / `mono_bold_font_index` fields are now `role_font_index[8]`.
+
 ## 0.7.1 — 2026-11-18
 
 No C-ABI surface change.

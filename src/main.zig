@@ -51,6 +51,7 @@ test {
     _ = internal.layout;
     _ = internal.renderer;
     _ = internal.text;
+    _ = @import("render/text_decoration.zig");
     _ = internal.linebreak;
     _ = framework;
     _ = @import("framework/verification_test.zig");
