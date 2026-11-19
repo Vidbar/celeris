@@ -75,9 +75,63 @@ pub fn toVk(sym: u32) u32 {
         'A'...'Z', '0'...'9' => @fromBackingInt(@intCast(sym)),
         'a'...'z' => @fromBackingInt(@intCast(sym - 0x20)),
         F1...F12 => @fromBackingInt(@intCast(Key.f1.code() + (sym - F1))),
+        // Punctuation: US keysym and its shifted form (Latin-1 keysyms equal ASCII).
+        '`', '~' => .backquote,
+        '-', '_' => .minus,
+        '=', '+' => .equal,
+        '[', '{' => .bracket_left,
+        ']', '}' => .bracket_right,
+        '\\', '|' => .backslash,
+        ';', ':' => .semicolon,
+        '\'', '"' => .quote,
+        ',', '<' => .comma,
+        '.', '>' => .period,
+        '/', '?' => .slash,
         else => null,
     };
     return if (k) |key| key.code() else 0;
+}
+
+/// Engine key code for a key press, naming the physical key the way Windows'
+/// layout VKs do rather than the character Shift produced. `sym` is the
+/// effective keysym; `level0`/`level1` are the key's unshifted and shifted
+/// keysyms in the active layout (0 if none).
+///  - Printable keys are named by their unshifted symbol, so Shift+/ (`?`) is
+///    `slash` and German Shift+7 (`/`) stays `7`.
+///  - A number-row key whose unshifted symbol is punctuation and shifted symbol
+///    a digit (AZERTY `-`/`6`) is that digit, as Windows assigns it.
+///  - Non-printable syms (navigation, keypad, F-keys) keep the effective keysym,
+///    so NumLock still decides KP_7 vs KP_Home.
+pub fn keyVk(sym: u32, level0: u32, level1: u32) u32 {
+    if (sym < 0x20 or sym > 0x7e) return toVk(sym);
+    if (level1 >= '0' and level1 <= '9' and !(level0 >= '0' and level0 <= '9') and
+        !((level0 >= 'a' and level0 <= 'z') or (level0 >= 'A' and level0 <= 'Z'))) return toVk(level1);
+    const base = toVk(level0);
+    return if (base != 0) base else toVk(sym);
+}
+
+test "keyVk names the physical key, not the shifted character" {
+    // US: Shift+/ types '?', still slash; Shift+; types ':', still semicolon.
+    try std.testing.expectEqual(Key.slash.code(), keyVk('?', '/', '?'));
+    try std.testing.expectEqual(Key.semicolon.code(), keyVk(':', ';', ':'));
+    try std.testing.expectEqual(Key.a.code(), keyVk('A', 'a', 'A'));
+    // German: Shift+7 types '/', but the key is 7; Shift+0 types '=', key is 0.
+    try std.testing.expectEqual(Key.@"7".code(), keyVk('/', '7', '/'));
+    try std.testing.expectEqual(Key.@"0".code(), keyVk('=', '0', '='));
+    // German '+' key (Windows VK_OEM_PLUS).
+    try std.testing.expectEqual(Key.equal.code(), keyVk('+', '+', '*'));
+    // AZERTY: the 6 key types '-' unshifted and '6' shifted; Windows calls it 6.
+    try std.testing.expectEqual(Key.@"6".code(), keyVk('-', '-', '6'));
+    try std.testing.expectEqual(Key.@"6".code(), keyVk('6', '-', '6'));
+    // AZERTY '1' key: '&' unshifted (unmapped punctuation) and '1' shifted.
+    try std.testing.expectEqual(Key.@"1".code(), keyVk('&', '&', '1'));
+    // Spanish Ñ: ntilde is not US punctuation, stays unnamed.
+    try std.testing.expectEqual(@as(u32, 0), keyVk(0xf1, 0xf1, 0xd1));
+    // Non-printable: effective keysym wins (NumLock state), levels ignored.
+    try std.testing.expectEqual(Key.home.code(), keyVk(KP_Home, KP_Home, '7'));
+    try std.testing.expectEqual(Key.left.code(), keyVk(Left, Left, 0));
+    // No level info (0s) falls back to the effective keysym.
+    try std.testing.expectEqual(Key.minus.code(), keyVk('-', 0, 0));
 }
 
 test "keysym navigation maps to the same Key as Windows VK codes" {
@@ -109,7 +163,28 @@ test "keysym editing keys, letters, digits and F-keys" {
     };
     for (cases) |cs| try std.testing.expectEqual(@as(?Key, cs.key), Key.fromCode(toVk(cs.sym)));
     try std.testing.expectEqual(@as(u32, 0), toVk('!'));
-    try std.testing.expectEqual(@as(u32, 0), toVk(';'));
+}
+
+test "keysym punctuation maps onto the Windows VK_OEM codes" {
+    const cases = [_]struct { sym: u32, key: Key, vk: u32 }{
+        .{ .sym = '`', .key = .backquote, .vk = 0xC0 },     .{ .sym = '~', .key = .backquote, .vk = 0xC0 },
+        .{ .sym = '-', .key = .minus, .vk = 0xBD },         .{ .sym = '_', .key = .minus, .vk = 0xBD },
+        .{ .sym = '=', .key = .equal, .vk = 0xBB },         .{ .sym = '+', .key = .equal, .vk = 0xBB },
+        .{ .sym = '[', .key = .bracket_left, .vk = 0xDB },  .{ .sym = '{', .key = .bracket_left, .vk = 0xDB },
+        .{ .sym = ']', .key = .bracket_right, .vk = 0xDD }, .{ .sym = '}', .key = .bracket_right, .vk = 0xDD },
+        .{ .sym = '\\', .key = .backslash, .vk = 0xDC },    .{ .sym = '|', .key = .backslash, .vk = 0xDC },
+        .{ .sym = ';', .key = .semicolon, .vk = 0xBA },     .{ .sym = ':', .key = .semicolon, .vk = 0xBA },
+        .{ .sym = '\'', .key = .quote, .vk = 0xDE },        .{ .sym = '"', .key = .quote, .vk = 0xDE },
+        .{ .sym = ',', .key = .comma, .vk = 0xBC },         .{ .sym = '<', .key = .comma, .vk = 0xBC },
+        .{ .sym = '.', .key = .period, .vk = 0xBE },        .{ .sym = '>', .key = .period, .vk = 0xBE },
+        .{ .sym = '/', .key = .slash, .vk = 0xBF },         .{ .sym = '?', .key = .slash, .vk = 0xBF },
+    };
+    for (cases) |cs| {
+        try std.testing.expectEqual(cs.vk, toVk(cs.sym));
+        try std.testing.expectEqual(@as(?Key, cs.key), Key.fromCode(cs.vk));
+    }
+    // Windows reports Spanish Ñ as VK_OEM_3: an accelerator on `backquote` sees it.
+    try std.testing.expectEqual(@as(?Key, .backquote), Key.fromCode(0xC0));
 }
 
 test "keysym modifiers fold onto the generic Win32 VKs" {

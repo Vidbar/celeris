@@ -9,6 +9,20 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No C-ABI change.
+
+### Added
+
+- **Punctuation keys in `events.Key`:** `backquote minus equal bracket_left
+  bracket_right backslash semicolon quote comma period slash`, with the Windows
+  `VK_OEM_*` codes, so accelerators like Ctrl+` / Ctrl+/ / Ctrl+= no longer need
+  hand-written VK numbers. Linux maps the US keysyms onto the same codes,
+  naming each key by its unshifted keysym: German Shift+7 stays `7`, the AZERTY
+  `-`/`6` key is `6`. On Windows the code follows the
+  layout's VK, so Spanish Ctrl+Ñ (`VK_OEM_3`) matches `backquote`.
+
 ## 0.9.0 — 2026-11-18
 
 No C-ABI change.

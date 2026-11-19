@@ -818,7 +818,8 @@ fn onKey(self: *Editor, ev: fw.events.Event) void {
 }
 ```
 
-- **Named keys:** `left right up down home end page_up page_down`, `backspace delete enter tab escape space insert`, `a`–`z`, `@"0"`–`@"9"`, `f1`–`f12`. Letters are named once, without case; read Shift from `ev.shift`.
+- **Named keys:** `left right up down home end page_up page_down`, `backspace delete enter tab escape space insert`, `a`–`z`, `@"0"`–`@"9"`, `f1`–`f12`, and the punctuation keys `backquote minus equal bracket_left bracket_right backslash semicolon quote comma period slash` (Windows `VK_OEM_*`). Letters are named once, without case; read Shift from `ev.shift`.
+- **Punctuation follows the layout's virtual key.** Each punctuation key is named after its US-layout character. On Windows the code is the VK the active layout gives the key, so on a Spanish layout Ctrl+Ñ arrives as `backquote` (Windows maps Ñ to `VK_OEM_3`), and an accelerator on `backquote` fires there. On Linux the key is named by its unshifted keysym in the active layout, so Shift doesn't change it: Shift+/ is still `slash`, German Shift+7 (which types `/`) is still `7`, and an AZERTY number-row key (`-` unshifted, `6` shifted) is `6`, as on Windows. A key whose unshifted keysym is not US punctuation (Spanish `ñ`) stays unnamed (`key_code` 0).
 - **Modifiers are unchanged:** `ev.shift` / `ev.ctrl` / `ev.alt`.
 - **The enum is non-exhaustive:** a code without a name still comes back as a `Key` (`key.code()` gives the number), so a `switch` needs an `else` arm. `Key.fromCode(u32)` converts a raw code (`0` → `null`), and `Key.x.code()` goes the other way (e.g. to build an `Accelerator` or a synthetic test event).
 - **Not for text.** Typed text arrives as `char_input` with the UTF-8 in `ev.text`. On `char_input` `key_code` holds a codepoint, and on clicks it holds the click count, which is why `ev.key()` returns `null` there.

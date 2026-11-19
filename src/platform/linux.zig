@@ -12,7 +12,7 @@
 //! `pollSystemEvents` (non-blocking `libdecor_dispatch`); listeners translate
 //! Wayland events into `platform.InputEvent`s using the same key codes the widgets
 //! expect (ASCII codepoint for char_input; Windows-VK-style codes for key_down —
-//! see vkFromSym — so TextInput/TextArea behave identically across platforms).
+//! see keysym.keyVk — so TextInput/TextArea behave identically across platforms).
 
 const std = @import("std");
 const log = @import("../core/log.zig");
@@ -541,12 +541,6 @@ const pointer_listener = c.wl_pointer_listener{
 
 // ── Keyboard ────────────────────────────────────────────────────────────────
 
-/// Maps an xkb keysym to the Windows-VK-style code the widgets expect for
-/// key_down (so backspace/arrows/enter/tab behave identically on every OS).
-fn vkFromSym(sym: c.xkb_keysym_t) u32 {
-    return keysym.toVk(@intCast(sym));
-}
-
 // keysym.zig hard-codes the X11 keysym numbers so its tests run on every OS;
 // make sure they agree with the xkbcommon headers we actually build against.
 comptime {
@@ -619,6 +613,16 @@ fn emitKey(win: *Window, ev_type: platform.InputEventType, key_code: u32, shift:
     }
 }
 
+/// The key's keysym at shift `level` in the active layout, ignoring modifiers;
+/// 0 when the key has no symbol there. Feeds `keysym.keyVk`.
+fn levelSym(xkb_state: *c.xkb_state, keycode: u32, level: u32) u32 {
+    const keymap = conn.xkb_keymap orelse return 0;
+    const layout = c.xkb_state_key_get_layout(xkb_state, keycode);
+    var syms: [*c]const c.xkb_keysym_t = undefined;
+    const n = c.xkb_keymap_key_get_syms_by_level(keymap, keycode, layout, level, &syms);
+    return if (n > 0) @intCast(syms[0]) else 0;
+}
+
 fn kKey(data: ?*anyopaque, kb: ?*c.wl_keyboard, serial: u32, time: u32, key: u32, state: u32) callconv(.c) void {
     _ = data;
     _ = kb;
@@ -632,12 +636,13 @@ fn kKey(data: ?*anyopaque, kb: ?*c.wl_keyboard, serial: u32, time: u32, key: u32
     const shift = c.xkb_state_mod_name_is_active(xkb_state, c.XKB_MOD_NAME_SHIFT, c.XKB_STATE_MODS_EFFECTIVE) == 1;
     const alt = c.xkb_state_mod_name_is_active(xkb_state, c.XKB_MOD_NAME_ALT, c.XKB_STATE_MODS_EFFECTIVE) == 1;
     const pressed = state == c.WL_KEYBOARD_KEY_STATE_PRESSED;
+    const vk = keysym.keyVk(@intCast(sym), levelSym(xkb_state, keycode, 0), levelSym(xkb_state, keycode, 1));
     if (pressed) {
-        emitKey(win, .key_down, vkFromSym(sym), shift, ctrl, alt);
+        emitKey(win, .key_down, vk, shift, ctrl, alt);
         const cp = c.xkb_state_key_get_utf32(xkb_state, keycode);
         if (cp >= 32 and cp <= 126) emitKey(win, .char_input, cp, shift, ctrl, alt);
     } else {
-        emitKey(win, .key_up, vkFromSym(sym), shift, ctrl, alt);
+        emitKey(win, .key_up, vk, shift, ctrl, alt);
     }
 }
 fn kMods(data: ?*anyopaque, kb: ?*c.wl_keyboard, serial: u32, dep: u32, lat: u32, lock: u32, group: u32) callconv(.c) void {

@@ -156,6 +156,21 @@ pub const Key = enum(u32) {
     f10 = 0x79,
     f11 = 0x7A,
     f12 = 0x7B,
+    // Punctuation (Windows VK_OEM_*). Named after the US-layout character; on
+    // Windows the code follows the active layout's VK assignment (Spanish Ñ is
+    // VK_OEM_3, so it arrives as `backquote`). Linux maps the US keysyms (and
+    // their shifted forms) onto the same codes.
+    semicolon = 0xBA, // VK_OEM_1      ; :
+    equal = 0xBB, // VK_OEM_PLUS       = +
+    comma = 0xBC, // VK_OEM_COMMA      , <
+    minus = 0xBD, // VK_OEM_MINUS      - _
+    period = 0xBE, // VK_OEM_PERIOD    . >
+    slash = 0xBF, // VK_OEM_2          / ?
+    backquote = 0xC0, // VK_OEM_3      ` ~
+    bracket_left = 0xDB, // VK_OEM_4   [ {
+    backslash = 0xDC, // VK_OEM_5      \ |
+    bracket_right = 0xDD, // VK_OEM_6  ] }
+    quote = 0xDE, // VK_OEM_7          ' "
     _,
 
     /// Null for 0 (no key / unmapped on the platform side).
@@ -949,4 +964,34 @@ test "Event.key names key events and ignores overloaded key_code uses" {
         const k: Key = @fromBackingInt(v);
         try t.expectEqual(k, Key.fromCode(k.code()).?);
     }
+}
+
+test "Key names the punctuation VK_OEM codes; Ctrl+backquote accelerator fires on VK_OEM_3 (Spanish Ñ)" {
+    try std.testing.expectEqual(@as(u32, 0xC0), Key.backquote.code());
+    try std.testing.expectEqual(@as(u32, 0xBD), Key.minus.code());
+    try std.testing.expectEqual(@as(u32, 0xBB), Key.equal.code());
+    try std.testing.expectEqual(@as(u32, 0xDB), Key.bracket_left.code());
+    try std.testing.expectEqual(@as(u32, 0xDD), Key.bracket_right.code());
+    try std.testing.expectEqual(@as(u32, 0xDC), Key.backslash.code());
+    try std.testing.expectEqual(@as(u32, 0xBA), Key.semicolon.code());
+    try std.testing.expectEqual(@as(u32, 0xDE), Key.quote.code());
+    try std.testing.expectEqual(@as(u32, 0xBC), Key.comma.code());
+    try std.testing.expectEqual(@as(u32, 0xBE), Key.period.code());
+    try std.testing.expectEqual(@as(u32, 0xBF), Key.slash.code());
+
+    const S = struct {
+        var hits: u32 = 0;
+        fn on(_: ?*anyopaque, _: Event) void {
+            hits += 1;
+        }
+    };
+    var accels = Accelerators.init(std.testing.allocator);
+    defer accels.deinit();
+    try accels.add(.{ .key_code = Key.backquote.code(), .ctrl = true, .handler = .{ .ptr = null, .call = S.on } });
+    // Windows' WM_KEYDOWN wParam for Ñ on the Spanish layout is VK_OEM_3 (0xC0).
+    const h = accels.match(0xC0, true, false, false) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(accels.match(0xC0, false, false, false) == null);
+    try std.testing.expect(accels.match(Key.minus.code(), true, false, false) == null);
+    h.call(h.ptr, undefined);
+    try std.testing.expectEqual(@as(u32, 1), S.hits);
 }
