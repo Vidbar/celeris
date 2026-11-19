@@ -298,6 +298,13 @@ They return `error.NotBaked` until `h.bakeHits()` has run, and again after any n
 
 Celeris ships a suite of pre-built widgets in `src/framework`. In the modern model you **do not** `init`/`register`/`deinit` them yourself. Instead you `ctx.mountOwned(Widget, .{ ...props })`: the framework allocates the instance on first mount, reuses it across rebuilds (preserving its internal state — hover, caret, value), and frees it on unmount. Component hooks (`build`, `onMount`, `onUnmount`, `deinit`) must be `pub fn`: Celeris finds them with `@hasDecl`, which only sees public declarations, so a private `onMount` is never called.
 
+**Unmount order.** When a widget goes away — reconciled out, or its window/harness torn
+down — Celeris runs every `onUnmount` in the subtree, then destroys every build-effect,
+and only then each instance's `deinit`. So a widget may create state in `onMount` (e.g. a
+heap `Signal` its `build` `.get()`s, or one it hands to its children) and free it in
+`deinit`: no build reads it after that. Freeing a `Signal` also unsubscribes any effect
+still reading it, so readers elsewhere stop tracking it instead of crashing.
+
 ```zig
 pub fn build(self: *MyForm, ctx: *fw.component.BuildContext) !void {
     const b = ctx.builder;

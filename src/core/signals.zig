@@ -250,6 +250,18 @@ pub const Effect = struct {
         try self.deps.append(self.allocator, dep);
     }
 
+    /// Forgets the back-edge to `source` without calling back into it — used by a
+    /// source being freed while this effect still depends on it, so a later
+    /// `clearDeps` never dereferences the freed source.
+    fn dropDep(self: *Effect, source: *anyopaque) void {
+        for (self.deps.items, 0..) |d, i| {
+            if (d.signal == source) {
+                _ = self.deps.swapRemove(i);
+                return;
+            }
+        }
+    }
+
     fn destroy(self: *Effect) void {
         self.clearDeps();
         self.deps.deinit(self.allocator);
@@ -332,7 +344,12 @@ pub fn Signal(comptime T: type) type {
             return .{ .value = initial, .allocator = allocator };
         }
 
+        /// Frees the signal. Effects still subscribed lose this dependency (they
+        /// keep running on their other reads) instead of holding a pointer to
+        /// freed memory — so the order in which a signal and its readers are
+        /// torn down does not matter.
         pub fn deinit(self: *Self) void {
+            for (self.subscribers.items) |eff| eff.dropDep(self);
             self.subscribers.deinit(self.allocator);
         }
 
@@ -638,6 +655,9 @@ pub const Scope = struct {
         const F = struct {
             fn f(a: std.mem.Allocator, p: *anyopaque) void {
                 const cc: *C = @ptrCast(@alignCast(p));
+                // Readers from other scopes may outlive this one: detach them, as
+                // `Signal.deinit` does, so they never touch the freed computed.
+                for (cc.subscribers.items) |eff| eff.dropDep(cc);
                 cc.subscribers.deinit(a);
                 a.destroy(cc);
             }
@@ -1411,4 +1431,35 @@ test "build-write guard: trips only on a build-effect writing a signal it alread
 
     // Outside any effect (event handlers, host code): never.
     try std.testing.expect(!isBuildSelfWrite(read.subscribers.items));
+}
+
+test "Signal.deinit detaches live subscribers: freeing the signal first is safe" {
+    const a = std.testing.allocator;
+    var scope = Scope.init(a);
+    defer scope.deinit(); // runs after the signal is gone — must not touch it
+
+    const s = try a.create(Signal(i32));
+    s.* = Signal(i32).init(a, 1);
+    var other = Signal(i32).init(a, 10);
+    defer other.deinit();
+
+    const Ctx = struct {
+        s: *Signal(i32),
+        other: *Signal(i32),
+        runs: u32 = 0,
+        fn run(self: *@This()) void {
+            self.runs += 1;
+            _ = self.s.get();
+            _ = self.other.get();
+        }
+    };
+    var ctx = Ctx{ .s = s, .other = &other };
+    const eff = try scope.createEffect(&ctx, Ctx.run);
+    try std.testing.expectEqual(@as(usize, 2), eff.deps.items.len);
+
+    s.deinit();
+    a.destroy(s);
+    // Only the freed signal's edge is gone; the effect still reacts to the rest.
+    try std.testing.expectEqual(@as(usize, 1), eff.deps.items.len);
+    try std.testing.expectEqual(@as(*anyopaque, &other), eff.deps.items[0].signal);
 }

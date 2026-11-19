@@ -750,8 +750,10 @@ pub const MountRecord = struct {
     }
 };
 
-/// Maps a component anchor NodeId → its MountRecord. Lives per engine (and per test);
-/// records are owned by their Scope, so `deinit` only frees the map.
+/// Maps a component anchor NodeId → its MountRecord. Lives per engine (and per test).
+/// Framework-owned records (`mountOwned`) are freed by the table; `mountReactive`
+/// records belong to the caller; the table destroys their build-effect when the
+/// anchor is reconciled away, and leaves it to the caller's scope at table teardown.
 pub const MountTable = struct {
     map: std.AutoHashMapUnmanaged(NodeId, *MountRecord) = .{},
     allocator: std.mem.Allocator,
@@ -782,31 +784,49 @@ pub const MountTable = struct {
     pub fn init(allocator: std.mem.Allocator) MountTable {
         return .{ .allocator = allocator, .scope = signals.Scope.init(allocator) };
     }
+    /// Unmounts everything still mounted, through the same two steps a single
+    /// anchor goes through when it is reconciled away (`nodeRemovedListener`):
+    /// `detach` (`onUnmount`, then destroy the build-effect) and `release` (the
+    /// framework-owned instance's `deinit` + free). Reconciliation removes a subtree
+    /// children-first, so a child's build-effect is gone before its parent's
+    /// instance is freed. The map has no tree order, so here every record is
+    /// detached before any is released — the same guarantee: by the time any
+    /// component's `deinit` runs, no build-effect the table owns still reads its
+    /// signals.
+    ///
+    /// A `mountReactive` record's effect belongs to the caller's scope, which may
+    /// already be gone at table teardown (callers usually `defer scope.deinit()`
+    /// after the table's). Its `onUnmount` still fires; its effect is left to that
+    /// scope — and if it read a signal a framework-owned widget frees here,
+    /// `Signal.deinit` detaches it, so the later `scope.deinit` stays safe.
     pub fn deinit(self: *MountTable) void {
-        // Every mounted component is being unmounted, so `onUnmount` fires here just
-        // as it does when a single anchor is reconciled away. Tearing the whole table
-        // down used to skip it, which only showed up once windows could close
-        // independently: a caller-owned component kept bindings pointing at the
-        // closed window's nodes, and the next `set()` on a signal it had read wrote
-        // into a freed store.
-        var un = self.map.valueIterator();
-        while (un.next()) |recp| {
+        var d = self.map.valueIterator();
+        while (d.next()) |recp| {
             const rec = recp.*;
-            if (rec.unmount_fn) |uf| uf(rec.component_ptr);
+            if (rec.scope == &self.scope) {
+                self.detach(rec);
+            } else if (rec.unmount_fn) |uf| uf(rec.component_ptr);
         }
-        // Free any still-mounted framework-owned instances + their records (the
-        // scope below drops their build-effects). mountReactive records are owned by
-        // their caller scopes, so they're skipped here.
-        var it = self.map.valueIterator();
-        while (it.next()) |recp| {
-            const rec = recp.*;
-            if (rec.framework_record) {
-                if (rec.destroy_fn) |df| df(rec.owned_ptr.?, self.allocator);
-                self.allocator.destroy(rec);
-            }
-        }
+        var r = self.map.valueIterator();
+        while (r.next()) |recp| self.release(recp.*);
         self.map.deinit(self.allocator);
         self.scope.deinit();
+    }
+
+    /// Step one of unmounting a record: `onUnmount`, then destroy its build-effect
+    /// (unsubscribing it from every signal it read) so the build never runs again.
+    /// The instance stays alive — siblings' and descendants' hooks may still look at it.
+    fn detach(self: *MountTable, rec: *MountRecord) void {
+        _ = self;
+        if (rec.unmount_fn) |uf| uf(rec.component_ptr);
+        rec.scope.destroyEffect(rec.effect);
+    }
+
+    /// Step two: free a framework-owned instance (running its `deinit`) and the
+    /// record itself. Caller-owned (`mountReactive`) instances are left to the caller.
+    fn release(self: *MountTable, rec: *MountRecord) void {
+        if (rec.destroy_fn) |df| df(rec.owned_ptr.?, self.allocator);
+        if (rec.framework_record) self.allocator.destroy(rec);
     }
     pub fn get(self: *MountTable, anchor: NodeId) ?*MountRecord {
         return self.map.get(anchor);
@@ -826,11 +846,11 @@ pub const MountTable = struct {
     pub fn nodeRemovedListener(ctx: ?*anyopaque, id: NodeId) void {
         const self: *MountTable = @ptrCast(@alignCast(ctx.?));
         const rec = self.map.get(id) orelse return;
-        if (rec.unmount_fn) |uf| uf(rec.component_ptr);
-        rec.scope.destroyEffect(rec.effect);
-        if (rec.destroy_fn) |df| df(rec.owned_ptr.?, self.allocator);
         _ = self.map.remove(id);
-        if (rec.framework_record) self.allocator.destroy(rec);
+        // `removeSubtree` notifies children-first, so descendants were already
+        // detached and released before we get here.
+        self.detach(rec);
+        self.release(rec);
     }
 };
 
@@ -3172,4 +3192,55 @@ test "verticalStyled without a styled hook is verticalWith" {
     const b = m.verticalStyled(16, 40, 2, 1.25, .mono);
     try testing.expectEqual(a.baseline, b.baseline);
     try testing.expectEqual(a.line_height, b.line_height);
+}
+
+// ── Table teardown: build-effects die before owned instances ───────────────
+
+/// Owns a heap `Signal` created in `onMount` and freed in `deinit`, read by its own
+/// build and (with `.with_child`) by a child component's build.
+const OwnsSignal = struct {
+    with_child: bool = false,
+    grid: *signals.Signal(u32) = undefined,
+    alloc: std.mem.Allocator = undefined,
+    pub fn onMount(self: *@This(), a: std.mem.Allocator) void {
+        self.alloc = a;
+        self.grid = a.create(signals.Signal(u32)) catch unreachable;
+        self.grid.* = signals.Signal(u32).init(a, 3);
+    }
+    pub fn deinit(self: *@This()) void {
+        self.grid.deinit();
+        self.alloc.destroy(self.grid);
+    }
+    pub fn build(self: *@This(), ctx: *BuildContext) !void {
+        _ = self.grid.get();
+        if (self.with_child) try ctx.mountOwned(ReadsParentSignal, .{ .src = self.grid });
+    }
+};
+const ReadsParentSignal = struct {
+    src: *signals.Signal(u32),
+    pub fn build(self: *@This(), _: *BuildContext) !void {
+        _ = self.src.get();
+    }
+};
+
+fn mountOwnsSignal(env: anytype, with_child: bool) !void {
+    var b = UIBuilder.init(&env.registry, &env.store);
+    var ctx = BuildContext{ .builder = &b, .router = &env.router, .mounts = &env.mounts };
+    _ = try b.openNodeKeyed(.box, null);
+    try ctx.mountOwned(OwnsSignal, .{ .with_child = with_child });
+    b.close();
+}
+
+test "MountTable.deinit: a widget may free a signal its own build read" {
+    var env = @import("test_support.zig").Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    try mountOwnsSignal(&env, false);
+}
+
+test "MountTable.deinit: a child's build-effect on the parent's signal dies before the parent" {
+    var env = @import("test_support.zig").Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    try mountOwnsSignal(&env, true);
 }

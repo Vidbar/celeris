@@ -9,6 +9,19 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Fixed
+
+- **Tearing down a window or `testkit.Harness` no longer crashes when a widget frees
+  a signal its build read.** `MountTable.deinit` freed framework-owned instances
+  before destroying their build-effects, so a widget that created a `Signal` in
+  `onMount`, `.get()`-ed it in `build` (or let its children read it) and freed it in
+  `deinit` segfaulted in `Signal.unsubscribe`. Teardown now unmounts like
+  reconciliation: `onUnmount` → destroy build-effects → `deinit`. `Signal.deinit`
+  (and `Computed` teardown) also detach subscribers that are still alive. See
+  *Unmount order* in `docs/FRAMEWORK_API.md`.
+
 ## 0.7.0 — 2026-11-18
 
 No C-ABI surface change.

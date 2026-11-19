@@ -134,8 +134,19 @@ remember: those don't exist anymore. (Whatever registry the router is attached t
 subscribe it via `addNodeRemovedListener` — every production host does; a test harness that
 builds its own registry/router pair needs to as well, or pruning silently doesn't happen.)
 
-Tearing a whole tree down (a window closing) runs the same hook: `MountTable.deinit`
-fires every record's `onUnmount` before freeing anything. A type-erased `Child`
+Unmounting a record is always the same two steps, shared by reconciliation and teardown:
+**detach** (`onUnmount`, then destroy the build-effect) and **release** (the owned
+instance's `deinit` + free). Reconciliation gets the right order for free —
+`removeSubtree` notifies children before their parent — so a child's build-effect is gone
+before the parent instance that owns the signals it read is freed.
+
+Tearing a whole tree down (a window closing, `Harness.deinit`) uses the same steps:
+`MountTable.deinit` detaches every record before releasing any (the map has no tree
+order, so phases stand in for post-order). By the time any component's `deinit` runs, no
+build-effect the table owns still reads its signals. As a second line of defence,
+`Signal.deinit` (and a `Computed`'s teardown) detaches subscribers that are still alive —
+e.g. a `mountReactive` build-effect, which belongs to the caller's scope — so freeing a
+signal before its readers never leaves a dangling pointer. A type-erased `Child`
 (`component.childOf`) forwards it through `Child.unmount()`, so **caller-owned** content
 built into a window — which outlives that window and may be built into the next one —
 gets told its nodes are gone and can drop bindings that pointed at them. Without that,
