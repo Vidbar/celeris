@@ -156,6 +156,7 @@ const example_apps = [_]ExampleApp{
     .{ .name = "window_edge", .root = "examples/window_edge.zig", .step = "window_edge", .desc = "Manual check: .round + window_outline shows one continuous edge, no white strip" },
     .{ .name = "rounded_clip", .root = "examples/rounded_clip.zig", .step = "rounded_clip", .desc = "Manual check: overflowHidden + radius clips children to the rounded shape" },
     .{ .name = "text_styles", .root = "examples/text_styles.zig", .step = "text_styles", .desc = "Text styles at three sizes: italic (real/synthetic), underline styles + color, strikethrough, overline, faint" },
+    .{ .name = "alt_focus", .root = "examples/alt_focus.zig", .step = "alt_focus", .desc = "Alt chords (capturesAltKeys) and programmatic focus (requestFocus) side by side" },
     .{ .name = "virtual_grid", .root = "examples/virtual_grid.zig", .step = "virtual_grid", .desc = "VirtualGrid: 100k x 40 windowed grid over a pull source, frozen header, keyboard cell nav" },
 };
 

@@ -839,7 +839,7 @@ While that node holds focus, every Alt chord is delivered to it as `key_down` wi
 - **A bare Alt press** still goes to the system, and so does releasing Alt after a chord the widget received, which is not treated as a tap.
 - **No `char_input`** follows an Alt chord. Handle it on `key_down` with `ev.key()` and `ev.alt`.
 
-Linux already delivers Alt chords to the focused node, so the modifier changes nothing there. This is the same opt-in-per-node model as `capturesTab`.
+Linux already delivers Alt chords to the focused node, so the modifier changes nothing there. This is the same opt-in-per-node model as `capturesTab`. `zig build alt_focus` shows a capturing pane next to a plain one.
 
 ### Focusing a node from code (`ctx.requestFocus`, `FocusRequester`)
 
