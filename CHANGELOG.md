@@ -21,6 +21,12 @@ listed here as well.
   reconciliation: `onUnmount` → destroy build-effects → `deinit`. `Signal.deinit`
   (and `Computed` teardown) also detach subscribers that are still alive. See
   *Unmount order* in `docs/FRAMEWORK_API.md`.
+- **`mountReactive` and table teardown, in either order.** The build-effect lives
+  in the caller's `Scope`, but the table freed the record it points at, so a
+  `set()` between closing a window and deinit-ing that scope ran the build on freed
+  memory; and a write from a widget's `deinit` could re-run a build mid-teardown.
+  The effect now has an `on_destroy` hook (new `Effect.on_destroy`): whichever of
+  the scope and the mount goes first cleans up the other.
 
 ## 0.7.0 — 2026-11-18
 

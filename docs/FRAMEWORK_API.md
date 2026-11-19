@@ -302,8 +302,12 @@ Celeris ships a suite of pre-built widgets in `src/framework`. In the modern mod
 down — Celeris runs every `onUnmount` in the subtree, then destroys every build-effect,
 and only then each instance's `deinit`. So a widget may create state in `onMount` (e.g. a
 heap `Signal` its `build` `.get()`s, or one it hands to its children) and free it in
-`deinit`: no build reads it after that. Freeing a `Signal` also unsubscribes any effect
-still reading it, so readers elsewhere stop tracking it instead of crashing.
+`deinit`: no build reads it after that. This covers `mountReactive` components too, even
+though their build-effect lives in your `Scope`: the scope and the mount clean up after
+each other in either order, so you may `deinit` that scope before or after the window
+closes (or reset it in `onUnmount`), and a write from some widget's `deinit` never re-runs
+a build mid-teardown. Freeing a `Signal` also unsubscribes any effect still reading it, so
+readers elsewhere stop tracking it instead of crashing.
 
 ```zig
 pub fn build(self: *MyForm, ctx: *fw.component.BuildContext) !void {

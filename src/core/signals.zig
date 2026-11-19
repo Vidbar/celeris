@@ -206,6 +206,16 @@ pub const Effect = struct {
     /// True for a component build-effect (set by the component build layer).
     /// Only read by the debug guard in `Signal.set` — see `isBuildSelfWrite`.
     is_build: bool = false,
+    /// Optional hook told when this effect is destroyed, whoever destroys it (its
+    /// own scope's `deinit`, or `destroyEffect`). Lets an object that the effect's
+    /// `ctx` points at, but that lives elsewhere, learn that the effect is gone —
+    /// the component layer uses it for build-effects that live in a caller's scope.
+    on_destroy: ?OnDestroy = null,
+
+    pub const OnDestroy = struct {
+        ctx: *anyopaque,
+        call: *const fn (*anyopaque) void,
+    };
 
     /// Called from a source's `get()` during this effect's run to raise its height
     /// above that source. `source_height` is 0 for a signal, the computed's height
@@ -269,6 +279,10 @@ pub const Effect = struct {
         // Remove from any in-progress batch queue so the flush can't touch this
         // effect after the scope frees its memory.
         unschedule(self);
+        if (self.on_destroy) |h| {
+            self.on_destroy = null;
+            h.call(h.ctx);
+        }
     }
 };
 

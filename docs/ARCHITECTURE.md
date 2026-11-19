@@ -143,10 +143,15 @@ before the parent instance that owns the signals it read is freed.
 Tearing a whole tree down (a window closing, `Harness.deinit`) uses the same steps:
 `MountTable.deinit` detaches every record before releasing any (the map has no tree
 order, so phases stand in for post-order). By the time any component's `deinit` runs, no
-build-effect the table owns still reads its signals. As a second line of defence,
-`Signal.deinit` (and a `Computed`'s teardown) detaches subscribers that are still alive —
-e.g. a `mountReactive` build-effect, which belongs to the caller's scope — so freeing a
-signal before its readers never leaves a dangling pointer. A type-erased `Child`
+build-effect still reads its signals, and nothing it writes can re-run a build.
+
+A `mountReactive` build-effect lives in the caller's `Scope`, not the table's, so either
+side may go first. The effect carries an `on_destroy` hook (`Effect.on_destroy`): when the
+caller's scope drops it first, the hook removes and frees the record; when the table
+unmounts first, it clears the hook and destroys the effect. Every record still in the map
+therefore has a live effect and scope. As a second line of defence, `Signal.deinit` (and a
+`Computed`'s teardown) detaches subscribers that are still alive, so freeing a signal
+before its readers never leaves a dangling pointer. A type-erased `Child`
 (`component.childOf`) forwards it through `Child.unmount()`, so **caller-owned** content
 built into a window — which outlives that window and may be built into the next one —
 gets told its nodes are gone and can drop bindings that pointed at them. Without that,

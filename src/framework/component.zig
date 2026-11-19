@@ -450,8 +450,9 @@ pub const BuildContext = struct {
         var rec = table.get(anchor);
         if (rec == null) {
             // First mount. The record is framework-allocated (owned by the MountTable,
-            // freed on unmount / table teardown); only the build-effect lives in the
-            // caller's `scope`. component_ptr is caller-owned, so no destroy_fn.
+            // freed on unmount / table teardown, or when the caller's scope drops
+            // the effect first); only the build-effect lives in the caller's `scope`.
+            // component_ptr is caller-owned, so no destroy_fn.
             const r = try table.allocator.create(MountRecord);
             errdefer table.allocator.destroy(r);
             const template = mountTemplate(self.builder);
@@ -468,7 +469,10 @@ pub const BuildContext = struct {
             };
             r.effect = try scope.createEffectDeferred(r, MountRecord.rerun, HEIGHT_BASE + depthOf(self.builder.registry, anchor));
             r.effect.is_build = true;
+            errdefer scope.destroyEffect(r.effect);
             try table.put(anchor, r);
+            // Armed only after `put`: the errdefer above must not run the hook.
+            r.effect.on_destroy = .{ .ctx = r, .call = MountRecord.callerEffectGone };
             rec = r;
             // First mount: the first build-effect run IS the mount, so onMount fires
             // here (before the inline build below), mirroring a constructor.
@@ -725,11 +729,31 @@ pub const MountRecord = struct {
     /// True when the record itself was framework-allocated (mountOwned) and must be
     /// freed on unmount / table teardown, rather than owned by a caller Scope.
     framework_record: bool = false,
+    /// Set once `effect` is gone. A `mountReactive` effect lives in the caller's
+    /// scope, which can be deinit'd before the anchor is reconciled away or the
+    /// table is torn down; the effect's `on_destroy` hook (`callerEffectGone`)
+    /// reports it so the table never touches the freed effect.
+    effect_dead: bool = false,
+    /// True while the table itself is unmounting this record (`detach`), so an
+    /// `on_destroy` fired from inside `onUnmount` only marks the record.
+    detaching: bool = false,
     /// Builder config for isolated re-runs (registry+store+theme; no measure/clipboard,
     /// mirroring the partial-rebuild precedent in tabs.zig).
     template: UIBuilder,
     router: ?*events.EventRouter,
     mounts: *MountTable,
+
+    /// `on_destroy` hook of a caller-scope (`mountReactive`) build-effect. If the
+    /// table is unmounting the record right now, just note it; otherwise the
+    /// caller's scope dropped the effect while the anchor is still mounted (or the
+    /// table is tearing down), so nothing will ever rebuild it: drop the record.
+    fn callerEffectGone(ctx: *anyopaque) void {
+        const self: *MountRecord = @ptrCast(@alignCast(ctx));
+        self.effect_dead = true;
+        if (self.detaching or self.mounts.tearing_down) return;
+        if (self.mounts.map.get(self.anchor) == self) _ = self.mounts.map.remove(self.anchor);
+        self.mounts.allocator.destroy(self);
+    }
 
     fn rerun(self: *MountRecord) void {
         const gen = signals.currentPropagationGen();
@@ -752,8 +776,9 @@ pub const MountRecord = struct {
 
 /// Maps a component anchor NodeId → its MountRecord. Lives per engine (and per test).
 /// Framework-owned records (`mountOwned`) are freed by the table; `mountReactive`
-/// records belong to the caller; the table destroys their build-effect when the
-/// anchor is reconciled away, and leaves it to the caller's scope at table teardown.
+/// records are framework-allocated too, but their build-effect lives in the caller's
+/// scope; whichever goes first — that scope, or the anchor/table — cleans up the other
+/// side (see `MountRecord.callerEffectGone`).
 pub const MountTable = struct {
     map: std.AutoHashMapUnmanaged(NodeId, *MountRecord) = .{},
     allocator: std.mem.Allocator,
@@ -773,6 +798,8 @@ pub const MountTable = struct {
     /// a component rebuilt on its own must still reach its own window.
     window_id: i32 = 0,
     window_ops: ?*const WindowOps = null,
+    /// Set by `deinit` before it walks the map (see `MountRecord.callerEffectGone`).
+    tearing_down: bool = false,
 
     /// The window actions a component tree needs, type-erased so the component layer
     /// stays free of any engine import (the same shape as the builder's clipboard and
@@ -794,19 +821,17 @@ pub const MountTable = struct {
     /// component's `deinit` runs, no build-effect the table owns still reads its
     /// signals.
     ///
-    /// A `mountReactive` record's effect belongs to the caller's scope, which may
-    /// already be gone at table teardown (callers usually `defer scope.deinit()`
-    /// after the table's). Its `onUnmount` still fires; its effect is left to that
-    /// scope — and if it read a signal a framework-owned widget frees here,
-    /// `Signal.deinit` detaches it, so the later `scope.deinit` stays safe.
+    /// `mountReactive` records are included: their effect lives in the caller's
+    /// scope, and a scope deinit'd before the table has already removed its records
+    /// (`MountRecord.callerEffectGone`), so every effect left is live and is
+    /// destroyed in the first pass like the rest. Nothing a widget's `deinit` writes
+    /// in the second pass can re-run a build.
     pub fn deinit(self: *MountTable) void {
+        // From here on a caller scope dropping its effect only marks the record
+        // (`callerEffectGone`), so the map is never mutated under the iterators.
+        self.tearing_down = true;
         var d = self.map.valueIterator();
-        while (d.next()) |recp| {
-            const rec = recp.*;
-            if (rec.scope == &self.scope) {
-                self.detach(rec);
-            } else if (rec.unmount_fn) |uf| uf(rec.component_ptr);
-        }
+        while (d.next()) |recp| self.detach(recp.*);
         var r = self.map.valueIterator();
         while (r.next()) |recp| self.release(recp.*);
         self.map.deinit(self.allocator);
@@ -816,10 +841,22 @@ pub const MountTable = struct {
     /// Step one of unmounting a record: `onUnmount`, then destroy its build-effect
     /// (unsubscribing it from every signal it read) so the build never runs again.
     /// The instance stays alive — siblings' and descendants' hooks may still look at it.
+    ///
+    /// A `mountReactive` effect lives in the caller's scope. Any record still in
+    /// the map whose effect that scope already destroyed was told so through the
+    /// effect's `on_destroy` hook (`effect_dead`), so an effect reached here is
+    /// alive and its scope with it — even at table teardown, where it is now
+    /// destroyed like any other. `onUnmount` itself may deinit that scope (the
+    /// documented reset pattern), which the hook also reports.
     fn detach(self: *MountTable, rec: *MountRecord) void {
         _ = self;
+        rec.detaching = true;
         if (rec.unmount_fn) |uf| uf(rec.component_ptr);
-        rec.scope.destroyEffect(rec.effect);
+        if (!rec.effect_dead) {
+            rec.effect.on_destroy = null;
+            rec.scope.destroyEffect(rec.effect);
+            rec.effect_dead = true;
+        }
     }
 
     /// Step two: free a framework-owned instance (running its `deinit`) and the
@@ -3243,4 +3280,114 @@ test "MountTable.deinit: a child's build-effect on the parent's signal dies befo
     defer env.deinit();
     env.wire();
     try mountOwnsSignal(&env, true);
+}
+
+/// Caller-owned (`mountReactive`) component that counts builds of a signal it reads.
+const ReactiveReader = struct {
+    src: *signals.Signal(u32),
+    builds: u32 = 0,
+    /// When set, `onUnmount` resets it — the documented per-mount reset pattern.
+    reset_scope: ?*signals.Scope = null,
+    pub fn build(self: *@This(), _: *BuildContext) !void {
+        self.builds += 1;
+        _ = self.src.get();
+    }
+    pub fn onUnmount(self: *@This()) void {
+        if (self.reset_scope) |s| {
+            s.deinit();
+            s.* = signals.Scope.init(testing.allocator);
+        }
+    }
+};
+
+fn mountReader(env: anytype, scope: *signals.Scope, reader: *ReactiveReader) !NodeId {
+    var b = UIBuilder.init(&env.registry, &env.store);
+    var ctx = BuildContext{ .builder = &b, .router = &env.router, .mounts = &env.mounts };
+    const root = try b.openNodeKeyed(.box, null);
+    try ctx.mountReactive(scope, reader);
+    b.close();
+    return root;
+}
+
+test "mountReactive: caller scope deinit'd first drops the record; teardown stays clean" {
+    var sig = signals.Signal(u32).init(testing.allocator, 0);
+    defer sig.deinit();
+    var env = @import("test_support.zig").Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var scope = signals.Scope.init(testing.allocator);
+    var reader = ReactiveReader{ .src = &sig };
+    _ = try mountReader(&env, &scope, &reader);
+    try testing.expectEqual(@as(u32, 1), env.mounts.map.count());
+
+    scope.deinit(); // effect gone → record removed and freed by the hook
+    try testing.expectEqual(@as(u32, 0), env.mounts.map.count());
+    sig.set(1);
+    try testing.expectEqual(@as(u32, 1), reader.builds);
+}
+
+test "mountReactive: after table teardown a set() never re-runs the build" {
+    var sig = signals.Signal(u32).init(testing.allocator, 0);
+    defer sig.deinit();
+    var scope = signals.Scope.init(testing.allocator);
+    defer scope.deinit(); // outlives the table — the record must not
+    var env = @import("test_support.zig").Harness.init(testing.allocator);
+    env.wire();
+    var reader = ReactiveReader{ .src = &sig };
+    _ = try mountReader(&env, &scope, &reader);
+    env.deinit();
+
+    sig.set(1); // used to run MountRecord.rerun on the freed record
+    try testing.expectEqual(@as(u32, 1), reader.builds);
+    try testing.expectEqual(@as(usize, 0), scope.effects.items.len);
+}
+
+/// Framework-owned widget whose `deinit` writes a signal other builds read.
+const WritesOnDeinit = struct {
+    dst: *signals.Signal(u32),
+    pub fn build(_: *@This(), _: *BuildContext) !void {}
+    pub fn deinit(self: *@This()) void {
+        self.dst.set(self.dst.peek() + 1);
+    }
+};
+
+test "MountTable.deinit: a write from a widget's deinit re-runs no build mid-teardown" {
+    var sig = signals.Signal(u32).init(testing.allocator, 0);
+    defer sig.deinit();
+    var scope = signals.Scope.init(testing.allocator);
+    defer scope.deinit();
+    var env = @import("test_support.zig").Harness.init(testing.allocator);
+    env.wire();
+    var reader = ReactiveReader{ .src = &sig };
+    {
+        var b = UIBuilder.init(&env.registry, &env.store);
+        var ctx = BuildContext{ .builder = &b, .router = &env.router, .mounts = &env.mounts };
+        _ = try b.openNodeKeyed(.box, null);
+        try ctx.mountReactive(&scope, &reader);
+        try ctx.mountOwned(WritesOnDeinit, .{ .dst = &sig });
+        b.close();
+    }
+    env.deinit();
+    try testing.expectEqual(@as(u32, 1), sig.peek()); // the write happened…
+    try testing.expectEqual(@as(u32, 1), reader.builds); // …and rebuilt nothing
+}
+
+test "mountReactive: onUnmount resetting its own scope is safe on removal and teardown" {
+    var sig = signals.Signal(u32).init(testing.allocator, 0);
+    defer sig.deinit();
+    var env = @import("test_support.zig").Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+
+    var s1 = signals.Scope.init(testing.allocator);
+    defer s1.deinit();
+    var r1 = ReactiveReader{ .src = &sig, .reset_scope = &s1 };
+    const root = try mountReader(&env, &s1, &r1);
+    env.registry.removeNode(root); // reconciliation path
+    try testing.expectEqual(@as(u32, 0), env.mounts.map.count());
+
+    var s2 = signals.Scope.init(testing.allocator);
+    defer s2.deinit();
+    var r2 = ReactiveReader{ .src = &sig, .reset_scope = &s2 };
+    _ = try mountReader(&env, &s2, &r2); // left for env.deinit (teardown path)
 }
