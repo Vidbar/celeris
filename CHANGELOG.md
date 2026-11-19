@@ -9,7 +9,7 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
-## Unreleased
+## 0.8.0 — 2026-11-18
 
 C-ABI v10: adds `celeris_set_app_italic_fonts` and the `text_decoration`,
 `text_decoration_color` and `text_faint` style keys; `font_role` takes 0..7. No
