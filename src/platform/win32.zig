@@ -521,6 +521,32 @@ pub fn setImeActive(active: bool) void {
     _ = active;
 }
 
+/// Set by the engine: the focused node has `captures_alt`. Read by the message
+/// loop on the same (UI) thread.
+var g_alt_capture: bool = false;
+/// A captured Alt chord was delivered since Alt went down. DefWindowProc never
+/// saw that chord, so on Alt's release it would think Alt was tapped alone and
+/// enter menu mode (eating the next keystroke). Swallow that release instead.
+var g_alt_chord_sent: bool = false;
+
+pub fn setAltCaptureActive(active: bool) void {
+    g_alt_capture = active;
+}
+
+/// WM_SYSKEYDOWN/UP the app receives. F10 always (Windows reports it, and
+/// Shift+F10, as a system key). With `alt_capture`, every Alt chord too —
+/// except Alt+F4 (close), Alt+Space (window menu) and a bare Alt/modifier
+/// press (menu activation on release), which stay with DefWindowProc.
+pub fn sysKeyDelivered(vk: usize, alt_capture: bool) bool {
+    if (vk == 0x79) return true; // F10
+    if (!alt_capture) return false;
+    return switch (vk) {
+        0x73, 0x20 => false, // F4, Space
+        0x10...0x12, 0x5B, 0x5C, 0xA0...0xA5 => false, // bare modifiers
+        else => true,
+    };
+}
+
 pub fn setCursor(cursor: platform.CursorType) void {
     const idc: usize = switch (cursor) {
         .default => 32512, // IDC_ARROW
@@ -1219,10 +1245,10 @@ pub fn pollSystemEvents(ctx: ?*anyopaque, input_cb: ?platform.InputCallback) boo
                 // SetCapture/ReleaseCapture pair above already fixes the common
                 // pointer-left-the-window stuck-drag.
             } else if (msg.message == 0x0100 or msg.message == 0x0101 or msg.message == 0x0102 or
-                // WM_SYSKEYDOWN/UP for F10 only: Windows reports F10 (and Shift+F10,
-                // the keyboard context-menu chord) as a system key. Other system
-                // keys (Alt chords, Alt+F4) keep going only to DefWindowProc.
-                ((msg.message == 0x0104 or msg.message == 0x0105) and msg.wParam == 0x79))
+                // WM_SYSKEYDOWN/UP: F10, plus Alt chords when the focused node
+                // captures them (see `sysKeyDelivered`). Others (Alt+F4...)
+                // keep going only to DefWindowProc.
+                ((msg.message == 0x0104 or msg.message == 0x0105) and sysKeyDelivered(@intCast(msg.wParam), g_alt_capture)))
             {
                 const ev_type: platform.InputEventType = switch (msg.message) {
                     0x0100, 0x0104 => .key_down,
@@ -1301,10 +1327,20 @@ pub fn pollSystemEvents(ctx: ?*anyopaque, input_cb: ?platform.InputCallback) boo
                 cb(ctx, .{ .native_handle = .{ .win32 = .{ .hwnd = msg.hwnd, .hinst = null } }, .event_type = .ime_preedit, .text = "" });
             }
         }
-        // F10 (Shift+F10 = context menu) was delivered to the app above. Letting
-        // DefWindowProc see it too would enter the window's menu loop on key-up
-        // (SC_KEYMENU) and steal the next keystrokes from the app's own popup.
-        if ((msg.message == 0x0104 or msg.message == 0x0105) and msg.wParam == 0x79) continue;
+        // A system key delivered to the app above (F10, or a captured Alt
+        // chord) never reaches DefWindowProc: it would enter the window's menu
+        // loop on key-up (SC_KEYMENU) and steal the next keystrokes, or beep
+        // for a missing mnemonic. Skipping TranslateMessage also means no
+        // WM_SYSCHAR is generated for it.
+        if ((msg.message == 0x0104 or msg.message == 0x0105) and sysKeyDelivered(@intCast(msg.wParam), g_alt_capture)) {
+            if (msg.message == 0x0104 and msg.wParam != 0x79) g_alt_chord_sent = true;
+            continue;
+        }
+        if (msg.message == 0x0104 and (msg.wParam == 0x12 or msg.wParam == 0xA4 or msg.wParam == 0xA5)) g_alt_chord_sent = false; // fresh Alt press
+        if ((msg.message == 0x0101 or msg.message == 0x0105) and msg.wParam == 0x12 and g_alt_chord_sent) {
+            g_alt_chord_sent = false;
+            continue; // Alt released after a captured chord: not a menu tap
+        }
         _ = TranslateMessage(&msg);
         _ = DispatchMessageW(&msg);
     }

@@ -301,6 +301,14 @@ pub fn setImeActive(active: bool) void {
     Impl.setImeActive(active);
 }
 
+/// Tells the backend whether the focused node captures Alt chords
+/// (`ModifierKey.captures_alt`). The engine calls it when focus moves and after
+/// each frame. Win32 then delivers WM_SYSKEYDOWN Alt chords as key_down instead
+/// of DefWindowProc; Linux ignores it (Alt chords always arrive).
+pub fn setAltCaptureActive(active: bool) void {
+    Impl.setAltCaptureActive(active);
+}
+
 /// Longest prefix of `s` that is at most `max_bytes` long and does not end in
 /// the middle of a UTF-8 sequence. Backends copy titles into fixed buffers; a
 /// plain byte cut could split a multibyte character and hand the OS invalid

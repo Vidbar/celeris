@@ -857,6 +857,11 @@ pub fn pickDirectory(allocator: std.mem.Allocator, owner: ?*anyopaque, title: ?[
 
 /// Tears down the shared Wayland connection — called only when the LAST window
 /// closes, so the display/seat/etc. outlive individual windows.
+/// Alt chords already arrive as ordinary key events on Wayland.
+pub fn setAltCaptureActive(active: bool) void {
+    _ = active;
+}
+
 /// Enables/disables IME for the focused seat. The engine calls this when focus
 /// moves to/from an editable widget so the compositor only composes in text
 /// fields. No-op if the compositor lacks zwp_text_input_v3.

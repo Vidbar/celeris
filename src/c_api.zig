@@ -527,6 +527,10 @@ pub const EngineState = struct {
     /// next Tab traverses focus instead of reaching the node. Cleared by any
     /// other key_down and by every focus move (`moveFocus`).
     tab_escape_armed: bool = false,
+    /// A `requestFocus` target that had no solved geometry yet (built this
+    /// frame). Resolved once after the next solve: focused if tabbable, else
+    /// dropped. See `requestFocus`.
+    pending_focus: ?reg.NodeId = null,
     /// Last-seen maximized state, to fire the maximize-change hook only on a
     /// transition (drag-to-restore un-maximizes via the OS, not through our button).
     last_maximized: bool = false,
@@ -1425,6 +1429,10 @@ fn focusScopePopFn(ctx: *anyopaque) bool {
     const engine: *EngineState = @ptrCast(@alignCast(ctx));
     return popFocusScope(engine);
 }
+fn focusRequestFn(ctx: *anyopaque, id: reg.NodeId) bool {
+    const engine: *EngineState = @ptrCast(@alignCast(ctx));
+    return requestFocus(engine, id);
+}
 
 /// Zig-only API (not exported to C).
 /// Clears the current UI, calls `build_fn(builder, ctx)` to populate the
@@ -1446,7 +1454,7 @@ pub fn rebuildUI(engine_id: i32, build_fn: *const fn (*@import("framework/builde
     // Inject the platform clipboard so text widgets can copy/paste.
     b.clipboard = .{ .ctx = @ptrCast(&g_clipboard_ctx), .getFn = clipboardGetFn, .setFn = clipboardSetFn };
     // Inject focus-scope control so overlays (Menu/Dialog) can trap Tab.
-    b.focus_scope = .{ .ctx = @ptrCast(engine), .pushFn = focusScopePushFn, .popFn = focusScopePopFn };
+    b.focus_scope = .{ .ctx = @ptrCast(engine), .pushFn = focusScopePushFn, .popFn = focusScopePopFn, .focusFn = focusRequestFn };
     // Inject the per-frame animator so indeterminate indicators can animate smoothly
     // instead of stepping off the coarse ~500ms tick channel (see events.TICK_MS).
     b.animator = &engine.animator;
@@ -1554,6 +1562,7 @@ fn moveFocus(engine: *EngineState, new_focus: ?reg.NodeId, origin: events_mod.Fo
     engine.focused_node = new_focus;
     engine.registry.global_render_dirty = true; // focus ring moved → repaint
     platform_mod.setImeActive(imeActiveForNode(engine, new_focus)); // IME only in text fields
+    syncAltCapture(engine);
 
     // Announce the move to assistive tech. Single funnel: Tab, click, focus scopes
     // and UIA SetFocus all land here, so one call covers every origin.
@@ -1695,6 +1704,66 @@ pub fn popFocusScope(engine: *EngineState) bool {
     return true;
 }
 
+/// True if `id` lies inside the active (top) focus scope, or no scope is open.
+fn inActiveScope(engine: *EngineState, id: reg.NodeId) bool {
+    if (engine.focus_scope_len == 0) return true;
+    const root = engine.focus_scopes[engine.focus_scope_len - 1].root;
+    var cur = id;
+    var depth: usize = 0;
+    while (cur != reg.NULL_NODE and depth < reg.MAX_TREE_DEPTH) : (depth += 1) {
+        if (cur == root) return true;
+        const n = engine.registry.getNode(cur) orelse return false;
+        cur = n.parent;
+    }
+    return false;
+}
+
+/// Programmatic focus (the DOM's `element.focus()`). Moves focus to `id` with
+/// origin `.programmatic`. Returns false and changes nothing when the node is
+/// gone, not `focusable`, disabled, or outside an open modal focus scope. A
+/// node with no solved geometry yet (built this same frame) is deferred: it is
+/// focused after the next layout solve if it is tabbable then, else dropped —
+/// so a widget can request focus right as it mounts. Returns true when focus
+/// moved or was deferred.
+pub fn requestFocus(engine: *EngineState, id: reg.NodeId) bool {
+    const node = engine.registry.getNode(id) orelse return false;
+    if (engine.store.getModifier(id, .focusable) == null) return false;
+    if (engine.store.modifierFlag(id, .disabled)) return false;
+    if (!inActiveScope(engine, id)) return false;
+    if (node.geometry.width <= 0 and node.geometry.height <= 0) {
+        engine.pending_focus = id;
+        engine.registry.global_render_dirty = true; // wake the loop for the solve
+        return true;
+    }
+    if (!isTabbable(&engine.registry, &engine.store, id)) return false;
+    engine.pending_focus = null;
+    moveFocus(engine, id, .programmatic);
+    return true;
+}
+
+/// Settles a deferred `requestFocus` after a solve: focus it if it is still
+/// focusable, enabled, in scope and visible; otherwise drop it.
+/// Tells the platform whether the focused node captures Alt chords. Called from
+/// `moveFocus` and after every frame (the modifier may be set on a node that
+/// already holds focus, which moves no focus).
+fn syncAltCapture(engine: *EngineState) void {
+    const on = if (engine.focused_node) |f| engine.store.modifierFlag(f, .captures_alt) else false;
+    platform_mod.setAltCaptureActive(on);
+}
+
+fn resolvePendingFocus(engine: *EngineState) void {
+    const id = engine.pending_focus orelse return;
+    engine.pending_focus = null;
+    if (engine.registry.getNode(id) == null) return;
+    if (engine.store.getModifier(id, .focusable) == null) return;
+    if (!inActiveScope(engine, id)) return;
+    if (!isTabbable(&engine.registry, &engine.store, id)) {
+        log.info("requestFocus: node {d} not visible after layout; dropped\n", .{id});
+        return;
+    }
+    moveFocus(engine, id, .programmatic);
+}
+
 /// A focusable node is skipped by Tab when it is disabled, has no resolved
 /// size, or lies fully outside an `overflow_hidden` ancestor's box (e.g. rows of
 /// a closed dropdown menu clipped to height 0) — focusing an invisible or inert
@@ -1830,7 +1899,7 @@ fn imeActiveForNode(engine: *EngineState, node: ?reg.NodeId) bool {
 /// (0x10-0x12), their L/R variants (0xA0-0xA5) and the Windows keys
 /// (0x5B/0x5C). Linux maps the modifier keysyms onto 0x10-0x12/0x5B
 /// (`keysym.toVk`); code 0 is an unmapped key, NOT a modifier. Win32 Alt
-/// arrives as WM_SYSKEYDOWN and never reaches here today; kept for parity.
+/// is not delivered on its own (see win32 `sysKeyDelivered`); kept for parity.
 fn isModifierOnlyKey(code: u32) bool {
     return switch (code) {
         0x10...0x12, 0x5B, 0x5C, 0xA0...0xA5 => true,
@@ -2374,6 +2443,8 @@ fn liveResizeCallback(handle: platform_mod.NativeWindowHandle, width: u32, heigh
     }
 
     bakeAndRender(engine, true) catch return;
+    resolvePendingFocus(engine);
+    syncAltCapture(engine);
     // During a modal live-resize the main loop is blocked, so this is the only
     // place observers learn the new size while the user is still dragging.
     emitResizes(engine);
@@ -2563,6 +2634,8 @@ pub export fn celeris_start_loop() i32 {
             };
             bz.end();
             rendered_any = true;
+            resolvePendingFocus(engine);
+            syncAltCapture(engine);
             // After the frame is on screen: report size changes from this frame's
             // solve. A handler's writes dirty layout, and `rendered_any` keeps the
             // loop from blocking, so the reaction lands next frame.
@@ -4077,6 +4150,75 @@ test "Window leave emits pointer_left_window to onGlobal once per OS leave, hove
     // A pointer moving between nodes inside the window never emits it.
     handleOSInput(&engine, .{ .event_type = .mouse_move, .x = 5, .y = 5 });
     try std.testing.expectEqual(@as(u32, 2), seen.left);
+}
+
+test "requestFocus: focuses a laid-out focusable, rejects invalid targets, defers unsolved ones" {
+    var engine: EngineState = undefined;
+    engine.init(true, .{});
+    defer engine.deinit();
+    const sa = engine.store.stringAllocator();
+
+    const root = try engine.registry.createNode(.box);
+    try engine.store.registerNode(root);
+    engine.registry.getNode(root).?.geometry = .{ .x = 0, .y = 0, .width = 500, .height = 500 };
+    var ids: [4]reg.NodeId = undefined; // focusable, plain, disabled, unsolved
+    for (&ids, 0..) |*id, i| {
+        id.* = try engine.registry.createNode(.box);
+        try engine.store.registerNode(id.*);
+        engine.registry.appendChild(root, id.*);
+        if (i != 1) try engine.store.setModifier(id.*, .focusable, .{ .string = try sa.dupe(u8, "f") });
+        if (i != 3) engine.registry.getNode(id.*).?.geometry = .{ .x = 0, .y = @floatFromInt(i * 30), .width = 50, .height = 20 };
+    }
+    try engine.store.setModifier(ids[2], .disabled, .{ .number = 1 });
+
+    try std.testing.expect(requestFocus(&engine, ids[0]));
+    try std.testing.expectEqual(ids[0], engine.focused_node.?);
+    try std.testing.expect(!requestFocus(&engine, ids[1])); // not focusable
+    try std.testing.expect(!requestFocus(&engine, ids[2])); // disabled
+    try std.testing.expectEqual(ids[0], engine.focused_node.?);
+
+    // Built this frame (no geometry): held, applied once laid out.
+    try std.testing.expect(requestFocus(&engine, ids[3]));
+    try std.testing.expectEqual(ids[0], engine.focused_node.?);
+    engine.registry.getNode(ids[3]).?.geometry = .{ .x = 0, .y = 90, .width = 50, .height = 20 };
+    resolvePendingFocus(&engine);
+    try std.testing.expectEqual(ids[3], engine.focused_node.?);
+    try std.testing.expectEqual(@as(?reg.NodeId, null), engine.pending_focus);
+
+    // Still zero-size after the solve → dropped, focus unchanged.
+    engine.registry.getNode(ids[3]).?.geometry = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
+    engine.focused_node = ids[0];
+    try std.testing.expect(requestFocus(&engine, ids[3]));
+    resolvePendingFocus(&engine);
+    try std.testing.expectEqual(ids[0], engine.focused_node.?);
+}
+
+test "requestFocus: an open modal scope blocks targets outside it" {
+    var engine: EngineState = undefined;
+    engine.init(true, .{});
+    defer engine.deinit();
+    const sa = engine.store.stringAllocator();
+
+    const root = try engine.registry.createNode(.box);
+    try engine.store.registerNode(root);
+    engine.registry.getNode(root).?.geometry = .{ .x = 0, .y = 0, .width = 500, .height = 500 };
+    const panel = try engine.registry.createNode(.box);
+    try engine.store.registerNode(panel);
+    engine.registry.appendChild(root, panel);
+    engine.registry.getNode(panel).?.geometry = .{ .x = 0, .y = 100, .width = 200, .height = 200 };
+    const outside = try engine.registry.createNode(.box);
+    const inside = try engine.registry.createNode(.box);
+    for ([_]reg.NodeId{ outside, inside }, [_]reg.NodeId{ root, panel }) |id, parent| {
+        try engine.store.registerNode(id);
+        engine.registry.appendChild(parent, id);
+        try engine.store.setModifier(id, .focusable, .{ .string = try sa.dupe(u8, "f") });
+        engine.registry.getNode(id).?.geometry = .{ .x = 0, .y = 120, .width = 50, .height = 20 };
+    }
+    engine.focused_node = null;
+    try std.testing.expect(pushFocusScope(&engine, panel, .keyboard));
+    try std.testing.expect(!requestFocus(&engine, outside));
+    try std.testing.expectEqual(inside, engine.focused_node.?);
+    try std.testing.expect(requestFocus(&engine, inside));
 }
 
 test "Focus scope traps Tab inside the panel and pop restores the focus" {

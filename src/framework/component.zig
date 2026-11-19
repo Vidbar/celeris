@@ -211,6 +211,25 @@ pub const MeasuredRect = struct {
     }
 };
 
+/// Programmatic keyboard focus a widget keeps past `build` (the DOM's
+/// `element.focus()`). Obtain one with `ctx.focusRequester()`; a plain value,
+/// valid for the lifetime of the window. Typical use: a terminal or editor that
+/// takes focus when it opens, or a host driving a lifted `focused` signal.
+pub const FocusRequester = struct {
+    hooks: ?builder_mod.FocusScopeHooks,
+
+    /// Focuses `id` (origin `.programmatic`, so the focus ring shows unless the
+    /// node has `noFocusRing`). Returns false and does nothing when the node is
+    /// gone, not `focusable`, disabled, or outside an open modal (Dialog/Menu)
+    /// scope. A node built this same frame has no layout yet: the request is
+    /// held and applied after the next layout, or dropped if the node is not
+    /// visible then. Headless/tests without an engine: always false.
+    pub fn focus(self: FocusRequester, id: NodeId) bool {
+        const h = self.hooks orelse return false;
+        return h.focus(id);
+    }
+};
+
 /// Resolved-geometry reader a widget keeps past `build` for use in its event
 /// handlers (a `BuildContext` is only valid during the build that received it).
 /// Obtain one with `ctx.layoutReader()`; it is a plain value, cheap to copy, and
@@ -363,6 +382,17 @@ pub const BuildContext = struct {
 
     /// A `LayoutReader` a widget can store and use from its event handlers to
     /// turn window-space pointer coordinates into node-local ones.
+    /// A `FocusRequester` a widget can store and call from its handlers.
+    pub fn focusRequester(self: *BuildContext) FocusRequester {
+        return .{ .hooks = self.builder.focus_scope };
+    }
+
+    /// Focuses `id` now (see `FocusRequester.focus`). Called during `build` for
+    /// a node built in this same pass, the focus lands after the next layout.
+    pub fn requestFocus(self: *BuildContext, id: NodeId) bool {
+        return self.focusRequester().focus(id);
+    }
+
     pub fn layoutReader(self: *BuildContext) LayoutReader {
         return .{ .registry = self.builder.registry };
     }

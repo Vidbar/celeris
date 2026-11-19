@@ -275,6 +275,10 @@ Four decisions carry the design:
   would mean every new handler is a chance to forget. Both raises are skipped when
   `UiaClientsAreListening()` is false, so an app with no AT attached pays nothing.
 
+Read-only text surfaces such as terminals and log views use the `document` role, which maps
+to UIA's Document control type. They do not use `textbox`: its Value pattern lets a client
+replace the whole value, which a terminal would receive as "select all, then delete".
+
 Pattern objects are **embedded in the provider struct** (`@fieldParentPtr`, one refcount
 per node) rather than separately allocated COM objects — fewer lifetimes to get wrong in
 the part of the system with the least type safety.

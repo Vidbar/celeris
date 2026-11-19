@@ -292,6 +292,7 @@ pub const UIA_ToolBarControlTypeId: i32 = 50021;
 pub const UIA_TreeControlTypeId: i32 = 50023;
 pub const UIA_TreeItemControlTypeId: i32 = 50024;
 pub const UIA_GroupControlTypeId: i32 = 50026;
+pub const UIA_DocumentControlTypeId: i32 = 50030;
 pub const UIA_ThumbControlTypeId: i32 = 50027;
 pub const UIA_WindowControlTypeId: i32 = 50032;
 pub const UIA_SeparatorControlTypeId: i32 = 50038;
@@ -435,6 +436,9 @@ pub fn ariaRoleToControlType(role: []const u8) i32 {
         .{ .role = "link", .ct = UIA_HyperlinkControlTypeId },
         .{ .role = "img", .ct = UIA_ImageControlTypeId },
         .{ .role = "text", .ct = UIA_TextControlTypeId },
+        // Read-only text surfaces (terminals, log views). Not "textbox": its
+        // ValuePattern lets AT replace the whole value.
+        .{ .role = "document", .ct = UIA_DocumentControlTypeId },
         .{ .role = "slider", .ct = UIA_SliderControlTypeId },
         .{ .role = "scrollbar", .ct = UIA_ScrollBarControlTypeId },
         .{ .role = "thumb", .ct = UIA_ThumbControlTypeId },

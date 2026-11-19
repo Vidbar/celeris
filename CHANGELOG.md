@@ -9,6 +9,24 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No C-ABI change.
+
+### Added
+
+- **Alt chords on Windows**, `b.capturesAltKeys(id)` (`ModifierKey.captures_alt`):
+  while that node holds focus, Alt+key arrives as `key_down` with `ev.alt` instead
+  of going to the system, so terminals get Alt+B / Alt+F / Alt+Backspace. Alt+F4,
+  Alt+Space and a bare Alt tap stay with the system. Linux already delivered them.
+- **Programmatic focus**, `ctx.requestFocus(id)` and `ctx.focusRequester()`
+  (`FocusRequester.focus`): the DOM's `element.focus()`. Refused for nodes that
+  are not focusable, disabled or outside an open modal scope; a node built in the
+  same pass is focused after the next layout.
+- **UIA `document` role**: `b.role(id, "document")` now maps to UIA's Document
+  control type (it was reported as Group), for read-only text surfaces such as
+  terminals and log views.
+
 ## 0.8.0 — 2026-11-18
 
 C-ABI v10: adds `celeris_set_app_italic_fonts` and the `text_decoration`,

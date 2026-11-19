@@ -17,6 +17,7 @@ test "ariaRoleToControlType maps semantic roles to real UIA control types" {
     try testing.expectEqual(uia.UIA_ToolBarControlTypeId, uia.ariaRoleToControlType("toolbar"));
     try testing.expectEqual(uia.UIA_SeparatorControlTypeId, uia.ariaRoleToControlType("separator"));
     try testing.expectEqual(uia.UIA_TextControlTypeId, uia.ariaRoleToControlType("text"));
+    try testing.expectEqual(uia.UIA_DocumentControlTypeId, uia.ariaRoleToControlType("document"));
     try testing.expectEqual(uia.UIA_ImageControlTypeId, uia.ariaRoleToControlType("img"));
     try testing.expectEqual(uia.UIA_GroupControlTypeId, uia.ariaRoleToControlType("group"));
     try testing.expectEqual(uia.UIA_GroupControlTypeId, uia.ariaRoleToControlType("unknown-role"));

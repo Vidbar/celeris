@@ -212,6 +212,13 @@ pub const ModifierKey = enum {
     /// Escape followed by Tab, still traverses (within the active focus
     /// scope) — no keyboard trap (WCAG 2.1.2). Value: `.number = 1`.
     captures_tab,
+    /// When THIS node holds focus, Alt+key chords (Alt+B, Alt+F,
+    /// Alt+Backspace, Alt+Left...) are delivered to it as key_down with
+    /// `alt` set, instead of going to the system. Terminals and editors need
+    /// them. Alt+F4, Alt+Space and a bare Alt press still go to the system.
+    /// Only changes Windows (where Alt chords arrive as system keys); Linux
+    /// already delivers them. Value: `.number = 1`.
+    captures_alt,
     /// Suppresses the keyboard focus ring (the `:focus-visible` outline) on
     /// THIS node — the equivalent of CSS `outline: none` on `:focus-visible`,
     /// WPF `FocusVisualStyle="{x:Null}"`, Qt `Qt::WA_MacShowFocusRect=false`.

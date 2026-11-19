@@ -182,6 +182,8 @@ pub const FocusScopeHooks = struct {
     ctx: *anyopaque,
     pushFn: *const fn (*anyopaque, root: NodeId, origin: core_events.FocusOrigin) bool,
     popFn: *const fn (*anyopaque) bool,
+    /// Programmatic focus (`requestFocus` in the engine). Null in tests/headless.
+    focusFn: ?*const fn (*anyopaque, root: NodeId) bool = null,
 
     /// `origin` (focus-visible): why the scope is opening — a mouse click
     /// on a menu-bar button passes `.pointer` (no ring on the first row), a
@@ -191,6 +193,11 @@ pub const FocusScopeHooks = struct {
     }
     pub fn pop(self: FocusScopeHooks) bool {
         return self.popFn(self.ctx);
+    }
+    /// Moves keyboard focus to `id`. See `FocusRequester.focus`.
+    pub fn focus(self: FocusScopeHooks, id: NodeId) bool {
+        const f = self.focusFn orelse return false;
+        return f(self.ctx, id);
     }
 };
 
@@ -912,6 +919,13 @@ pub const UIBuilder = struct {
     /// `ModifierKey.no_drag`.
     pub fn noDrag(self: *UIBuilder, id: NodeId) !void {
         try self.store.setModifier(id, .no_drag, .{ .number = 1 });
+    }
+
+    /// Focused node receives Alt+key chords as key_down (alt set) instead of
+    /// the system taking them; Alt+F4 / Alt+Space stay with the system — see
+    /// `ModifierKey.captures_alt`.
+    pub fn capturesAltKeys(self: *UIBuilder, id: NodeId) !void {
+        try self.store.setModifier(id, .captures_alt, .{ .number = 1 });
     }
 
     /// Focused node receives Tab/Shift+Tab as key_down instead of the engine

@@ -824,6 +824,43 @@ fn onKey(self: *Editor, ev: fw.events.Event) void {
 - **Not for text.** Typed text arrives as `char_input` with the UTF-8 in `ev.text`. On `char_input` `key_code` holds a codepoint, and on clicks it holds the click count, which is why `ev.key()` returns `null` there.
 - C hosts keep using the raw `key_code`; the numbering and `CELERIS_ABI_VERSION` are unchanged.
 
+### Alt chords (`b.capturesAltKeys`)
+
+On Windows, Alt+key arrives as a *system* key, and by default Celeris leaves those to the system: `key_down` with `ev.alt` only reaches widgets for F10. A widget that needs Alt chords (a terminal sending Alt+B / Alt+F / Alt+Backspace to the shell, an editor with Alt+arrow bindings) opts in on the node that takes focus:
+
+```zig
+try b.focusable(view, "terminal");
+try b.capturesAltKeys(view);
+```
+
+While that node holds focus, every Alt chord is delivered to it as `key_down` with `ev.alt = true`, and Windows never sees it (no menu activation, no mnemonic beep). Not affected:
+
+- **Alt+F4 and Alt+Space** still close the window and open the window menu.
+- **A bare Alt press** still goes to the system, and so does releasing Alt after a chord the widget received, which is not treated as a tap.
+- **No `char_input`** follows an Alt chord. Handle it on `key_down` with `ev.key()` and `ev.alt`.
+
+Linux already delivers Alt chords to the focused node, so the modifier changes nothing there. This is the same opt-in-per-node model as `capturesTab`.
+
+### Focusing a node from code (`ctx.requestFocus`, `FocusRequester`)
+
+The DOM's `element.focus()`: moves keyboard focus to a `focusable` node from your code.
+
+```zig
+// In build: a terminal that takes focus when it opens.
+try b.focusable(view, "terminal");
+_ = ctx.requestFocus(view);
+
+// In a handler: keep a FocusRequester (a plain value, like LayoutReader).
+self.focuser = ctx.focusRequester();
+// ...later
+_ = self.focuser.focus(self.view);
+```
+
+- **Returns false and does nothing** when the node is gone, not `focusable`, disabled, or outside an open modal focus scope (a `Dialog` or `Menu`). This is the same rule Tab follows.
+- **A node built in this pass** has no layout yet, so the request is held and applied after the next layout. If the node is not visible then, the request is dropped.
+- **The focus ring shows** (origin `.programmatic`, like keyboard focus). Use `b.noFocusRing` on the node if your widget paints its own focus indication.
+- **Driving a lifted `focused` signal.** Celeris has no framework-owned focus signal. When a host passes a `*Signal(bool)`, have the widget call `focuser.focus(node)` when the host sets it to `true`. Report focus back from the node's `on_focus` / `on_blur` handlers, and write the signal only when the value changes, so the two directions do not loop.
+
 ### Escape hatch: raw action-ids + EventRouter
 
 For a bare interactive `Box` built directly with the `UIBuilder` (no widget), you can assign a string `action_id` and respond through the `EventRouter`. Prefer typed handlers above; this exists for low-level/interop cases. The context pointer comes **before** the handler.
