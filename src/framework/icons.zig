@@ -87,6 +87,11 @@ pub const debug_start = cp(0xEAD3);
 pub const debug_stop = cp(0xEAD7);
 pub const debug_alt = cp(0xEB91);
 pub const debug_alt_small = cp(0xEBA8);
+pub const debug_continue = cp(0xEACF);
+pub const debug_step_over = cp(0xEAD6);
+pub const debug_step_into = cp(0xEAD4);
+pub const debug_step_out = cp(0xEAD5);
+pub const debug_restart = cp(0xEAD2);
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -127,6 +132,11 @@ test "run/debug icons have their codicon.csv codepoints" {
     try testing.expectEqual(@as(u21, 0xEAD7), try decode(debug_stop));
     try testing.expectEqual(@as(u21, 0xEB91), try decode(debug_alt));
     try testing.expectEqual(@as(u21, 0xEBA8), try decode(debug_alt_small));
+    try testing.expectEqual(@as(u21, 0xEACF), try decode(debug_continue));
+    try testing.expectEqual(@as(u21, 0xEAD6), try decode(debug_step_over));
+    try testing.expectEqual(@as(u21, 0xEAD4), try decode(debug_step_into));
+    try testing.expectEqual(@as(u21, 0xEAD5), try decode(debug_step_out));
+    try testing.expectEqual(@as(u21, 0xEAD2), try decode(debug_restart));
 }
 
 test "embedded codicon.ttf is a valid TrueType blob" {

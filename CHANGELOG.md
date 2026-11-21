@@ -9,6 +9,14 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+### Added
+
+- **Debugger icons in `fw.icons`:** `debug_continue`, `debug_step_over`,
+  `debug_step_into`, `debug_step_out` and `debug_restart` (codicons EACF, EAD6,
+  EAD4, EAD5, EAD2), for an IDE's debug toolbar.
+
 ## 0.9.1 — 2026-11-19
 
 No C-ABI change.
