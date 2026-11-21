@@ -9,7 +9,9 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
-## Unreleased
+## 0.9.2 — 2026-11-21
+
+No C-ABI change.
 
 ### Added
 
