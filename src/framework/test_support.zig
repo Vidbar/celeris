@@ -61,6 +61,7 @@ pub const Harness = struct {
         self.registry.addNodeRemovedListener(self, pointerNodeRemoved);
         self.registry.addNodeRemovedListener(&self.mounts, component.MountTable.nodeRemovedListener);
         self.registry.addNodeRemovedListener(&self.router, events.EventRouter.nodeRemovedListener);
+        self.registry.addNodeReusedListener(&self.router, events.EventRouter.nodeReusedListener);
     }
 
     fn pointerNodeRemoved(ctx: ?*anyopaque, id: reg.NodeId) void {

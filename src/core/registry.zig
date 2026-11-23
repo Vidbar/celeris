@@ -182,6 +182,11 @@ pub const UIRegistry = struct {
     /// new subsystem needs a slot.
     node_removed_listeners: BoundedArray(NodeRemovedListener, 8) = .{},
 
+    /// Subscribers told when the builder reconciles a node in place (same id,
+    /// rebuilt from scratch: see `notifyNodeReused`). The event router is the only
+    /// one today, so it drops the reused node's handlers along with its props.
+    node_reused_listeners: BoundedArray(NodeRemovedListener, 4) = .{},
+
     /// Nodes with `observe_resize` set (see `observeResize`). Kept as a list so the
     /// post-solve diff is O(observers), not O(tree) — a frame with no observers
     /// costs nothing extra.
@@ -450,6 +455,25 @@ pub const UIRegistry = struct {
                 .{self.node_removed_listeners.buffer.len},
             );
         };
+    }
+
+    /// Subscribes `cb` to in-place reuse of a node by the builder. Same capacity
+    /// contract as `addNodeRemovedListener`: overflow is a wiring bug, so it panics.
+    pub fn addNodeReusedListener(self: *UIRegistry, ctx: ?*anyopaque, cb: *const fn (ctx: ?*anyopaque, id: NodeId) void) void {
+        self.node_reused_listeners.append(.{ .ctx = ctx, .cb = cb }) catch {
+            std.debug.panic(
+                "addNodeReusedListener: capacity {d} exhausted — raise BoundedArray size",
+                .{self.node_reused_listeners.buffer.len},
+            );
+        };
+    }
+
+    /// Called by the builder when reconciliation reuses `id` for this build. The
+    /// build re-applies everything the node should have, so per-node state that
+    /// the build writes (props, event handlers) starts empty, the same way
+    /// `PropertyStore.clearProperties` resets the props.
+    pub fn notifyNodeReused(self: *UIRegistry, id: NodeId) void {
+        for (self.node_reused_listeners.constSlice()) |l| l.cb(l.ctx, id);
     }
 
     pub fn removeNode(self: *UIRegistry, id: NodeId) void {

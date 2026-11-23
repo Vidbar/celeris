@@ -262,6 +262,7 @@ pub const WindowHost = struct {
         // component's effects when its anchor is removed.
         if (c_api.getEngine(engine_id)) |engine| {
             engine.registry.addNodeRemovedListener(self.router, events.EventRouter.nodeRemovedListener);
+            engine.registry.addNodeReusedListener(self.router, events.EventRouter.nodeReusedListener);
             engine.registry.addNodeRemovedListener(&self.mounts, component.MountTable.nodeRemovedListener);
         }
 

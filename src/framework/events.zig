@@ -504,6 +504,35 @@ pub const EventRouter = struct {
         self.removeNodeHandlers(id);
     }
 
+    /// Drops the handler for (`node`, `kind`), if any.
+    pub fn removeNodeHandler(self: *EventRouter, node: u32, kind: EventKind) void {
+        for (self.node_handlers.items, 0..) |e, i| {
+            if (e.node == node and e.kind == kind) {
+                _ = self.node_handlers.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// Erased entry point for `UIRegistry.addNodeReusedListener`: the builder is
+    /// rebuilding `id` in place, so its pointer/key handlers are dropped and the
+    /// build re-registers the ones it still passes. Only `node_handlers` is
+    /// touched (tick/global/observer entries are owner-keyed registrations that
+    /// replace themselves), and `.resize` is kept: `wireResize` compares against
+    /// the previous receiver to decide whether to re-report the current size.
+    pub fn nodeReusedListener(ctx: ?*anyopaque, id: u32) void {
+        const self: *EventRouter = @ptrCast(@alignCast(ctx.?));
+        var i: usize = 0;
+        while (i < self.node_handlers.items.len) {
+            const e = self.node_handlers.items[i];
+            if (e.node == id and e.kind != .resize) {
+                _ = self.node_handlers.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     /// Installs (or, with null, removes) the accelerator table consulted on every
     /// key_down before focus routing. Borrowed; the host owns the table.
     pub fn setAccelerators(self: *EventRouter, acc: ?*Accelerators) void {

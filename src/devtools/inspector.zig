@@ -72,6 +72,7 @@ fn buildApp(b: *builder_mod.UIBuilder) anyerror!void {
     if (!g_mounts_wired) {
         b.registry.addNodeRemovedListener(&g_mounts, component.MountTable.nodeRemovedListener);
         b.registry.addNodeRemovedListener(&g_router, events.EventRouter.nodeRemovedListener);
+        b.registry.addNodeReusedListener(&g_router, events.EventRouter.nodeReusedListener);
         g_mounts_wired = true;
     }
     g_content_height = g_tree_list.getContentHeight();

@@ -9,6 +9,20 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No C-ABI change.
+
+### Fixed
+
+- **A handler a rebuild no longer passes is really gone.** A reused node kept its
+  old router entries (`on_click`, `on_hover*`, `on_press`, `on_mouse_*`, `on_key`,
+  …) when the rebuild passed `null` or dropped the prop. The node lost its hit
+  modifier, so a plain disabled button stayed inert, but any other prop that made
+  the node hit-testable again (a `.tooltip` makes it hoverable) brought the stale
+  handler back. Reuse now drops the node's handlers along with its props, and a
+  null `on_resize` stops reporting to the old receiver.
+
 ## 0.9.2 — 2026-11-21
 
 No C-ABI change.

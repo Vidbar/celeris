@@ -198,6 +198,61 @@ test "IconButton click fires the typed on_click handler" {
 
 const ts = @import("test_support.zig");
 
+test "IconButton: disabled drops the old on_click; re-enabled runs only the new one" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    const Sink = struct {
+        var first: u32 = 0;
+        var second: u32 = 0;
+        fn onFirst(_: ?*anyopaque, _: events.Event) void {
+            first += 1;
+        }
+        fn onSecond(_: ?*anyopaque, _: events.Event) void {
+            second += 1;
+        }
+        fn build(e: *ts.Harness, p: anytype) !void {
+            var b = component.UIBuilder.init(&e.registry, &e.store);
+            b.theme = dark;
+            var ctx = BuildContext{ .builder = &b, .router = &e.router, .mounts = &e.mounts };
+            const root = try b.openNodeKeyed(.box, null);
+            try b.width(root, 200, .px);
+            try b.height(root, 100, .px);
+            try ctx.mountOwned(IconButton, p);
+            b.close();
+            e.solve(root, 200, 100);
+            try e.bakeHits();
+        }
+        fn click(e: *ts.Harness) void {
+            const r = e.inputRouter(0);
+            _ = r.mouseDown(16, 16);
+            r.mouseUp(16, 16, 1);
+        }
+        fn boxNode(e: *ts.Harness) reg.NodeId {
+            return e.registry.getNode(e.registry.getNode(0).?.first_child).?.first_child;
+        }
+    };
+    Sink.first = 0;
+    Sink.second = 0;
+    const h1 = events.Handler{ .ptr = null, .call = Sink.onFirst };
+    const h2 = events.Handler{ .ptr = null, .call = Sink.onSecond };
+
+    try Sink.build(&env, .{ .icon = "O", .on_click = h1, .disabled = false });
+    Sink.click(&env);
+    try testing.expectEqual(@as(u32, 1), Sink.first);
+
+    try Sink.build(&env, .{ .icon = "O", .on_click = h1, .disabled = true });
+    Sink.click(&env);
+    try testing.expectEqual(@as(u32, 1), Sink.first);
+    // Nothing left to fire, whichever path reaches the node.
+    try testing.expect(env.router.nodeHandler(Sink.boxNode(&env), .click) == null);
+
+    try Sink.build(&env, .{ .icon = "O", .on_click = h2, .disabled = false });
+    Sink.click(&env);
+    try testing.expectEqual(@as(u32, 1), Sink.first);
+    try testing.expectEqual(@as(u32, 1), Sink.second);
+}
+
 const Solved = struct { box: reg.Geometry, glyph: reg.Geometry, glyph_size: f32, radius: f32 };
 
 /// Mounts an IconButton under a fixed-size root and solves layout — assertions

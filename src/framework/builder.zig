@@ -400,6 +400,10 @@ pub const UIBuilder = struct {
             // an unchanged reused node (no re-shape). Stale layout/style props are
             // still cleared. See PropertyStore.clearProperties.
             self.store.clearProperties(id, true);
+            // Handlers follow the same rule as props: this build re-registers the
+            // ones the node still has, so a handler it no longer passes (a disabled
+            // button's null `on_click`) is gone instead of firing again.
+            self.registry.notifyNodeReused(id);
         }
 
         const old_first_child = if (reused) self.registry.getNode(id).?.first_child else reg.NULL_NODE;
