@@ -11,6 +11,11 @@ listed here as well.
 
 ## Unreleased
 
+- Small text reads fuller: the text shader lifts antialiased glyph edges with
+  DirectWrite's "enhanced contrast" curve, `c(k+1)/(ck+1)`, with `k` scaled by
+  the text color's luminance (`text.TEXT_CONTRAST_DARK`/`_LIGHT`, mirrored by
+  `text.textCoverage`). Light text on dark backgrounds, which the gamma-space blend
+  made thin and washed out, gains the most; full and zero coverage are unchanged.
 - **BREAKING (Zig, minor):** `text.REF_PX` is removed. It was a leftover from an earlier
   renderer: glyphs have long been rasterized at their exact device-pixel size
   (font size × DPI scale), cached per size, and placed on whole pixels with a 1:1 atlas

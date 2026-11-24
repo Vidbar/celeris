@@ -223,6 +223,42 @@ pub const Glyph = struct {
     h: u32,
 };
 
+/// Coverage contrast for text, per text color. The atlas holds linear geometric
+/// coverage, but blending happens on the gamma-encoded framebuffer, which makes
+/// antialiased edges look thin and washed out — worst for light text on a dark
+/// background. `textCoverage` lifts partial coverage (0 and 1 are fixed) with
+/// DirectWrite's "enhanced contrast" curve `c(k+1)/(ck+1)`; `k` is mixed by the
+/// text color's luminance so light text gets more lift than dark text, which
+/// the gamma-space blend already darkens. The text shader (`text_coverage` in
+/// wgpu_backend.zig) evaluates the same formula with these constants.
+pub const TEXT_CONTRAST_DARK: f32 = 0.25;
+pub const TEXT_CONTRAST_LIGHT: f32 = 1.0;
+
+pub fn textCoverage(c: f32, rgb: [3]f32) f32 {
+    const lum = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    const k = TEXT_CONTRAST_DARK + (TEXT_CONTRAST_LIGHT - TEXT_CONTRAST_DARK) * lum;
+    return c * (k + 1.0) / (c * k + 1.0);
+}
+
+test "textCoverage: endpoints fixed, edges lifted, light text lifted more" {
+    const white = [3]f32{ 1, 1, 1 };
+    const black = [3]f32{ 0, 0, 0 };
+    for ([_][3]f32{ white, black }) |col| {
+        try testing.expectEqual(@as(f32, 0), textCoverage(0, col));
+        try testing.expectApproxEqAbs(@as(f32, 1), textCoverage(1, col), 1e-6);
+        var prev: f32 = 0;
+        var i: usize = 1;
+        while (i <= 20) : (i += 1) { // monotonic and never darker than linear
+            const c = @as(f32, @floatFromInt(i)) / 20.0;
+            const v = textCoverage(c, col);
+            try testing.expect(v >= prev and v >= c - 1e-6 and v <= 1.0 + 1e-6);
+            prev = v;
+        }
+    }
+    try testing.expect(textCoverage(0.5, white) > textCoverage(0.5, black));
+    try testing.expectApproxEqAbs(@as(f32, 2.0 / 3.0), textCoverage(0.5, white), 1e-5); // k=1
+}
+
 /// A glyph quad's corners in device pixels.
 pub const GlyphQuad = struct { x0: f32, y0: f32, x1: f32, y1: f32 };
 

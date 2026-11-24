@@ -266,6 +266,17 @@ const WGSL = WGSL_CLIP ++
 ;
 
 const WGSL_TEXT = WGSL_CLIP ++
+    std.fmt.comptimePrint(
+        \\const TEXT_K_DARK: f32 = {d};
+        \\const TEXT_K_LIGHT: f32 = {d};
+        \\
+    , .{ text.TEXT_CONTRAST_DARK, text.TEXT_CONTRAST_LIGHT }) ++
+    \\// Mirror of text.textCoverage (pinned by its test).
+    \\fn text_coverage(c: f32, rgb: vec3<f32>) -> f32 {
+    \\    let lum = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+    \\    let k = mix(TEXT_K_DARK, TEXT_K_LIGHT, lum);
+    \\    return c * (k + 1.) / (c * k + 1.);
+    \\}
     \\struct U {
     \\    vp_w: f32, vp_h: f32, cr: f32, cg: f32,
     \\    cb: f32, ca: f32, clip_x: f32, clip_y: f32,
@@ -299,7 +310,7 @@ const WGSL_TEXT = WGSL_CLIP ++
     \\        in.px.x > in.clip.x + in.clip.z || in.px.y > in.clip.y + in.clip.w) {
     \\        discard;
     \\    }
-    \\    let alpha = textureSample(t, s, in.uv).r;
+    \\    let alpha = text_coverage(textureSample(t, s, in.uv).r, in.color.rgb);
     \\    return vec4(in.color.rgb, in.color.a * alpha * clip_cov(in.clip_id, in.px));
     \\}
 ;
