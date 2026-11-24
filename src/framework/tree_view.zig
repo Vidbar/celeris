@@ -1111,6 +1111,7 @@ pub const TreeView = struct {
     /// publishes the total to `content_width`. The first run (inside build, which
     /// already laid the widths out) only subscribes and publishes.
     fn onColumnWidths(self: *TreeView) void {
+        if (self.columns.len == 0) return; // columns dropped by a rebuild: nothing to size
         var total: f32 = 0;
         for (self.columns) |col| total += col.widthTracked();
         const prev = signals.untrackedBegin();
@@ -1340,6 +1341,15 @@ fn rowLabel(buf: []u8, node: *const TreeNode, ncols: usize) []const u8 {
         if (cell.text.len == 0) continue;
         put.f(buf, &len, ", ");
         put.f(buf, &len, cell.text);
+    }
+    // A full buffer may have cut a codepoint: back off to its lead byte.
+    if (len == buf.len) {
+        var end = len;
+        while (end > 0 and (buf[end - 1] & 0xC0) == 0x80) end -= 1;
+        if (end > 0 and buf[end - 1] >= 0xC0) {
+            const need = std.unicode.utf8ByteSequenceLength(buf[end - 1]) catch 1;
+            if (end - 1 + need > len) len = end - 1;
+        }
     }
     return buf[0..len];
 }
@@ -3056,4 +3066,14 @@ test "TreeView lazy branch (uncontrolled): a childless branch shows a caret, fir
     _ = t.env.router.route(.{ .name = "key_down", .id = "", .node_id = tv.root_id, .key_code = events.Key.right.code() });
     try testing.expectEqual(@as(?usize, 1), tv.selectedNode());
     try testing.expectEqual(@as(usize, 1), t.rec.count("expand"));
+}
+
+test "rowLabel truncation never splits a UTF-8 codepoint" {
+    var node = leaf(testing.allocator, 1, "ab");
+    const cells = [_]Cell{.{ .text = "\u{00f1}\u{00f1}" }};
+    node.cells = &cells;
+    var buf: [7]u8 = undefined; // "ab, " (4) + one ñ (2) + half of the next
+    const s = rowLabel(&buf, &node, 2);
+    try testing.expectEqualStrings("ab, \u{00f1}", s);
+    try testing.expect(std.unicode.utf8ValidateSlice(s));
 }
