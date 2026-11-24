@@ -51,6 +51,11 @@ pub const ListColors = struct {
     inactive_selected_text: ?Color = null,
     /// 1 px outline of the focused row while the widget has keyboard focus.
     focus_outline: ?Color = null,
+    /// Column header (`fw.column_header.ColumnHeader`) background, title text
+    /// and the 1 px separator line at each column's right edge.
+    header_bg: ?Color = null,
+    header_text: ?Color = null,
+    header_separator: ?Color = null,
 
     /// Fields set in `over` replace the ones in `self`.
     pub fn merged(self: ListColors, over: ListColors) ListColors {
@@ -73,6 +78,9 @@ pub const ResolvedListColors = struct {
     inactive_selected_bg: Color,
     inactive_selected_text: Color,
     focus_outline: Color,
+    header_bg: Color,
+    header_text: Color,
+    header_separator: Color,
 };
 
 pub const TextStyle = struct {
@@ -217,6 +225,9 @@ pub const Theme = struct {
             .inactive_selected_bg = c.inactive_selected_bg orelse self.accent.withAlpha(0.18),
             .inactive_selected_text = c.inactive_selected_text orelse self.text,
             .focus_outline = c.focus_outline orelse self.focus_ring,
+            .header_bg = c.header_bg orelse self.bg_surface,
+            .header_text = c.header_text orelse self.text_secondary,
+            .header_separator = c.header_separator orelse self.border_color,
         };
     }
 

@@ -52,6 +52,18 @@ const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
 const theme_mod = @import("theme.zig");
 const text_render = @import("../render/text.zig");
+const column_header = @import("column_header.zig");
+
+/// A column of a columnar tree (see `TreeView.columns`); shared with the
+/// `ColumnHeader` that titles and resizes it.
+pub const Column = column_header.Column;
+
+/// One cell of a row, for the columns after the first (see `TreeNode.cells`).
+pub const Cell = struct {
+    text: []const u8,
+    /// Text color of this cell. Null = the tree's row text color.
+    color: ?theme_mod.Color = null,
+};
 
 pub const TreeNodeType = enum { branch, leaf };
 
@@ -68,6 +80,10 @@ pub const TreeNode = struct {
     /// the tree's `colors.icon`, then the theme (warning for branches, accent
     /// for leaves).
     icon_color: ?theme_mod.Color = null,
+    /// With `TreeView.columns`: the text of columns 2..n, in order (the first
+    /// column shows the name). Missing trailing cells draw empty; extra ones are
+    /// ignored. Caller-owned, like `name`.
+    cells: []const Cell = &.{},
 
     children: std.array_list.Managed(TreeNode),
 };
@@ -80,7 +96,17 @@ fn fireItem(h: ?events.Handler, name: []const u8, node_id: usize) void {
     handler.call(handler.ptr, .{ .name = name, .id = "", .item_id = node_id });
 }
 
-const RowInfo = struct { node_id: usize, row: reg.NodeId, name: reg.NodeId, caret: reg.NodeId = reg.NULL_NODE };
+/// `node`, `col0` and `cells_start` are set only with columns: `cells_start`
+/// indexes the row's `columns.len - 1` entries in `cell_boxes`/`cell_texts`.
+const RowInfo = struct {
+    node_id: usize,
+    row: reg.NodeId,
+    name: reg.NodeId,
+    caret: reg.NodeId = reg.NULL_NODE,
+    node: ?*TreeNode = null,
+    col0: reg.NodeId = reg.NULL_NODE,
+    cells_start: usize = 0,
+};
 
 /// One entry of the flattened visible order (a depth-first walk that expands only
 /// `expanded` branches). It holds the *complete* visible list — keyboard nav and
@@ -194,6 +220,20 @@ pub const TreeView = struct {
     /// then bumps `data_rev`). Needs the scroll bridge (`scroll_offset` +
     /// `viewport_height`); otherwise the request is consumed with no effect.
     reveal: ?*signals.Signal(?usize) = null,
+    /// Columns (Name | Value | Type …). Empty (the default) draws one label per
+    /// row, as always. With columns, the first one holds what a row shows
+    /// without them (indent, caret, icon, `name`, decorator) and column `i`
+    /// (`i >= 1`) shows `TreeNode.cells[i - 1]`; every cell is one line,
+    /// clipped at its column's edge. The widths are the columns' caller-owned
+    /// signals: a `ColumnHeader` sharing this slice resizes them, and the rows
+    /// follow render-only. The tree draws no header itself — put the
+    /// `ColumnHeader` above the `ScrollView` hosting the tree, so it stays put
+    /// when the rows scroll (see `FRAMEWORK_API.md`, "TreeView columns").
+    columns: []const Column = &.{},
+    /// Written by the widget (caller-owned): the total width of `columns`, kept
+    /// current as they are resized. Share it with `ScrollView.content_width` so
+    /// the rows scroll horizontally when the columns are wider than the view.
+    content_width: ?*signals.Signal(f32) = null,
 
     // ── Metrics (logical px) ──
     /// Row height. Raised to the label's line height when `font_size`/`text_style`
@@ -278,7 +318,17 @@ pub const TreeView = struct {
     palette: theme_mod.ResolvedListColors = undefined,
     icon_override: ?theme_mod.Color = null,
 
+    // Columns. `cell_boxes`/`cell_texts` hold, per materialized row, the box and
+    // the text node of columns 1..n (see `RowInfo.cells_start`). The widths
+    // effect (`onColumnWidths`, created once) re-applies the widths render-only.
+    cell_boxes: std.array_list.Managed(reg.NodeId) = undefined,
+    cell_texts: std.array_list.Managed(reg.NodeId) = undefined,
+    cols_bound: bool = false,
+    cols_primed: bool = false,
+
     pub fn onMount(self: *TreeView, allocator: std.mem.Allocator) void {
+        self.cell_boxes = std.array_list.Managed(reg.NodeId).init(allocator);
+        self.cell_texts = std.array_list.Managed(reg.NodeId).init(allocator);
         self.selected_state = signals.Signal(?usize).init(allocator, null);
         self.hovered_state = signals.Signal(?usize).init(allocator, null);
         self.focus_state = signals.Signal(?usize).init(allocator, null);
@@ -300,6 +350,8 @@ pub const TreeView = struct {
         self.has_focus.deinit();
         self.row_map.deinit();
         self.flat.deinit();
+        self.cell_boxes.deinit();
+        self.cell_texts.deinit();
     }
 
     /// The active selection signal: caller-owned if provided, else the internal one.
@@ -380,7 +432,7 @@ pub const TreeView = struct {
     /// Recursively finds the node with `id` anywhere in `list` (any depth), or
     /// null. Sibling of `containsId`, used by keyboard nav to inspect the selected
     /// node's type/expansion.
-    fn findNode(list: *std.array_list.Managed(TreeNode), id: usize) ?*TreeNode {
+    pub fn findNode(list: *std.array_list.Managed(TreeNode), id: usize) ?*TreeNode {
         for (list.items) |*node| {
             if (node.id == id) return node;
             if (findNode(&node.children, id)) |n| return n;
@@ -735,6 +787,9 @@ pub const TreeView = struct {
         try b.width(root, 100, .percent);
         try b.height(root, 100, .percent);
         try b.flexColumn(root);
+        // With columns the tree is at least as wide as they are; wider than the
+        // view, it overflows and the hosting ScrollView (`offset_x`) scrolls it.
+        if (self.columns.len > 0) try b.minWidth(root, column_header.totalWidth(self.columns), .px);
         try b.background(root, b.theme.bg_input.r, b.theme.bg_input.g, b.theme.bg_input.b);
 
         // The root is focusable and owns key_down — arrows/Enter route to the
@@ -775,6 +830,12 @@ pub const TreeView = struct {
         // re-applied untracked after a structural rebuild) — same as Button.
         try component.bindVisuals(self, &self.scope, &self.bound, updateVisuals);
 
+        // Column widths: render-only, an effect on the columns' signals (created once).
+        if (self.columns.len > 0 and !self.cols_bound) {
+            self.cols_bound = true;
+            _ = try self.scope.createEffect(self, onColumnWidths);
+        }
+
         // Reveal requests: an effect on the caller's signal (created once).
         if (self.reveal != null and !self.reveal_bound) {
             self.reveal_bound = true;
@@ -800,6 +861,8 @@ pub const TreeView = struct {
     /// scroll window (virtualized).
     pub fn buildBody(self: *TreeView, b: *builder_mod.UIBuilder) !void {
         self.row_map.clearRetainingCapacity();
+        self.cell_boxes.clearRetainingCapacity();
+        self.cell_texts.clearRetainingCapacity();
         self.flatten();
         self.palette = self.theme.listColors(self.colors);
         self.icon_override = self.colors.icon orelse self.theme.list.icon;
@@ -865,18 +928,30 @@ pub const TreeView = struct {
         // it never moves the row's content (heights/widths are border-box). Each
         // side takes at most its own padding, so a 0 padding stays exactly 0 (that
         // side just has no outline).
+        const has_cols = self.columns.len > 0;
         try b.borderTop(row, @min(FOCUS_OUTLINE_W, @max(0, pad.t)));
-        try b.borderRight(row, @min(FOCUS_OUTLINE_W, @max(0, pad.r)));
         try b.borderBottom(row, @min(FOCUS_OUTLINE_W, @max(0, pad.b)));
-        try b.borderLeft(row, @min(FOCUS_OUTLINE_W, @max(0, indent_px)));
         try b.borderColorAlpha(row, 0, 0, 0, 0);
-        try b.padding(
-            row,
-            @max(0, pad.t - FOCUS_OUTLINE_W),
-            @max(0, pad.r - FOCUS_OUTLINE_W),
-            @max(0, pad.b - FOCUS_OUTLINE_W),
-            @max(0, indent_px - FOCUS_OUTLINE_W),
-        );
+        if (has_cols) {
+            // Columns: the row's side insets are just the outline, so column 0
+            // starts at the row's left edge like its header title; the indent
+            // moves into column 0 (see `buildColumn0`). The row is at least as
+            // wide as the columns.
+            try b.borderLeft(row, FOCUS_OUTLINE_W);
+            try b.borderRight(row, FOCUS_OUTLINE_W);
+            try b.padding(row, @max(0, pad.t - FOCUS_OUTLINE_W), 0, @max(0, pad.b - FOCUS_OUTLINE_W), 0);
+            try b.minWidth(row, column_header.totalWidth(self.columns), .px);
+        } else {
+            try b.borderRight(row, @min(FOCUS_OUTLINE_W, @max(0, pad.r)));
+            try b.borderLeft(row, @min(FOCUS_OUTLINE_W, @max(0, indent_px)));
+            try b.padding(
+                row,
+                @max(0, pad.t - FOCUS_OUTLINE_W),
+                @max(0, pad.r - FOCUS_OUTLINE_W),
+                @max(0, pad.b - FOCUS_OUTLINE_W),
+                @max(0, indent_px - FOCUS_OUTLINE_W),
+            );
+        }
         try b.flexRow(row);
         try b.alignItems(row, .center);
         // Single-line rows: a label that doesn't fit is clipped at the row's
@@ -889,7 +964,13 @@ pub const TreeView = struct {
         // selected state is reflected onto the `.checked` flag by `paintRow`, which
         // the UIA SelectionItem provider reads as IsSelected.
         try b.role(row, "treeitem");
-        try b.ariaLabel(row, node.name);
+        if (has_cols) {
+            // The row reads as its whole line: "x, 42, i32".
+            var lbuf: [512]u8 = undefined;
+            try b.ariaLabel(row, rowLabel(&lbuf, node, self.columns.len));
+        } else {
+            try b.ariaLabel(row, node.name);
+        }
         if (node.node_type == .branch) try b.setExpanded(row, node.expanded);
 
         // Hit modifiers keep the autogenerated "n{id}" action-id (C-ABI channel
@@ -906,6 +987,23 @@ pub const TreeView = struct {
             try r.onNode(row, .mouse_enter, h);
             try r.onNode(row, .mouse_leave, h);
             try r.onNode(row, .right_click, h);
+        }
+
+        // Column 0 wraps the chevron/icon/name/decorator in a fixed-width,
+        // clipping box that also carries the depth indent.
+        var col0: reg.NodeId = reg.NULL_NODE;
+        if (has_cols) {
+            col0 = try b.openNodeKeyed(.box, null);
+            const w0 = self.columns[0].widthNow() - FOCUS_OUTLINE_W;
+            try b.width(col0, w0, .px);
+            try b.minWidth(col0, w0, .px);
+            try b.flexShrink(col0, 0);
+            if (self.columns[0].stretch) try b.flexGrow(col0, 1);
+            try b.height(col0, 100, .percent);
+            try b.flexRow(col0);
+            try b.alignItems(col0, .center);
+            try b.overflowHidden(col0);
+            try b.paddingLeft(col0, @max(0, indent_px - FOCUS_OUTLINE_W));
         }
 
         // Chevron. On branches it is its own hit-target: clicking it toggles
@@ -965,6 +1063,33 @@ pub const TreeView = struct {
             }
         }
 
+        const cells_start = self.cell_boxes.items.len;
+        if (has_cols) {
+            b.close(); // column 0
+            for (self.columns[1..], 0..) |col, k| {
+                const cell = try b.openNodeKeyed(.box, null);
+                try b.width(cell, col.widthNow(), .px);
+                try b.minWidth(cell, col.widthNow(), .px);
+                try b.flexShrink(cell, 0);
+                if (col.stretch) try b.flexGrow(cell, 1);
+                try b.height(cell, 100, .percent);
+                try b.flexRow(cell);
+                try b.alignItems(cell, .center);
+                try b.overflowHidden(cell);
+                const text: []const u8 = if (k < node.cells.len) node.cells[k].text else "";
+                const t = try b.addText(text);
+                try b.flexShrink(t, 1);
+                try b.minWidth(t, 0, .px);
+                try b.noWrap(t);
+                try b.marginLeft(t, pad.l);
+                try self.applyTextStyle(b, t);
+                try b.pointerEventsNone(t);
+                b.close(); // cell
+                try self.cell_boxes.append(cell);
+                try self.cell_texts.append(t);
+            }
+        }
+
         b.close(); // row
 
         try self.row_map.append(.{
@@ -972,9 +1097,56 @@ pub const TreeView = struct {
             .row = row,
             .name = name_node,
             .caret = if (node.node_type == .branch) chevron else reg.NULL_NODE,
+            .node = if (has_cols) node else null,
+            .col0 = col0,
+            .cells_start = cells_start,
         });
         // No recursion: `flatten` already laid out children in visible order; every
         // row (windowed or not) is built from a single pass over `flat`.
+    }
+
+    /// The column-widths effect: subscribes to every column's width signal and
+    /// re-applies the widths to the root, the materialized rows and their cells —
+    /// render-only, no rebuild (a separator drag runs this once per move). Also
+    /// publishes the total to `content_width`. The first run (inside build, which
+    /// already laid the widths out) only subscribes and publishes.
+    fn onColumnWidths(self: *TreeView) void {
+        var total: f32 = 0;
+        for (self.columns) |col| total += col.widthTracked();
+        const prev = signals.untrackedBegin();
+        defer signals.untrackedEnd(prev);
+        if (self.content_width) |cw| {
+            if (cw.peek() != total) cw.set(total);
+        }
+        if (!self.cols_primed) {
+            self.cols_primed = true;
+            return;
+        }
+        const store = self.store orelse return;
+        if (self.root_id == reg.NULL_NODE) return;
+        const px = struct {
+            fn set(s: *props.PropertyStore, id: reg.NodeId, key: props.LayoutKey, v: f32) void {
+                s.setLayout(id, key, .{ .dimension = .{ .value = v, .unit = .px } }) catch {};
+            }
+        };
+        px.set(store, self.root_id, .min_width, total);
+        const w0 = self.columns[0].widthNow() - FOCUS_OUTLINE_W;
+        const n = self.columns.len - 1;
+        for (self.row_map.items) |info| {
+            px.set(store, info.row, .min_width, total);
+            if (info.col0 != reg.NULL_NODE) {
+                px.set(store, info.col0, .width, w0);
+                px.set(store, info.col0, .min_width, w0);
+            }
+            for (0..n) |k| {
+                const idx = info.cells_start + k;
+                if (idx >= self.cell_boxes.items.len) break;
+                const w = self.columns[k + 1].widthNow();
+                px.set(store, self.cell_boxes.items[idx], .width, w);
+                px.set(store, self.cell_boxes.items[idx], .min_width, w);
+            }
+        }
+        if (store.registry) |r| r.markLayoutDirty(self.root_id);
     }
 
     /// Structural rebuild (expand/collapse, keyboard, data swap): re-derives `flat`,
@@ -1047,6 +1219,17 @@ pub const TreeView = struct {
         store.setStyle(info.row, .background, colorValue(bg)) catch {};
         const name_c = if (st.selected) (if (st.active) c.selected_text else c.inactive_selected_text) else c.text;
         store.setStyle(info.name, .color, colorValue(name_c)) catch {};
+        if (info.node) |node| {
+            // Cells: the selection text color while selected, else each cell's own.
+            const n = self.columns.len -| 1;
+            for (0..n) |k| {
+                const idx = info.cells_start + k;
+                if (idx >= self.cell_texts.items.len) break;
+                const own: ?theme_mod.Color = if (k < node.cells.len) node.cells[k].color else null;
+                const cc = if (st.selected) name_c else (own orelse c.text);
+                store.setStyle(self.cell_texts.items[idx], .color, colorValue(cc)) catch {};
+            }
+        }
         const outline = if (st.focused and st.active) c.focus_outline else theme_mod.Color.transparent();
         store.setStyle(info.row, .border_color, colorValue(outline)) catch {};
         // Accessibility: mirror selection onto the row's `.checked` flag — the UIA
@@ -1139,6 +1322,27 @@ pub const TreeView = struct {
         }
     }
 };
+
+/// The accessible name of a columnar row: the name and the cells joined by ", "
+/// ("x, 42, i32"), truncated to `buf`. Empty trailing cells are skipped.
+fn rowLabel(buf: []u8, node: *const TreeNode, ncols: usize) []const u8 {
+    var len: usize = 0;
+    const put = struct {
+        fn f(dst: []u8, at: *usize, s: []const u8) void {
+            const n = @min(s.len, dst.len - at.*);
+            @memcpy(dst[at.* .. at.* + n], s[0..n]);
+            at.* += n;
+        }
+    };
+    put.f(buf, &len, node.name);
+    const n = @min(node.cells.len, ncols -| 1);
+    for (node.cells[0..n]) |cell| {
+        if (cell.text.len == 0) continue;
+        put.f(buf, &len, ", ");
+        put.f(buf, &len, cell.text);
+    }
+    return buf[0..len];
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -2345,6 +2549,8 @@ const TreeEnv = struct {
             .font_size = init_props.font_size,
             .colors = init_props.colors,
             .data_rev = init_props.data_rev,
+            .columns = init_props.columns,
+            .content_width = init_props.content_width,
         });
         b.close();
         const anchor = self.env.registry.getNode(0).?.first_child;
@@ -2666,4 +2872,188 @@ test "TreeView a data swap that removes the focused row hands the cursor back to
     deinitNode(&gone);
     rev.set(1);
     try testing.expectEqual(@as(?usize, 1), tv.focusedNode());
+}
+
+// ── Columns ───────────────────────────────────────────────────────────────────
+
+/// Three columns (Name 120 | Value 80 | Type 100) over a Variables-style tree:
+/// `locals` (expanded) → `x` = 42 : i32 (red value), `y` = 7 (no Type cell).
+const ColsFixture = struct {
+    w: [3]signals.Signal(f32),
+    cols: [3]Column,
+    x_cells: [2]Cell,
+    y_cells: [1]Cell,
+
+    const red = theme_mod.Color{ .r = 220, .g = 40, .b = 40 };
+
+    fn init(self: *ColsFixture, a: std.mem.Allocator, t: *TreeEnv) !void {
+        self.w = .{ signals.Signal(f32).init(a, 120), signals.Signal(f32).init(a, 80), signals.Signal(f32).init(a, 100) };
+        self.cols = .{
+            .{ .title = "Name", .width = &self.w[0], .min_width = 40 },
+            .{ .title = "Value", .width = &self.w[1] },
+            .{ .title = "Type", .width = &self.w[2] },
+        };
+        self.x_cells = .{ .{ .text = "42", .color = red }, .{ .text = "i32" } };
+        self.y_cells = .{.{ .text = "7" }};
+        var locals = branchNode(a, 1, "locals", true);
+        var x = leaf(a, 2, "x");
+        x.cells = &self.x_cells;
+        var y = leaf(a, 3, "y");
+        y.cells = &self.y_cells;
+        try locals.children.append(x);
+        try locals.children.append(y);
+        try t.roots.append(locals);
+    }
+    fn deinit(self: *ColsFixture) void {
+        for (&self.w) |*s| s.deinit();
+    }
+};
+
+fn cellBox(tv: *TreeView, id: usize, k: usize) reg.NodeId {
+    return tv.cell_boxes.items[rowFor(tv, id).cells_start + k];
+}
+fn cellText(tv: *TreeView, id: usize, k: usize) reg.NodeId {
+    return tv.cell_texts.items[rowFor(tv, id).cells_start + k];
+}
+
+test "TreeView columns: cells line up at the column edges, clip, and take per-cell colors; a missing cell draws empty" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    var fx: ColsFixture = undefined;
+    try fx.init(testing.allocator, &t);
+    defer fx.deinit();
+    var cw = signals.Signal(f32).init(testing.allocator, 0);
+    defer cw.deinit();
+    const tv = try t.mount(.{ .columns = &fx.cols, .content_width = &cw });
+    t.env.solve(0, 400, 300);
+
+    const root_x = t.env.geom(tv.root_id).x;
+    // Column 0 (indent, caret, icon, name) spans [0, 120); Value starts at 120, Type at 200.
+    const x_row = rowFor(tv, 2);
+    try testing.expectApproxEqAbs(root_x + 120, t.env.geom(cellBox(tv, 2, 0)).x, 0.5);
+    try testing.expectApproxEqAbs(root_x + 200, t.env.geom(cellBox(tv, 2, 1)).x, 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 80), t.env.geom(cellBox(tv, 2, 0)).width, 0.5);
+    // The name stays inside column 0 (the depth indent lives in it too).
+    const name_g = t.env.geom(x_row.name);
+    try testing.expect(name_g.x > root_x + 10 + 14); // pad.l + one indent level
+    try testing.expect(name_g.x + name_g.width <= root_x + 120 + 0.5);
+    // Text starts the same padding into each column as the header title.
+    try testing.expectApproxEqAbs(root_x + 120 + 10, t.env.geom(cellText(tv, 2, 0)).x, 0.5);
+    // `y` has no Type cell: the box is there, its text empty.
+    try testing.expectEqualStrings("", t.env.store.getTextContent(cellText(tv, 3, 1)) orelse "");
+    try testing.expectApproxEqAbs(root_x + 200, t.env.geom(cellBox(tv, 3, 1)).x, 0.5);
+
+    // Colors: the cell's own color, else the row text color; selection wins.
+    const pal = tv.theme.listColors(.{});
+    try expectColor(&t.env.store, cellText(tv, 2, 0), .color, ColsFixture.red);
+    try expectColor(&t.env.store, cellText(tv, 2, 1), .color, pal.text);
+    tv.selSig().set(2);
+    try expectColor(&t.env.store, cellText(tv, 2, 0), .color, pal.inactive_selected_text);
+    tv.selSig().set(null);
+    try expectColor(&t.env.store, cellText(tv, 2, 0), .color, ColsFixture.red);
+
+    // The total is published for the hosting ScrollView.
+    try testing.expectEqual(@as(f32, 300), cw.peek());
+    // The row reads as its whole line.
+    try testing.expectEqualStrings("x, 42, i32", t.env.store.getModifier(x_row.row, .label).?.string);
+}
+
+test "TreeView columns: a width change re-lays the cells render-only (same row nodes) and republishes the total" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    var fx: ColsFixture = undefined;
+    try fx.init(testing.allocator, &t);
+    defer fx.deinit();
+    var cw = signals.Signal(f32).init(testing.allocator, 0);
+    defer cw.deinit();
+    const tv = try t.mount(.{ .columns = &fx.cols, .content_width = &cw });
+    t.env.solve(0, 400, 300);
+    const row_before = rowFor(tv, 2).row;
+    const root_x = t.env.geom(tv.root_id).x;
+
+    fx.w[0].set(200);
+    t.env.solve(0, 600, 300);
+    try testing.expectEqual(row_before, rowFor(tv, 2).row); // no rebuild
+    try testing.expectApproxEqAbs(root_x + 200, t.env.geom(cellBox(tv, 2, 0)).x, 0.5);
+    try testing.expectApproxEqAbs(root_x + 280, t.env.geom(cellBox(tv, 2, 1)).x, 0.5);
+    try testing.expectEqual(@as(f32, 380), cw.peek());
+
+    // Wider than the view: the rows overflow at the column total instead of squeezing.
+    fx.w[1].set(400);
+    t.env.solve(0, 300, 300);
+    try testing.expectApproxEqAbs(root_x + 600, t.env.geom(cellBox(tv, 2, 1)).x, 0.5);
+    try testing.expect(t.env.geom(rowFor(tv, 2).row).width >= 700 - 0.5);
+
+    // A structural rebuild (collapse + expand) builds the rows at the current widths.
+    _ = t.env.router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 1).caret });
+    _ = t.env.router.route(.{ .name = "click", .id = "", .node_id = rowFor(tv, 1).caret });
+    t.env.solve(0, 300, 300);
+    try testing.expectApproxEqAbs(root_x + 600, t.env.geom(cellBox(tv, 2, 1)).x, 0.5);
+}
+
+test "TreeView columns: virtualized rows carry the cells; a scroll window shift keeps them aligned" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    var w0 = signals.Signal(f32).init(testing.allocator, 150);
+    defer w0.deinit();
+    var w1 = signals.Signal(f32).init(testing.allocator, 90);
+    defer w1.deinit();
+    const cols = [_]Column{ .{ .title = "Name", .width = &w0 }, .{ .title = "Value", .width = &w1 } };
+    const cells = [_]Cell{.{ .text = "v" }};
+    for (0..200) |i| {
+        var n = leaf(testing.allocator, i + 1, "item");
+        n.cells = &cells;
+        try t.roots.append(n);
+    }
+    var off = signals.Signal(f32).init(testing.allocator, 0);
+    defer off.deinit();
+    const tv = try t.mount(.{ .columns = &cols, .scroll_offset = &off, .viewport_height = 110 });
+    try testing.expect(tv.row_map.items.len < 200);
+    try testing.expectEqual(tv.row_map.items.len, tv.cell_boxes.items.len);
+
+    off.set(-22 * 100);
+    try testing.expect(hasRow(tv, 101));
+    try testing.expectEqual(tv.row_map.items.len, tv.cell_boxes.items.len);
+    t.env.solve(0, 400, 300);
+    const root_x = t.env.geom(tv.root_id).x;
+    try testing.expectApproxEqAbs(root_x + 150, t.env.geom(cellBox(tv, 101, 0)).x, 0.5);
+    // A resize after the shift reaches the freshly materialized rows.
+    w0.set(100);
+    t.env.solve(0, 400, 300);
+    try testing.expectApproxEqAbs(root_x + 100, t.env.geom(cellBox(tv, 101, 0)).x, 0.5);
+}
+
+test "TreeView without columns builds no cells and keeps the classic row insets" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    try t.roots.append(leaf(testing.allocator, 1, "a"));
+    const tv = try t.mount(.{});
+    try testing.expectEqual(@as(usize, 0), tv.cell_boxes.items.len);
+    try testing.expectEqual(reg.NULL_NODE, rowFor(tv, 1).col0);
+    try testing.expect(t.env.store.getLayout(tv.root_id, .min_width) == null);
+    try testing.expectEqualStrings("a", t.env.store.getModifier(rowFor(tv, 1).row, .label).?.string);
+}
+
+test "TreeView lazy branch (uncontrolled): a childless branch shows a caret, fires expand, and → on it stays put" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    try t.roots.append(branchNode(testing.allocator, 1, "pending", false));
+    const tv = try t.mount(.{});
+    const caret = rowFor(tv, 1).caret;
+    try testing.expect(caret != reg.NULL_NODE);
+    try testing.expectEqualStrings(tv.caret_collapsed, t.env.store.getTextContent(caret).?);
+
+    _ = t.env.router.route(.{ .name = "click", .id = "", .node_id = caret });
+    try testing.expectEqual(@as(usize, 1), t.rec.count("expand"));
+    try testing.expect(t.roots.items[0].expanded);
+    // Expanded with nothing loaded: → neither moves nor re-requests.
+    tv.selectRow(1);
+    _ = t.env.router.route(.{ .name = "key_down", .id = "", .node_id = tv.root_id, .key_code = events.Key.right.code() });
+    try testing.expectEqual(@as(?usize, 1), tv.selectedNode());
+    try testing.expectEqual(@as(usize, 1), t.rec.count("expand"));
 }

@@ -577,6 +577,48 @@ try ctx.mountOwned(fw.tree_view.TreeView, .{
 
 **TreeView context menu.** `.on_context_menu` fires (`ev.name == "context_menu"`) on a right click on a row, with `ev.item_id` = the node and `ev.x`/`ev.y` = the pointer in window coordinates, so a menu opens with `menu.popupWindow(ev.x, ev.y, .pointer)`. A right click on empty space delivers `ev.item_id == null`. Shift+F10 and the menu key open it for the focused row, anchored at the row's bottom-left. The right click focuses the tree and moves the focused row but keeps the selection, as desktop IDEs do (the menu acts on the clicked row); set `.context_menu_selects = true` to select the row first, as file managers do.
 
+**TreeView lazy branches.** A `.branch` node with no children yet still draws its caret and fires `on_expand`: `node_type == .branch` means "has children", whether or not they are loaded. Load them in the handler and bump `data_rev` (with `.controlled_expansion`, also set `expanded` in your model). If the load comes back empty, set the node to `.leaf` and bump `data_rev`: the caret goes away. Right arrow on an expanded branch with no children stays where it is and requests nothing.
+
+### TreeView columns (`fw.ColumnHeader`)
+
+A tree whose rows show Name | Value | Type, like a debugger's Variables or Watch window, is three pieces that share caller-owned state:
+
+```zig
+// App state: one width signal per column, the horizontal offset, the content width.
+self.columns = .{
+    .{ .title = "Name",  .width = &self.w_name,  .min_width = 80 },
+    .{ .title = "Value", .width = &self.w_value, .min_width = 60 },
+    .{ .title = "Type",  .width = &self.w_type,  .min_width = 50, .stretch = true },
+};
+
+// build(): the header OUTSIDE the ScrollView (so it stays put vertically) ...
+try ctx.mountOwned(fw.ColumnHeader, .{
+    .columns = &self.columns,
+    .scroll_x = &self.scroll_x,
+    .on_column_resize = ctx.handler(self, onColumnResize),
+});
+// ... and the tree inside a two-axis ScrollView.
+try ctx.mountOwned(fw.scroll_view.ScrollView, .{
+    .fill = true,
+    .offset = &self.scroll_y,
+    .offset_x = &self.scroll_x,         // turns the horizontal axis on
+    .content_width = &self.content_w,   // written by the TreeView
+    .content = fw.component.childOf(TreeHost, &self.tree_host),
+});
+// TreeHost mounts the TreeView with:
+//   .columns = &app.columns, .content_width = &app.content_w,
+//   .scroll_offset = &app.scroll_y, .viewport_height = ...
+```
+
+- **Rows.** Column 0 holds what a row shows without columns: indent, caret, icon, `name` and `decorator`. Column `i` (`i >= 1`) shows `TreeNode.cells[i - 1]` (`fw.tree_view.Cell{ .text, .color }`). A missing cell draws empty. Every cell is one line, clipped at its column's edge, and its text starts `row_padding.l` into the column, the same place the header title starts (`ColumnHeader.padding_x`, 10 by default). A selected row draws its cells in the selection text color, and otherwise in each cell's `color` (or the row text color when it has none). The row's accessible name is the whole line ("x, 42, i32").
+- **Widths are lifted state.** `Column.width` is a `*Signal(f32)` you own. Its initial value is the starting width. Dragging the separator at a title's right edge (a 6 px grip with the resize cursor) writes it live, clamped to `min_width`. The header and the tree re-apply the width render-only: the rows are not rebuilt. Write the signals yourself to restore saved widths. `on_column_resize` fires once per drag, on release, with the column index in `ev.item_id`; the new width is already in the signal.
+- **`stretch`** lets a column take the space left to the right edge of the view (never less than its width). Give it to the last column so the rows reach the edge.
+- **Horizontal scroll.** When the columns are wider than the view, the tree is as wide as the columns and the ScrollView scrolls it sideways: horizontal wheel or Shift+wheel, or the scrollbar that appears at the bottom. The header reads the same `scroll_x`, so titles and cells stay aligned. Vertical virtualization (the scroll bridge) works as without columns.
+- **Colors.** `theme.list.header_bg`, `header_text` and `header_separator` (defaults: `bg_surface`, `text_secondary`, `border_color`), overridable per header with `ColumnHeader.colors`.
+- Without `.columns`, a TreeView is exactly as before. `examples/debugger_variables.zig` (`zig build debugger_variables`) is the reference: lazy structs and a 2 000-element array, resizable columns, two-axis scrolling.
+
+**`ScrollView` horizontal axis.** Any ScrollView can scroll horizontally: pass `.offset_x` (a caller-owned `Signal(f32)`, `<= 0`, the same convention as `.offset`) and `.content_width` (a `Signal(f32)` with the content's width). Without `.offset_x` the view is vertical-only, as always.
+
 ### `VirtualGrid` — 2D windowed grid over a pull source
 
 `fw.VirtualGrid(Datum)` is `VirtualList`'s 2D sibling. It materializes only the

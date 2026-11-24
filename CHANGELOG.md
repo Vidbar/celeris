@@ -9,6 +9,34 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No C-ABI change.
+
+### Added
+
+- **TreeView columns.** `TreeView.columns` (`[]const fw.Column`) draws rows as
+  Name | Value | Type: column 0 holds the indent, caret, icon and name, and
+  `TreeNode.cells` fills the others (one line each, clipped, with an optional
+  per-cell `color`). Without `columns` a tree is unchanged.
+- **`fw.ColumnHeader`**: the column titles, with a drag grip at each right edge
+  that resizes the column (resize cursor, clamped to `min_width`). Widths are
+  caller-owned `Signal(f32)`s shared with the tree, applied render-only while
+  dragging. `on_column_resize` fires on release. A `stretch` column fills the
+  rest of the view.
+- **Two-axis `ScrollView`**: `offset_x` + `content_width` turn on horizontal
+  scrolling (horizontal wheel, Shift+wheel, and a bottom scrollbar while the
+  content is wider than the view). `TreeView.content_width` publishes the column
+  total for it, and `ColumnHeader.scroll_x` keeps the header aligned.
+- Header colors in `theme.list`: `header_bg`, `header_text`, `header_separator`.
+- `TreeView.findNode` is public, for controlled-expansion handlers.
+- `examples/debugger_variables.zig`: a Variables view with lazy branches.
+
+### Docs
+
+- Lazy branches are documented: a childless `.branch` shows its caret and fires
+  "expand"; set it to `.leaf` if loading finds nothing.
+
 ## 0.9.3 — 2026-11-23
 
 No C-ABI change.

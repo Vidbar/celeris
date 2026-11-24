@@ -38,7 +38,8 @@ Implemented today, natively in Zig:
   comptime-resolved components; keyed reconciliation; automatic mount/unmount.
 - **Widget suite (20+):** Button, IconButton, Checkbox, Radio, RadioGroup,
   Slider, Dropdown, TextInput, TextArea (selection, undo/redo, password, IME),
-  Tabs, SplitPane, ScrollView, TreeView, VirtualList (10k+ items, dozens of live
+  Tabs, SplitPane, ScrollView (one or two axes), TreeView (with optional
+  resizable columns via ColumnHeader), VirtualList (10k+ items, dozens of live
   nodes), VirtualGrid (2D windowing: a 100k × 40 grid materializes only the
   visible cells), Grid, Stack, Menu/MenuBar, Dialog, Tooltip, Toast, ProgressBar,
   AppBar/StatusBar/BottomBar, and WindowChrome for custom title bars.
@@ -178,6 +179,7 @@ zig build dashboard      # component-model showcase (all widgets, reactive)
 zig build counter        # the docs' Quick Start, verbatim
 zig build devtools       # DevTools inspector, inspecting another engine
 zig build overlay_bar    # always-on-top 460x56 bar with its own tree
+zig build debugger_variables  # TreeView columns, resizable header, lazy branches
 zig build headless       # C-API smoke test, no GPU window (CI-runnable)
 zig build test           # unit tests
 ```

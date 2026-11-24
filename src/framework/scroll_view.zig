@@ -74,6 +74,17 @@ pub const ScrollView = struct {
     /// Whether the scrollbar channel is reserved when there is nothing to scroll.
     /// `.stable` keeps content-box width constant across content changes.
     gutter: Gutter = .auto,
+    /// Optional caller-owned HORIZONTAL scroll offset (px, `<= 0`, same convention
+    /// as `offset`). Passing it turns the horizontal axis on: the wheel's
+    /// horizontal notches (and Shift+wheel) scroll the content sideways, and a
+    /// horizontal scrollbar appears at the bottom while `content_width` exceeds
+    /// the viewport. Share it with a `ColumnHeader.scroll_x` to keep a header
+    /// aligned. Null (the default) keeps the view vertical-only, as always.
+    offset_x: ?*signals.Signal(f32) = null,
+    /// Caller-owned content width (px) for the horizontal axis — e.g. the one a
+    /// `TreeView` with columns publishes in its `content_width`. Only read with
+    /// `offset_x`; null = the content never scrolls horizontally.
+    content_width: ?*signals.Signal(f32) = null,
 
     // State (auto-created in onMount; preserved across rebuilds). `scroll_offset` is
     // the fallback when the caller passes no `offset` signal.
@@ -105,6 +116,12 @@ pub const ScrollView = struct {
     theme: theme_mod.Theme = undefined,
     bound: bool = false,
     bar_bound: bool = false,
+    /// Horizontal axis (only with `offset_x`): solved viewport width, the bottom
+    /// bar slot and the mount anchor of its `Scrollbar` (NULL while it fits).
+    viewport_w_sig: signals.Signal(f32) = undefined,
+    hbar_slot: reg.NodeId = reg.NULL_NODE,
+    hbar_anchor: reg.NodeId = reg.NULL_NODE,
+    hbar_bound: bool = false,
 
     pub fn onMount(self: *ScrollView, allocator: std.mem.Allocator) void {
         self.scroll_offset = signals.Signal(f32).init(allocator, 0);
@@ -114,6 +131,7 @@ pub const ScrollView = struct {
         // first build never has to write these signals.
         self.bar_content_sig = signals.Signal(f32).init(allocator, self.content_height);
         self.bar_viewport_sig = signals.Signal(f32).init(allocator, self.viewport_height);
+        self.viewport_w_sig = signals.Signal(f32).init(allocator, 0);
         self.scope = signals.Scope.init(allocator);
     }
 
@@ -124,9 +142,14 @@ pub const ScrollView = struct {
         self.content_h_sig.deinit();
         self.viewport_h_sig.deinit();
         self.scroll_offset.deinit();
+        self.viewport_w_sig.deinit();
     }
 
     fn onViewportResize(self: *ScrollView, ev: events.Event) void {
+        if (self.offset_x != null and self.viewport_w_sig.peek() != ev.width) {
+            self.viewport_w_sig.set(ev.width);
+            self.setScrollXClamped(self.offset_x.?.peek());
+        }
         self.viewport_h_sig.set(ev.height);
         self.syncBarSizes();
         self.setScrollClamped(self.offsetSig().peek());
@@ -155,6 +178,62 @@ pub const ScrollView = struct {
 
     fn onScroll(self: *ScrollView, ev: events.Event) void {
         self.setScrollClamped(self.offsetSig().peek() + ev.scroll_delta * 20.0);
+    }
+
+    /// Horizontal wheel (`scroll_h`, positive = right): moves the content left.
+    fn onScrollX(self: *ScrollView, ev: events.Event) void {
+        const sx = self.offset_x orelse return;
+        self.setScrollXClamped(sx.peek() - ev.scroll_delta * 20.0);
+    }
+
+    fn contentWidthNow(self: *const ScrollView) f32 {
+        return if (self.content_width) |cw| cw.peek() else 0;
+    }
+
+    /// The viewport's solved width (0 before the first solve).
+    fn viewportWidthNow(self: *const ScrollView) f32 {
+        const w = self.viewport_w_sig.peek();
+        if (w > 0) return w;
+        if (self.registry) |r| {
+            if (r.getNode(self.viewport_node)) |node| return node.geometry.width;
+        }
+        return 0;
+    }
+
+    fn setScrollXClamped(self: *ScrollView, value: f32) void {
+        const sx = self.offset_x orelse return;
+        const min_scroll = @min(0.0, self.viewportWidthNow() - self.contentWidthNow());
+        const next = std.math.clamp(value, min_scroll, 0);
+        if (next != sx.peek()) sx.set(next);
+    }
+
+    fn hasHBar(self: *const ScrollView) bool {
+        const vw = self.viewportWidthNow();
+        return vw > 0 and self.contentWidthNow() > vw;
+    }
+
+    /// Effect (horizontal axis only): re-clamps `offset_x` when the content or
+    /// viewport width changes, and rebuilds just the bottom bar slot when that
+    /// flips whether a horizontal scrollbar is needed.
+    fn syncHBar(self: *ScrollView) void {
+        _ = self.viewport_w_sig.get();
+        if (self.content_width) |cw| _ = cw.get();
+        const prev = signals.untrackedBegin();
+        defer signals.untrackedEnd(prev);
+        if (self.offset_x) |sx| self.setScrollXClamped(sx.peek());
+        const want = self.hasHBar();
+        const have = self.hbar_anchor != reg.NULL_NODE;
+        if (want == have) return;
+        const store = self.store orelse return;
+        const registry = self.registry orelse return;
+        if (self.hbar_slot == reg.NULL_NODE) return;
+        var b = component.UIBuilder.init(registry, store);
+        b.theme = self.theme;
+        b.rootAt(self.hbar_slot) catch return;
+        var ctx = BuildContext{ .builder = &b, .router = self.router, .mounts = self.mounts };
+        buildHBar(self, &ctx) catch {};
+        b.close();
+        registry.markLayoutDirty(self.hbar_slot);
     }
 
     /// The mounted scrollbar (null while the content fits).
@@ -256,19 +335,35 @@ pub const ScrollView = struct {
         // against nodes that are still alive, before Body rebuilds them.
         self.syncBarSizes();
 
-        // Outer row: viewport + scrollbar side-by-side.
-        try ctx.box(.{
-            .width = component.pct(100),
-            .height = component.pct(100),
-            .direction = .row,
-        }, .{
-            Body{ .sv = self },
-        });
+        if (self.offset_x != null) {
+            // Two axes: a column of [viewport + vertical bar] over the bottom
+            // horizontal-bar slot.
+            try ctx.box(.{
+                .width = component.pct(100),
+                .height = component.pct(100),
+                .direction = .column,
+            }, .{
+                TwoAxisBody{ .sv = self },
+            });
+        } else {
+            // Outer row: viewport + scrollbar side-by-side.
+            try ctx.box(.{
+                .width = component.pct(100),
+                .height = component.pct(100),
+                .direction = .row,
+            }, .{
+                Body{ .sv = self },
+            });
+        }
 
         try component.bindVisuals(self, &self.scope, &self.bound, updateVisuals);
         if (!self.bar_bound) {
             _ = try self.scope.createEffect(self, syncBar);
             self.bar_bound = true;
+        }
+        if (self.offset_x != null and !self.hbar_bound) {
+            _ = try self.scope.createEffect(self, syncHBar);
+            self.hbar_bound = true;
         }
     }
 
@@ -280,6 +375,9 @@ pub const ScrollView = struct {
         // viewport's children (wrapper + content) without a global layout solve.
         // The thumb is the mounted `Scrollbar`'s own effect.
         store.setLayout(self.viewport_node, .scroll_offset_y, .{ .dimension = .{ .value = offset, .unit = .px } }) catch {};
+        if (self.offset_x) |sx| {
+            store.setLayout(self.viewport_node, .scroll_offset_x, .{ .dimension = .{ .value = sx.get(), .unit = .px } }) catch {};
+        }
     }
 };
 
@@ -300,6 +398,7 @@ const Body = struct {
             .grow = 1,
             .height = component.pct(100),
             .on_scroll = ctx.handler(sv, ScrollView.onScroll),
+            .on_scroll_h = if (sv.offset_x != null) ctx.handler(sv, ScrollView.onScrollX) else null,
             .on_resize = ctx.handler(sv, ScrollView.onViewportResize),
         }, .{
             Wrapper{ .sv = sv },
@@ -317,6 +416,57 @@ const Body = struct {
     }
     pub fn deinit(_: *Body) void {}
 };
+
+/// Two-axis layout (`offset_x` set): the usual [viewport + vertical bar] row,
+/// grown to fill, over the bottom slot that holds the horizontal bar.
+const TwoAxisBody = struct {
+    sv: *ScrollView,
+
+    pub fn build(self: *TwoAxisBody, ctx: *BuildContext) !void {
+        const b = ctx.builder;
+        const row = try b.openNodeKeyed(.box, null);
+        try b.width(row, 100, .percent);
+        try b.flexGrow(row, 1);
+        try b.flexBasis(row, 0, .px);
+        try b.minHeight(row, 0, .px);
+        try b.flexRow(row);
+        var body = Body{ .sv = self.sv };
+        try body.build(ctx);
+        b.close();
+
+        const slot = try b.openNodeKeyed(.box, null);
+        self.sv.hbar_slot = slot;
+        try b.width(slot, 100, .percent);
+        try b.flexShrink(slot, 0);
+        try b.flexColumn(slot);
+        try buildHBar(self.sv, ctx);
+        b.close();
+    }
+    pub fn deinit(_: *TwoAxisBody) void {}
+};
+
+/// The horizontal scrollbar, or nothing — into the currently open parent (the
+/// bottom slot). Same gap and thickness as the vertical bar.
+fn buildHBar(sv: *ScrollView, ctx: *BuildContext) !void {
+    const b = ctx.builder;
+    sv.hbar_anchor = reg.NULL_NODE;
+    const sx = sv.offset_x orelse return;
+    const cw = sv.content_width orelse return;
+    if (!sv.hasHBar()) return;
+    const holder = try b.openNodeKeyed(.box, null);
+    try b.height(holder, BAR_THICKNESS, .px);
+    try b.marginTop(holder, SCROLLBAR_WIDTH - BAR_THICKNESS);
+    try ctx.mountOwned(scrollbar_mod.Scrollbar, .{
+        .fill = true,
+        .offset = sx,
+        .content_size = cw,
+        .viewport_size = &sv.viewport_w_sig,
+        .orientation = scrollbar_mod.Orientation.horizontal,
+        .thickness = BAR_THICKNESS,
+    });
+    b.close(); // holder
+    if (b.registry.getNode(holder)) |n| sv.hbar_anchor = n.first_child;
+}
 
 /// The scrollbar track + thumb, the stable-gutter spacer, or nothing — into the
 /// currently open parent (the bar slot).
@@ -726,4 +876,68 @@ test "ScrollView fill: the scrollbar appears and disappears as a resize flips wh
     _ = try env.frame(0, 400, 400);
     try testing.expect(env.isVisible(sv.thumb_node));
     try testing.expectApproxEqAbs(@as(f32, 400 - SCROLLBAR_WIDTH), env.geom(viewport).width, 0.5);
+}
+
+/// A 1000 px wide, 100 px tall child (columns wider than the view).
+const WideChild = struct {
+    pub fn build(_: *WideChild, ctx: *BuildContext) !void {
+        const n = try ctx.builder.openNodeKeyed(.box, null);
+        try ctx.builder.width(n, 1000, .px);
+        try ctx.builder.height(n, 100, .px);
+        ctx.builder.close();
+    }
+    pub fn deinit(_: *WideChild) void {}
+};
+
+test "ScrollView offset_x: horizontal wheel scrolls and clamps, the bottom bar follows content_width" {
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+
+    var wide = WideChild{};
+    var sx = signals.Signal(f32).init(testing.allocator, 0);
+    defer sx.deinit();
+    var cw = signals.Signal(f32).init(testing.allocator, 1000);
+    defer cw.deinit();
+    const sv = try mountScrollView(&env, .{
+        .fill = true,
+        .content = component.childOf(WideChild, &wide),
+        .content_height = 100,
+        .offset_x = &sx,
+        .content_width = &cw,
+    });
+    try env.store.setLayout(0, .width, .{ .dimension = .{ .value = 100, .unit = .percent } });
+    try env.store.setLayout(0, .height, .{ .dimension = .{ .value = 100, .unit = .percent } });
+
+    _ = try env.frame(0, 400, 300);
+    try testing.expectApproxEqAbs(@as(f32, 400), sv.viewport_w_sig.peek(), 0.5);
+    try testing.expect(sv.hbar_anchor != reg.NULL_NODE);
+    _ = try env.frame(0, 400, 300);
+    // The bar takes its channel at the bottom; the viewport is that much shorter.
+    try testing.expectApproxEqAbs(@as(f32, 300 - SCROLLBAR_WIDTH), env.geom(sv.viewport_node).height, 0.5);
+
+    _ = env.router.route(.{ .name = "scroll_h", .id = "", .node_id = sv.viewport_node, .scroll_delta = 3 });
+    try testing.expectApproxEqAbs(@as(f32, -60), sx.peek(), 0.01);
+    try testing.expectApproxEqAbs(@as(f32, -60), env.store.getLayout(sv.viewport_node, .scroll_offset_x).?.dimension.value, 0.01);
+    _ = env.router.route(.{ .name = "scroll_h", .id = "", .node_id = sv.viewport_node, .scroll_delta = 500 });
+    try testing.expectApproxEqAbs(@as(f32, -600), sx.peek(), 0.01); // 1000 - 400
+    _ = env.router.route(.{ .name = "scroll_h", .id = "", .node_id = sv.viewport_node, .scroll_delta = -500 });
+    try testing.expectApproxEqAbs(@as(f32, 0), sx.peek(), 0.01);
+
+    // The content narrows to fit: the offset re-clamps and the bar goes away.
+    _ = env.router.route(.{ .name = "scroll_h", .id = "", .node_id = sv.viewport_node, .scroll_delta = 10 });
+    cw.set(300);
+    try testing.expectApproxEqAbs(@as(f32, 0), sx.peek(), 0.01);
+    try testing.expectEqual(reg.NULL_NODE, sv.hbar_anchor);
+}
+
+test "ScrollView without offset_x ignores the horizontal wheel" {
+    var env = TestEnv.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var wide = WideChild{};
+    const sv = try mountScrollView(&env, .{ .content = component.childOf(WideChild, &wide), .content_height = 100, .viewport_height = 300 });
+    _ = try env.frame(0, 400, 300);
+    try testing.expect(env.store.getLayout(sv.viewport_node, .scroll_offset_x) == null);
+    try testing.expectEqual(reg.NULL_NODE, sv.hbar_slot);
 }
