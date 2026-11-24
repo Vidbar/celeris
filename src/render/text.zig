@@ -52,6 +52,36 @@ pub fn fallbackCharWidth(size: f32) f32 {
 }
 
 const stb = @import("c_stbtt");
+pub const dwrite = @import("dwrite.zig");
+
+/// Which rasterizer turns glyph outlines into atlas bitmaps. `stb` is
+/// stb_truetype (unhinted, every platform). The others are DirectWrite with
+/// grid fitting (Windows only; elsewhere they fall back to stb). Shaping,
+/// advances and measurement never depend on this — only how each glyph's
+/// pixels look. Override at runtime with `CELERIS_TEXT_RASTERIZER=stb|
+/// gdi_classic|gdi_natural|natural_symmetric`.
+pub const Rasterizer = enum { stb, gdi_classic, gdi_natural, natural_symmetric };
+
+/// `gdi_natural`: hints both axes, so vertical stems land on whole pixels at UI
+/// sizes, but keeps glyph shapes for natural (fractional) advances — which is
+/// what HarfBuzz gives us. `gdi_classic` is as crisp but its shapes assume
+/// GDI's rounded advances, so letter spacing wobbles; `natural_symmetric`
+/// hints vertically only and looks close to stb at 12–13 px.
+pub const DEFAULT_RASTERIZER: Rasterizer = .gdi_natural;
+
+fn rasterizerFromEnv() Rasterizer {
+    const v = std.c.getenv("CELERIS_TEXT_RASTERIZER") orelse return DEFAULT_RASTERIZER;
+    return std.meta.stringToEnum(Rasterizer, std.mem.span(v)) orelse DEFAULT_RASTERIZER;
+}
+
+fn dwriteMode(r: Rasterizer) ?dwrite.Mode {
+    return switch (r) {
+        .stb => null,
+        .gdi_classic => .gdi_classic,
+        .gdi_natural => .gdi_natural,
+        .natural_symmetric => .natural_symmetric,
+    };
+}
 
 /// True if `ttf` maps `codepoint` to a real (non-.notdef) glyph, using the same
 /// bounded stb lookup the atlas uses to pick a fallback face. False for a font
@@ -294,6 +324,11 @@ const Font = struct {
     cap_ratio: f32,
     /// Underline / strikethrough placement from the face's own tables.
     decoration: DecorationMetrics,
+    /// DirectWrite face for these bytes, created on first rasterization when
+    /// the atlas has a DirectWrite rasterizer. `dw_tried` stops a rejected font
+    /// from being retried; it then rasterizes with stb.
+    dw_face: ?*dwrite.Face = null,
+    dw_tried: bool = false,
 
     fn init(allocator: std.mem.Allocator, ttf_data: []const u8) !Font {
         const ttf = try allocator.dupe(u8, ttf_data);
@@ -403,6 +438,7 @@ const Font = struct {
     }
 
     fn deinit(self: *Font, allocator: std.mem.Allocator) void {
+        if (self.dw_face) |f| dwrite.Rasterizer.releaseFace(f);
         self.shaper.deinit();
         allocator.free(self.ttf);
     }
@@ -599,6 +635,10 @@ pub const FontAtlas = struct {
     /// wobble. Defaults are a sane stand-in until `init` fills them in.
     ascent_ratio: f32 = 0.9,
     descent_ratio: f32 = 0.21,
+    /// Hinted glyph rasterizer (DirectWrite on Windows), or null to use stb for
+    /// every glyph. Chosen at init from `CELERIS_TEXT_RASTERIZER` (default
+    /// `DEFAULT_RASTERIZER`); `setRasterizer` changes it and drops cached glyphs.
+    dw: ?dwrite.Rasterizer = null,
 
     pub fn init(allocator: std.mem.Allocator, ttf_data: []const u8, font_height: f32) !FontAtlas {
         _ = font_height; // glyphs rasterize lazily, per physical size (see getGlyph)
@@ -636,7 +676,46 @@ pub const FontAtlas = struct {
             .dirty = true,
             .ascent_ratio = @as(f32, @floatFromInt(asc)) * inv_upem,
             .descent_ratio = -@as(f32, @floatFromInt(desc)) * inv_upem, // hhea descent is negative
+            .dw = if (dwriteMode(rasterizerFromEnv())) |m| dwrite.Rasterizer.init(m) else null,
         };
+    }
+
+    /// The rasterizer actually in use (`.stb` when DirectWrite is unavailable).
+    pub fn rasterizer(self: *const FontAtlas) Rasterizer {
+        const d = self.dw orelse return .stb;
+        return switch (d.mode) {
+            .gdi_classic => .gdi_classic,
+            .gdi_natural => .gdi_natural,
+            .natural_symmetric => .natural_symmetric,
+        };
+    }
+
+    /// Switches rasterizer. Already-packed glyphs are forgotten (their atlas
+    /// space is not reclaimed), so later draws re-rasterize with the new one.
+    /// Returns the rasterizer in effect, which is `.stb` where DirectWrite is
+    /// unavailable.
+    pub fn setRasterizer(self: *FontAtlas, r: Rasterizer) Rasterizer {
+        for (self.fonts.items) |*f| {
+            if (f.dw_face) |face| dwrite.Rasterizer.releaseFace(face);
+            f.dw_face = null;
+            f.dw_tried = false;
+        }
+        if (self.dw) |*d| d.deinit();
+        self.dw = if (dwriteMode(r)) |m| dwrite.Rasterizer.init(m) else null;
+        self.glyphs.clearRetainingCapacity();
+        self.dirty = true;
+        return self.rasterizer();
+    }
+
+    /// The DirectWrite face for `fidx`, created on first use; null → use stb.
+    fn dwFace(self: *FontAtlas, fidx: u32) ?*dwrite.Face {
+        const d = if (self.dw) |*d| d else return null;
+        const font = &self.fonts.items[fidx];
+        if (!font.dw_tried) {
+            font.dw_tried = true;
+            font.dw_face = d.createFace(font.ttf);
+        }
+        return font.dw_face;
     }
 
     /// Baseline offset from the top of a `line_height`-tall line slot, for text at
@@ -770,6 +849,7 @@ pub const FontAtlas = struct {
         self.glyphs.deinit();
         for (self.fonts.items) |*f| f.deinit(self.allocator);
         self.fonts.deinit();
+        if (self.dw) |*d| d.deinit(); // after the faces that reference its loader
         self.allocator.free(self.pixels);
     }
 
@@ -808,11 +888,24 @@ pub const FontAtlas = struct {
         const font = &self.fonts.items[fidx];
         const px_scale = stb.stbtt_ScaleForMappingEmToPixels(&font.info, size_clamped);
 
+        // Hinted DirectWrite bounds when available (same em size: stb's
+        // ScaleForMappingEmToPixels and DirectWrite's fontEmSize both mean
+        // "the em is this many pixels"); stb's otherwise or on any failure.
+        const dw_face = self.dwFace(fidx);
+        const dw_bounds: ?dwrite.Bounds = if (dw_face) |f| self.dw.?.bounds(f, glyph_id, size_clamped) else null;
+
         var x0: c_int = 0;
         var y0: c_int = 0;
         var x1: c_int = 0;
         var y1: c_int = 0;
-        stb.stbtt_GetGlyphBitmapBox(&font.info, @intCast(glyph_id), px_scale, px_scale, &x0, &y0, &x1, &y1);
+        if (dw_bounds) |b| {
+            x0 = b.left;
+            y0 = b.top;
+            x1 = b.left + @as(c_int, @intCast(b.w));
+            y1 = b.top + @as(c_int, @intCast(b.h));
+        } else {
+            stb.stbtt_GetGlyphBitmapBox(&font.info, @intCast(glyph_id), px_scale, px_scale, &x0, &y0, &x1, &y1);
+        }
         const w: u32 = @intCast(@max(0, x1 - x0));
         const h: u32 = @intCast(@max(0, y1 - y0));
 
@@ -843,7 +936,20 @@ pub const FontAtlas = struct {
             const py = self.pen_y;
             // Rasterize directly into the atlas at (px, py) with the atlas stride.
             const dst = self.pixels.ptr + (py * ATLAS_WIDTH + px);
-            stb.stbtt_MakeGlyphBitmap(&font.info, dst, @intCast(w), @intCast(h), ATLAS_WIDTH, px_scale, px_scale, @intCast(glyph_id));
+            var drawn = false;
+            if (dw_bounds) |b| {
+                if (self.allocator.alloc(u8, w * h)) |scratch| {
+                    defer self.allocator.free(scratch);
+                    drawn = self.dw.?.render(dw_face.?, glyph_id, size_clamped, b, scratch, dst, ATLAS_WIDTH);
+                } else |_| {}
+            }
+            // stb fallback: no DirectWrite, or it failed after giving bounds. The
+            // box was sized from DirectWrite's bounds, so stb draws into that
+            // same box with its own offset (only reachable on a DWrite error).
+            if (!drawn) {
+                for (0..h) |row| @memset(dst[row * ATLAS_WIDTH ..][0..w], 0);
+                stb.stbtt_MakeGlyphBitmap(&font.info, dst, @intCast(w), @intCast(h), ATLAS_WIDTH, px_scale, px_scale, @intCast(glyph_id));
+            }
 
             glyph.s0 = @as(f32, @floatFromInt(px)) / ATLAS_WIDTH;
             glyph.t0 = @as(f32, @floatFromInt(py)) / ATLAS_HEIGHT;
@@ -1189,6 +1295,8 @@ test "FontAtlas: small text is rasterized at size × DPI scale and placed on who
     defer testing.allocator.free(ttf);
     var atlas = try FontAtlas.init(testing.allocator, ttf, 13.0);
     defer atlas.deinit();
+    // Compared against stb's own bbox below; the DirectWrite path has its own test.
+    try testing.expectEqual(Rasterizer.stb, atlas.setRasterizer(.stb));
 
     const gi = atlas.glyphIndex('l'); // a single vertical stem
     try testing.expect(gi != 0);
@@ -1230,6 +1338,66 @@ test "FontAtlas: small text is rasterized at size × DPI scale and placed on who
     const b = atlas.getGlyph(0, gi, @round(13.0 * 1.5)).?;
     try testing.expect(b.h > a.h);
     try testing.expect(a.s0 != b.s0 or a.t0 != b.t0);
+}
+
+/// Darkest column's average coverage over the glyph's rows: how much of a
+/// vertical stem lands in one pixel column (255 = perfectly on the grid).
+fn bestColumnCoverage(atlas: *const FontAtlas, g: Glyph) f32 {
+    const px: usize = @intFromFloat(@round(g.s0 * ATLAS_WIDTH));
+    const py: usize = @intFromFloat(@round(g.t0 * ATLAS_HEIGHT));
+    var best: f32 = 0;
+    for (0..g.w) |x| {
+        var sum: u32 = 0;
+        for (0..g.h) |y| sum += atlas.pixels[(py + y) * ATLAS_WIDTH + px + x];
+        best = @max(best, @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(g.h)));
+    }
+    return best;
+}
+
+test "FontAtlas: DirectWrite rasterizer (Windows) hints stems onto the pixel grid" {
+    const ttf = try loadTestFont(testing.allocator);
+    defer testing.allocator.free(ttf);
+    var atlas = try FontAtlas.init(testing.allocator, ttf, 13.0);
+    defer atlas.deinit();
+
+    // Off Windows every DirectWrite mode resolves to stb — the API is portable.
+    if (!dwrite.available) {
+        try testing.expectEqual(Rasterizer.stb, atlas.setRasterizer(.gdi_classic));
+        return;
+    }
+
+    const gi = atlas.glyphIndex('l');
+    try testing.expect(gi != 0);
+
+    // stb: unhinted, the 'l' stem straddles two columns at 13px.
+    _ = atlas.setRasterizer(.stb);
+    const g_stb = atlas.getGlyph(0, gi, 13.0).?;
+    const stb_cov = bestColumnCoverage(&atlas, g_stb);
+
+    try testing.expectEqual(Rasterizer.gdi_natural, atlas.setRasterizer(.gdi_natural));
+    try testing.expect(atlas.fonts.items[0].dw_face == null); // lazily created
+    const g = atlas.getGlyph(0, gi, 13.0).?;
+    try testing.expect(atlas.fonts.items[0].dw_face != null); // DirectWrite accepted the font
+    try testing.expect(g.w > 0 and g.h > 0 and g.oy < 0);
+    try testing.expectApproxEqAbs(@as(f32, @floatFromInt(g.w)), (g.s1 - g.s0) * ATLAS_WIDTH, 1e-3);
+    // Height tracks the requested pixel size (the em is 13px, an 'l' is ~ascender tall).
+    try testing.expect(g.h >= 8 and g.h <= 15);
+    // Hinted: one column carries (nearly) the whole stem, and more than stb's best.
+    const dw_cov = bestColumnCoverage(&atlas, g);
+    try testing.expect(dw_cov >= 200);
+    try testing.expect(dw_cov > stb_cov);
+
+    // Per-size: 13px at 1.5x is its own, taller bitmap.
+    const g15 = atlas.getGlyph(0, gi, @round(13.0 * 1.5)).?;
+    try testing.expect(g15.h > g.h);
+    // Placement stays on whole pixels.
+    const q = glyphQuadPhys(g15, 41.37, 0.4, 0, 30);
+    try testing.expectEqual(@round(q.x0), q.x0);
+    try testing.expectEqual(@round(q.y0), q.y0);
+
+    // A space has no bitmap through DirectWrite either.
+    const sp = atlas.getGlyph(0, atlas.glyphIndex(' '), 13.0).?;
+    try testing.expectEqual(@as(u32, 0), sp.w);
 }
 
 test "FontAtlas: HarfBuzz measure agrees with shaped advances; wrapping splits lines" {

@@ -11,6 +11,17 @@ listed here as well.
 
 ## Unreleased
 
+- **Hinted text on Windows (DirectWrite).** Glyphs are now rasterized by
+  DirectWrite with grid fitting (`gdi_natural` mode, grayscale antialiasing)
+  instead of stb_truetype, so 12–13 px UI text has vertical stems on whole pixels,
+  as in VS Code and other native Windows apps. Only each glyph's pixels change:
+  HarfBuzz shaping, advances, measurement and layout are untouched, so no widths
+  move. The `dwrite` library is now linked on Windows. `CELERIS_TEXT_RASTERIZER`
+  (`stb`, `gdi_natural`, `gdi_classic`, `natural_symmetric`) selects the rasterizer
+  at startup, and `FontAtlas.setRasterizer` / `.rasterizer()` change and query it
+  at runtime. A font DirectWrite rejects, or any DirectWrite error, falls back to
+  stb for that glyph. Linux keeps stb_truetype.
+
 - Small text reads fuller: the text shader lifts antialiased glyph edges with
   DirectWrite's "enhanced contrast" curve, `c(k+1)/(ck+1)`, with `k` scaled by
   the text color's luminance (`text.TEXT_CONTRAST_DARK`/`_LIGHT`, mirrored by

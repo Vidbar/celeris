@@ -18,6 +18,7 @@ fn linkNativeDeps(b: *std.Build, mod: *std.Build.Module, target: std.Build.Resol
             mod.linkSystemLibrary("ole32", .{}); // IFileOpenDialog (folder picker) + CoTaskMemFree
             mod.linkSystemLibrary("imm32", .{}); // IME composition (WM_IME_*)
             mod.linkSystemLibrary("dwmapi", .{}); // window corner preference (Win11)
+            mod.linkSystemLibrary("dwrite", .{}); // hinted glyph rasterization (render/dwrite.zig)
         },
         .linux => {
             const libdir = b.path("vendor/wgpu-native/linux-x86_64/lib");

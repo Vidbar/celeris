@@ -57,7 +57,10 @@ Implemented today, natively in Zig:
   render offset, no re-layout.
 - **Text stack:** HarfBuzz shaping with per-node glyph cache, font-stack fallback
   (CJK), fontconfig discovery on Linux, pixel-exact caret, UAX#14 line breaking
-  (subset), IME (Win32 + Wayland `zwp_text_input_v3`).
+  (subset), IME (Win32 + Wayland `zwp_text_input_v3`). Glyphs rasterize at their
+  exact device-pixel size; on Windows through DirectWrite with hinting, so small
+  UI text has crisp stems (`CELERIS_TEXT_RASTERIZER=stb` switches back to the
+  unhinted stb_truetype path used on Linux).
 - **Flexbox layout:** CSS-correct grow/shrink (weighted freeze + redistribute),
   `flex-basis`, min sizes, wrap, per-axis gaps, `align-self`, `space-evenly`.
 - **Desktop platform:** Win32 + Wayland windowing (parity; X11 out by design),
