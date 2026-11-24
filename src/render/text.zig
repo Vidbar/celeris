@@ -653,9 +653,7 @@ pub const FontAtlas = struct {
         // The line sprite (see `LINE_SPRITE`): a clear row over two solid rows, so
         // decoration lines draw through the glyph pipeline with exact coverage and
         // their antialiased edges come from bilinear filtering across that step.
-        for (1..3) |row| {
-            for (0..3) |col| pixels[(PAD + row) * ATLAS_WIDTH + PAD + col] = 255;
-        }
+        writeLineSprite(pixels);
 
         // Vertical metrics of the primary face, normalized to the em — the basis
         // for `baselineInSlot`.
@@ -670,9 +668,9 @@ pub const FontAtlas = struct {
             .pixels = pixels,
             .fonts = fonts,
             .glyphs = std.AutoHashMap(u64, Glyph).init(allocator),
-            .pen_x = PAD + 3 + PAD, // after the line sprite
+            .pen_x = PEN_X0,
             .pen_y = PAD,
-            .row_h = 3,
+            .row_h = ROW_H0,
             .dirty = true,
             .ascent_ratio = @as(f32, @floatFromInt(asc)) * inv_upem,
             .descent_ratio = -@as(f32, @floatFromInt(desc)) * inv_upem, // hhea descent is negative
@@ -690,8 +688,19 @@ pub const FontAtlas = struct {
         };
     }
 
-    /// Switches rasterizer. Already-packed glyphs are forgotten (their atlas
-    /// space is not reclaimed), so later draws re-rasterize with the new one.
+    /// Shelf-packer start: right after the line sprite, on its row.
+    const PEN_X0: u32 = PAD + 3 + PAD;
+    const ROW_H0: u32 = 3;
+
+    fn writeLineSprite(pixels: []u8) void {
+        for (1..3) |row| {
+            for (0..3) |col| pixels[(PAD + row) * ATLAS_WIDTH + PAD + col] = 255;
+        }
+    }
+
+    /// Switches rasterizer. The atlas is emptied (glyph cache, pixels and packer,
+    /// keeping only the line sprite), so later draws re-rasterize with the new
+    /// one and switching any number of times never fills the atlas.
     /// Returns the rasterizer in effect, which is `.stb` where DirectWrite is
     /// unavailable.
     pub fn setRasterizer(self: *FontAtlas, r: Rasterizer) Rasterizer {
@@ -703,6 +712,11 @@ pub const FontAtlas = struct {
         if (self.dw) |*d| d.deinit();
         self.dw = if (dwriteMode(r)) |m| dwrite.Rasterizer.init(m) else null;
         self.glyphs.clearRetainingCapacity();
+        @memset(self.pixels, 0);
+        writeLineSprite(self.pixels);
+        self.pen_x = PEN_X0;
+        self.pen_y = PAD;
+        self.row_h = ROW_H0;
         self.dirty = true;
         return self.rasterizer();
     }
@@ -888,11 +902,26 @@ pub const FontAtlas = struct {
         const font = &self.fonts.items[fidx];
         const px_scale = stb.stbtt_ScaleForMappingEmToPixels(&font.info, size_clamped);
 
-        // Hinted DirectWrite bounds when available (same em size: stb's
+        // Hinted DirectWrite glyph when available (same em size: stb's
         // ScaleForMappingEmToPixels and DirectWrite's fontEmSize both mean
-        // "the em is this many pixels"); stb's otherwise or on any failure.
-        const dw_face = self.dwFace(fidx);
-        const dw_bounds: ?dwrite.Bounds = if (dw_face) |f| self.dw.?.bounds(f, glyph_id, size_clamped) else null;
+        // "the em is this many pixels"). It is rendered into `dw_bitmap` BEFORE
+        // any atlas space is taken, so a DirectWrite failure at either step falls
+        // back to stb for both the box and the bitmap — never a mix of the two.
+        var dw_bounds: ?dwrite.Bounds = null;
+        var dw_bitmap: []u8 = &.{};
+        defer if (dw_bitmap.len > 0) self.allocator.free(dw_bitmap);
+        if (self.dwFace(fidx)) |face| dw: {
+            const b = self.dw.?.bounds(face, glyph_id, size_clamped) orelse break :dw;
+            if (b.w > 0 and b.h > 0) {
+                const buf = self.allocator.alloc(u8, b.w * b.h) catch break :dw;
+                if (!self.dw.?.render(face, glyph_id, size_clamped, b, buf)) {
+                    self.allocator.free(buf);
+                    break :dw;
+                }
+                dw_bitmap = buf;
+            }
+            dw_bounds = b;
+        }
 
         var x0: c_int = 0;
         var y0: c_int = 0;
@@ -936,18 +965,9 @@ pub const FontAtlas = struct {
             const py = self.pen_y;
             // Rasterize directly into the atlas at (px, py) with the atlas stride.
             const dst = self.pixels.ptr + (py * ATLAS_WIDTH + px);
-            var drawn = false;
-            if (dw_bounds) |b| {
-                if (self.allocator.alloc(u8, w * h)) |scratch| {
-                    defer self.allocator.free(scratch);
-                    drawn = self.dw.?.render(dw_face.?, glyph_id, size_clamped, b, scratch, dst, ATLAS_WIDTH);
-                } else |_| {}
-            }
-            // stb fallback: no DirectWrite, or it failed after giving bounds. The
-            // box was sized from DirectWrite's bounds, so stb draws into that
-            // same box with its own offset (only reachable on a DWrite error).
-            if (!drawn) {
-                for (0..h) |row| @memset(dst[row * ATLAS_WIDTH ..][0..w], 0);
+            if (dw_bounds != null) {
+                for (0..h) |row| @memcpy(dst[row * ATLAS_WIDTH ..][0..w], dw_bitmap[row * w ..][0..w]);
+            } else {
                 stb.stbtt_MakeGlyphBitmap(&font.info, dst, @intCast(w), @intCast(h), ATLAS_WIDTH, px_scale, px_scale, @intCast(glyph_id));
             }
 
@@ -1398,6 +1418,30 @@ test "FontAtlas: DirectWrite rasterizer (Windows) hints stems onto the pixel gri
     // A space has no bitmap through DirectWrite either.
     const sp = atlas.getGlyph(0, atlas.glyphIndex(' '), 13.0).?;
     try testing.expectEqual(@as(u32, 0), sp.w);
+}
+
+test "FontAtlas.setRasterizer empties the atlas, so switching never fills it" {
+    const ttf = try loadTestFont(testing.allocator);
+    defer testing.allocator.free(ttf);
+    var atlas = try FontAtlas.init(testing.allocator, ttf, 13.0);
+    defer atlas.deinit();
+
+    const gi = atlas.glyphIndex('W');
+    const modes = [_]Rasterizer{ .stb, .gdi_natural };
+    var first: ?Glyph = null;
+    for (0..200) |i| { // far more switches than the atlas could absorb per-switch
+        _ = atlas.setRasterizer(modes[i % 2]);
+        try testing.expectEqual(FontAtlas.PEN_X0, atlas.pen_x);
+        try testing.expectEqual(@as(u32, PAD), atlas.pen_y);
+        const g = atlas.getGlyph(0, gi, 120.0).?;
+        try testing.expect(g.w > 0); // never the "atlas full" empty glyph
+        if (i == 0) first = g;
+    }
+    // Same mode → same packed position every time: the space was reused.
+    _ = atlas.setRasterizer(.stb);
+    try testing.expectEqual(first.?.s0, atlas.getGlyph(0, gi, 120.0).?.s0);
+    // The line sprite survives the reset.
+    try testing.expectEqual(@as(u8, 255), atlas.pixels[(PAD + 1) * ATLAS_WIDTH + PAD]);
 }
 
 test "FontAtlas: HarfBuzz measure agrees with shaped advances; wrapping splits lines" {

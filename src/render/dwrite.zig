@@ -244,17 +244,16 @@ const impl = if (available) struct {
             return .{ .left = r.left, .top = r.top, .w = @intCast(r.right - r.left), .h = @intCast(r.bottom - r.top) };
         }
 
-        /// Rasterizes into `dst` (row stride `stride` bytes), `b` from `bounds`
-        /// for the same glyph and size. `scratch` must hold `b.w * b.h` bytes.
-        pub fn render(self: *RasterizerT, face: *FaceT, glyph_id: u32, em_px: f32, b: Bounds, scratch: []u8, dst: [*]u8, stride: usize) bool {
+        /// Rasterizes into `out`, tightly packed (`b.w` bytes per row, `b.w * b.h`
+        /// bytes), `b` from `bounds` for the same glyph and size.
+        pub fn render(self: *RasterizerT, face: *FaceT, glyph_id: u32, em_px: f32, b: Bounds, out: []u8) bool {
             if (b.w == 0 or b.h == 0) return true;
             const a = self.analysis(face, @intCast(glyph_id), em_px) orelse return false;
             defer _ = a.vtbl.Release(a);
             const r = RECT{ .left = b.left, .top = b.top, .right = b.left + @as(i32, @intCast(b.w)), .bottom = b.top + @as(i32, @intCast(b.h)) };
             const n = b.w * b.h;
-            if (scratch.len < n) return false;
-            if (a.vtbl.CreateAlphaTexture(a, DWRITE_TEXTURE_ALIASED_1x1, &r, scratch.ptr, n) < 0) return false;
-            for (0..b.h) |y| @memcpy(dst[y * stride ..][0..b.w], scratch[y * b.w ..][0..b.w]);
+            if (out.len < n) return false;
+            if (a.vtbl.CreateAlphaTexture(a, DWRITE_TEXTURE_ALIASED_1x1, &r, out.ptr, n) < 0) return false;
             return true;
         }
     };
@@ -281,8 +280,8 @@ const impl = if (available) struct {
             _ = .{ self, face, glyph_id, em_px };
             return null;
         }
-        pub fn render(self: *RasterizerT, face: *FaceT, glyph_id: u32, em_px: f32, b: Bounds, scratch: []u8, dst: [*]u8, stride: usize) bool {
-            _ = .{ self, face, glyph_id, em_px, b, scratch, dst, stride };
+        pub fn render(self: *RasterizerT, face: *FaceT, glyph_id: u32, em_px: f32, b: Bounds, out: []u8) bool {
+            _ = .{ self, face, glyph_id, em_px, b, out };
             return false;
         }
     };
