@@ -9,6 +9,17 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+- **BREAKING (Zig, minor):** `text.REF_PX` is removed. It was a leftover from an earlier
+  renderer: glyphs have long been rasterized at their exact device-pixel size
+  (font size × DPI scale), cached per size, and placed on whole pixels with a 1:1 atlas
+  sample — not a 64 px bitmap minified per draw. Nothing read it. The stale comments
+  that described the old path are corrected.
+- New `text.glyphQuadPhys`: the pixel-snapped glyph quad placement, factored out of the
+  backend, plus a test pinning that 12–13 px text at 100% and 150% is rasterized at
+  `round(size × scale)` and lands on whole pixels.
+
 ## 0.10.0 — 2026-11-23
 
 No C-ABI change.

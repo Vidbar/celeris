@@ -64,8 +64,6 @@ pub fn fontHasGlyph(ttf: []const u8, codepoint: u21) bool {
 
 pub const ATLAS_WIDTH = 2048;
 pub const ATLAS_HEIGHT = 2048;
-/// Reference rasterization size (px). UI text (≤ this) scales down → crisp.
-pub const REF_PX: f32 = 64.0;
 const PAD: u32 = 2;
 
 pub const TextLine = struct {
@@ -207,9 +205,13 @@ pub fn verticalLayoutWith(m: FontMetrics, size: f32, box_height: f32, num_lines:
     };
 }
 
-/// A rasterized glyph cached in the atlas. `ox/oy` are the bitmap's top-left
-/// offset from the pen baseline at REF_PX (oy negative = above baseline). UVs are
-/// normalized atlas coordinates.
+/// A rasterized glyph cached in the atlas. Glyphs are rasterized at the exact
+/// physical pixel size they are drawn at (font size × DPI scale, see
+/// `FontAtlas.getGlyph`) — never a reference size scaled per draw — so `w/h` are
+/// whole device pixels and the quad samples the atlas 1:1. `ox/oy` are the
+/// bitmap's top-left offset from the pen baseline in those same pixels (oy
+/// negative = above baseline); the renderer adds them to a pixel-snapped pen.
+/// UVs are normalized atlas coordinates.
 pub const Glyph = struct {
     s0: f32,
     t0: f32,
@@ -221,6 +223,26 @@ pub const Glyph = struct {
     h: u32,
 };
 
+/// A glyph quad's corners in device pixels.
+pub const GlyphQuad = struct { x0: f32, y0: f32, x1: f32, y1: f32 };
+
+/// Where a rasterized glyph lands, in device pixels. The pen and the shaper's
+/// offsets are fractional; each is rounded so the quad's origin sits on whole
+/// pixels (`baseline_phys` must already be whole), and the quad is exactly
+/// `w × h` — one texel per pixel, so the atlas is sampled 1:1 and stems stay on
+/// the pixel grid. The pen itself is never rounded by the caller (that would
+/// accumulate drift over a run); only the emitted quad snaps.
+pub fn glyphQuadPhys(gl: Glyph, pen_x_phys: f32, x_offset_phys: f32, y_offset_phys: f32, baseline_phys: f32) GlyphQuad {
+    const x0 = @round(pen_x_phys) + @round(x_offset_phys) + gl.ox;
+    const y0 = baseline_phys - @round(y_offset_phys) + gl.oy;
+    return .{
+        .x0 = x0,
+        .y0 = y0,
+        .x1 = x0 + @as(f32, @floatFromInt(gl.w)),
+        .y1 = y0 + @as(f32, @floatFromInt(gl.h)),
+    };
+}
+
 /// One loaded font: its owned TTF bytes plus the stb (rasterize) and HarfBuzz
 /// (shape) handles that reference them. Copyable by value — neither stb's
 /// `fontinfo` nor HarfBuzz's handles store a pointer back into this struct (they
@@ -229,7 +251,6 @@ const Font = struct {
     ttf: []u8,
     info: stb.stbtt_fontinfo,
     shaper: Shaper,
-    ref_scale: f32, // stb scale for REF_PX
     /// Cap height as a fraction of the em — the top of the capitals, measured off
     /// 'H'. Optical centering is defined on this band, not on ascent/descent (see
     /// `FontAtlas.baselineInSlot`), and it varies enough between faces (a bold or a
@@ -260,7 +281,6 @@ const Font = struct {
             .ttf = ttf,
             .info = info,
             .shaper = shaper,
-            .ref_scale = stb.stbtt_ScaleForMappingEmToPixels(&info, REF_PX),
             .cap_ratio = capRatio(&info),
             .decoration = decorationMetrics(ttf, @intCast(@max(info.fontstart, 0)), stb.stbtt_ScaleForMappingEmToPixels(&info, 1.0), capRatio(&info)),
         };
@@ -545,7 +565,7 @@ pub const FontAtlas = struct {
     descent_ratio: f32 = 0.21,
 
     pub fn init(allocator: std.mem.Allocator, ttf_data: []const u8, font_height: f32) !FontAtlas {
-        _ = font_height; // glyphs rasterize at REF_PX and scale per draw
+        _ = font_height; // glyphs rasterize lazily, per physical size (see getGlyph)
 
         var fonts = std.array_list.Managed(Font).init(allocator);
         errdefer fonts.deinit();
@@ -737,6 +757,11 @@ pub const FontAtlas = struct {
     /// Returns the cached glyph, rasterizing it from `font_index`'s font into the
     /// shared atlas on first use. A glyph with no bitmap (e.g. space) is cached
     /// with w=h=0.
+    ///
+    /// `physical_size` is the size in DEVICE pixels (logical size × DPI scale).
+    /// The glyph is rasterized at exactly that size and cached per
+    /// `(font, glyph, size_px)`, so small UI text is a native bitmap rather than
+    /// a minified one, and a DPI change (new scale → new size_px) re-rasterizes.
     pub fn getGlyph(self: *FontAtlas, font_index: u32, glyph_id: u32, physical_size: f32) ?Glyph {
         const fidx = if (font_index < self.fonts.items.len) font_index else 0;
         const size_clamped = @max(1.0, physical_size);
@@ -745,13 +770,13 @@ pub const FontAtlas = struct {
         if (self.glyphs.get(key)) |g| return g;
 
         const font = &self.fonts.items[fidx];
-        const ref_scale = stb.stbtt_ScaleForMappingEmToPixels(&font.info, size_clamped);
+        const px_scale = stb.stbtt_ScaleForMappingEmToPixels(&font.info, size_clamped);
 
         var x0: c_int = 0;
         var y0: c_int = 0;
         var x1: c_int = 0;
         var y1: c_int = 0;
-        stb.stbtt_GetGlyphBitmapBox(&font.info, @intCast(glyph_id), ref_scale, ref_scale, &x0, &y0, &x1, &y1);
+        stb.stbtt_GetGlyphBitmapBox(&font.info, @intCast(glyph_id), px_scale, px_scale, &x0, &y0, &x1, &y1);
         const w: u32 = @intCast(@max(0, x1 - x0));
         const h: u32 = @intCast(@max(0, y1 - y0));
 
@@ -782,7 +807,7 @@ pub const FontAtlas = struct {
             const py = self.pen_y;
             // Rasterize directly into the atlas at (px, py) with the atlas stride.
             const dst = self.pixels.ptr + (py * ATLAS_WIDTH + px);
-            stb.stbtt_MakeGlyphBitmap(&font.info, dst, @intCast(w), @intCast(h), ATLAS_WIDTH, ref_scale, ref_scale, @intCast(glyph_id));
+            stb.stbtt_MakeGlyphBitmap(&font.info, dst, @intCast(w), @intCast(h), ATLAS_WIDTH, px_scale, px_scale, @intCast(glyph_id));
 
             glyph.s0 = @as(f32, @floatFromInt(px)) / ATLAS_WIDTH;
             glyph.t0 = @as(f32, @floatFromInt(py)) / ATLAS_HEIGHT;
@@ -1118,6 +1143,57 @@ test "FontAtlas: rasterizes a glyph by index into the atlas with sane bbox + UVs
     const g2 = atlas.getGlyph(0, gi, 64.0).?;
     try testing.expectEqual(g.s0, g2.s0);
     try testing.expectEqual(pen_before, atlas.pen_x);
+}
+
+test "FontAtlas: small text is rasterized at size × DPI scale and placed on whole pixels" {
+    // Guards against the "glyphs are a 64px bitmap minified per draw" misreading:
+    // a glyph drawn at N logical px on a scale-S display is its own native bitmap
+    // at round(N×S) device px, and its quad is pixel-aligned and texel-exact.
+    const ttf = try loadTestFont(testing.allocator);
+    defer testing.allocator.free(ttf);
+    var atlas = try FontAtlas.init(testing.allocator, ttf, 13.0);
+    defer atlas.deinit();
+
+    const gi = atlas.glyphIndex('l'); // a single vertical stem
+    try testing.expect(gi != 0);
+
+    const font = &atlas.fonts.items[0];
+    for ([_]f32{ 12.0, 13.0 }) |size| {
+        for ([_]f32{ 1.0, 1.5 }) |scale| {
+            const phys = @round(size * scale); // what the backend passes
+            const g = atlas.getGlyph(0, gi, phys).?;
+
+            // Rasterized AT that pixel size: bbox matches stb's at exactly `phys`.
+            const s = stb.stbtt_ScaleForMappingEmToPixels(&font.info, phys);
+            var x0: c_int = 0;
+            var y0: c_int = 0;
+            var x1: c_int = 0;
+            var y1: c_int = 0;
+            stb.stbtt_GetGlyphBitmapBox(&font.info, @intCast(gi), s, s, &x0, &y0, &x1, &y1);
+            try testing.expectEqual(@as(u32, @intCast(y1 - y0)), g.h);
+            try testing.expectEqual(@as(u32, @intCast(x1 - x0)), g.w);
+            try testing.expect(g.h <= @as(u32, @intFromFloat(phys)) + 2); // not a 64px bitmap
+
+            // Atlas footprint == bitmap size: sampled 1:1, no minification.
+            const tw = (g.s1 - g.s0) * ATLAS_WIDTH;
+            const th = (g.t1 - g.t0) * ATLAS_HEIGHT;
+            try testing.expectApproxEqAbs(@as(f32, @floatFromInt(g.w)), tw, 1e-3);
+            try testing.expectApproxEqAbs(@as(f32, @floatFromInt(g.h)), th, 1e-3);
+
+            // Placed on whole device pixels from a fractional pen / offsets.
+            const q = glyphQuadPhys(g, 37.41 * scale, 0.3 * scale, -0.2 * scale, @round(20.6 * scale));
+            try testing.expectEqual(@round(q.x0), q.x0);
+            try testing.expectEqual(@round(q.y0), q.y0);
+            try testing.expectEqual(@as(f32, @floatFromInt(g.w)), q.x1 - q.x0);
+            try testing.expectEqual(@as(f32, @floatFromInt(g.h)), q.y1 - q.y0);
+        }
+    }
+
+    // A DPI change re-rasterizes: 13px at 1.0 and at 1.5 are distinct entries.
+    const a = atlas.getGlyph(0, gi, 13.0).?;
+    const b = atlas.getGlyph(0, gi, @round(13.0 * 1.5)).?;
+    try testing.expect(b.h > a.h);
+    try testing.expect(a.s0 != b.s0 or a.t0 != b.t0);
 }
 
 test "FontAtlas: HarfBuzz measure agrees with shaped advances; wrapping splits lines" {

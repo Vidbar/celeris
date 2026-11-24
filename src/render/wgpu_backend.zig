@@ -1274,13 +1274,14 @@ pub const WgpuBackend = struct {
                             if (gl.w != 0 and gl.h != 0) {
                                 const inv_scale = 1.0 / be.scale;
                                 const is_icon = if (be.atlas.icon_font_index) |ifi| sg.font_index == ifi else false;
-                                const x0_phys = @round(pen_x_phys) + @round(sg.x_offset * be.scale) + gl.ox;
                                 // Icons sit on a baseline shifted so the em-box midline
                                 // lands on the slot center; text uses the text baseline.
                                 const base = if (is_icon) icon_baseline_phys else baseline_y_phys;
-                                const y0_phys = base - @round(sg.y_offset * be.scale) + gl.oy;
-                                const x1_phys = x0_phys + @as(f32, @floatFromInt(gl.w));
-                                const y1_phys = y0_phys + @as(f32, @floatFromInt(gl.h));
+                                const q = text.glyphQuadPhys(gl, pen_x_phys, sg.x_offset * be.scale, sg.y_offset * be.scale, base);
+                                const x0_phys = q.x0;
+                                const y0_phys = q.y0;
+                                const x1_phys = q.x1;
+                                const y1_phys = q.y1;
 
                                 const sh: f32 = if (is_icon) 0 else shear_k;
                                 const top_dx = (base - y0_phys) * sh * inv_scale;
