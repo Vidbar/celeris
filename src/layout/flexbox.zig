@@ -219,8 +219,14 @@ pub const LayoutEngine = struct {
         if (self.widthBound(node_id, .max_width, available_w, saved_content_sizing)) |mw| node.geometry.width = @min(node.geometry.width, mw);
         if (self.getMaxDim(node_id, .max_height, available_h)) |mh| node.geometry.height = @min(node.geometry.height, mh);
 
+        const pre_min_w = node.geometry.width;
+        const pre_min_h = node.geometry.height;
         if (self.widthBound(node_id, .min_width, available_w, saved_content_sizing)) |mw| node.geometry.width = @max(node.geometry.width, mw);
         if (self.getMinDim(node_id, .min_height, available_h)) |mh| node.geometry.height = @max(node.geometry.height, mh);
+        // Children were measured against the pre-min size; record that the box
+        // outgrew it so `place` re-measures them even if flex leaves it at `min`.
+        node.size_from_min = node.node_type == .box and
+            (node.geometry.width != pre_min_w or node.geometry.height != pre_min_h);
 
         node.layout_dirty = false;
         // Record the measured size so `place` can tell whether flex later resized
@@ -490,7 +496,9 @@ pub const LayoutEngine = struct {
             const width_is_hug = node.width_from_content and
                 !(in_row and (self.getFlexGrow(node_id) != 0 or
                     self.store.getLayout(node_id, .flex_basis) != null));
-            if (node.geometry.width != node.layout_w or
+            // `size_from_min`: the box is at its min, larger than what its children
+            // were measured against — same-as-measured doesn't mean they saw it.
+            if ((node.size_from_min and !width_is_hug) or node.geometry.width != node.layout_w or
                 (node.geometry.height != node.layout_h and !width_is_hug))
             {
                 self.measureChildrenPass(node_id);
@@ -2545,6 +2553,60 @@ test "Flexbox — percent children follow flex-grown parent size" {
     try std.testing.expectApproxEqAbs(@as(f32, 100), body.geometry.height, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 200), child.geometry.width, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 100), child.geometry.height, 0.01);
+}
+
+/// SplitPane-shaped fixture: a 566px container with two basis-0 panes split by
+/// grow `ratio`, the second floored at `min = 82`, holding one 100%×100% child.
+fn expectMinPaneChildFills(is_row: bool, ratio: f32, expect_pane: f32) !void {
+    var registry = reg.UIRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(std.testing.allocator);
+    defer store.deinit();
+    const root = try registry.createNode(.box);
+    const a = try registry.createNode(.box);
+    const p = try registry.createNode(.box);
+    const kid = try registry.createNode(.box);
+    registry.appendChild(root, a);
+    registry.appendChild(root, p);
+    registry.appendChild(p, kid);
+    for ([_]reg.NodeId{ root, a, p, kid }) |id| try store.registerNode(id);
+    const px = struct {
+        fn v(x: f32) props.PropValue {
+            return .{ .dimension = .{ .value = x, .unit = .px } };
+        }
+    }.v;
+    const full: props.PropValue = .{ .dimension = .{ .value = 100, .unit = .percent } };
+    try store.setLayout(root, .width, px(566));
+    try store.setLayout(root, .height, px(566));
+    try store.setLayout(root, .flex_direction, .{ .keyword = if (is_row) .row else .column });
+    try store.setLayout(a, .flex_grow, .{ .number = ratio });
+    try store.setLayout(a, .flex_basis, px(0));
+    try store.setLayout(p, .flex_grow, .{ .number = 1 - ratio });
+    try store.setLayout(p, .flex_basis, px(0));
+    try store.setLayout(p, if (is_row) .min_width else .min_height, px(82));
+    try store.setLayout(kid, .width, full);
+    try store.setLayout(kid, .height, full);
+
+    var engine = LayoutEngine.init(&registry, &store, null);
+    // Twice: the second (cached) solve must keep the same answer.
+    var pass: usize = 0;
+    while (pass < 2) : (pass += 1) {
+        engine.solve(root, 0, 0, 566, 566);
+        const pg = registry.getNode(p).?.geometry;
+        const kg = registry.getNode(kid).?.geometry;
+        const p_main = if (is_row) pg.width else pg.height;
+        const k_main = if (is_row) kg.width else kg.height;
+        try std.testing.expectApproxEqAbs(expect_pane, p_main, 0.01);
+        try std.testing.expectApproxEqAbs(p_main, k_main, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 566), if (is_row) kg.height else kg.width, 0.01);
+    }
+}
+
+test "Flexbox — 100% child of a pane held at its min fills the clamped size (SplitPane)" {
+    try expectMinPaneChildFills(false, 0.9, 82); // ratio share 56.6 < min → 82
+    try expectMinPaneChildFills(false, 0.6, 226.4);
+    try expectMinPaneChildFills(true, 0.9, 82);
+    try expectMinPaneChildFills(true, 0.6, 226.4);
 }
 
 test "Flexbox — height:100% child of a flex-grow COLUMN slot (no explicit dims) resolves" {

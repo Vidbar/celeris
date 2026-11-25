@@ -9,6 +9,14 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+- **Fix: `100%` children of a box held at its `min_width`/`min_height`.** When a
+  flex item's size came from its minimum (a `SplitPane` pane whose ratio share is
+  below `min`), its percentage-sized children — including a `mountReactiveFill`
+  anchor — resolved to 0 instead of the clamped size. Layout now re-measures the
+  children of a box its minimum enlarged.
+
 ## 0.11.0 — 2026-11-24
 
 No C-ABI change.

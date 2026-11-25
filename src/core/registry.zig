@@ -129,6 +129,11 @@ pub const Node = struct {
     /// narrower than the per-codepoint advances the wrap loop sums).
     layout_w: f32 = -1.0,
     layout_h: f32 = -1.0,
+    /// True when `min_width`/`min_height` raised this box above the size its
+    /// children were measured against in the measure pass. `layout_w/h` then hold
+    /// the clamped size, so "final == measured" no longer means the children saw
+    /// it: `place` must re-measure them (a `100%` child of a pane held at its min).
+    size_from_min: bool = false,
 
     /// Size observation (`on_resize`). `observe_resize` marks membership in
     /// `UIRegistry.resize_observers`; `resize_last_w/h` is the size last reported
