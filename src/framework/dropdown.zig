@@ -61,8 +61,9 @@ pub const Dropdown = struct {
     width: ?f32 = 150,
     /// Trigger height in px; option rows use it too (min 24).
     height: f32 = 32,
-    /// Font size of the trigger label and the option rows.
-    font_size: f32 = 14,
+    /// Font size of the trigger label and the option rows; `null` = the
+    /// theme's `typography.body_medium` (size and line height).
+    font_size: ?f32 = null,
     disabled: bool = false,
     /// Accessible name (aria-label). Without it the trigger's UIA Name is
     /// empty: its role, "dropdown", is not in `accessibility.nameFromContents`
@@ -93,8 +94,22 @@ pub const Dropdown = struct {
     backdrop_id: reg.NodeId = reg.NULL_NODE,
     theme: theme_mod.Theme = .{},
     bound: bool = false,
+    /// The selection signal the visuals effect subscribed to. A rebuild that
+    /// passes a different `.selected` recreates the effect (`bindVisuals`
+    /// re-applies untracked, so it would keep following the old one).
+    bound_sel: ?*signals.Signal(usize) = null,
+    allocator: std.mem.Allocator = undefined,
+
+    /// Text style of the label and rows: `font_size` over the theme's
+    /// `body_medium` (whose line height is kept either way).
+    fn textStyle(self: *const Dropdown) theme_mod.TextStyle {
+        var st = self.theme.typography.body_medium;
+        if (self.font_size) |s| st.size = s;
+        return st;
+    }
 
     pub fn onMount(self: *Dropdown, allocator: std.mem.Allocator) void {
+        self.allocator = allocator;
         self.is_open = signals.Signal(bool).init(allocator, false);
         self.selected_state = signals.Signal(usize).init(allocator, self.initial_selected);
         self.hovered = signals.Signal(bool).init(allocator, false);
@@ -117,9 +132,10 @@ pub const Dropdown = struct {
     /// side, 8 px gap, arrow, 1 px borders). `measure` is `b.measure`; headless
     /// builds fall back to a per-character estimate.
     fn fitWidth(self: *const Dropdown, measure: ?builder_mod.TextMeasure) f32 {
+        const size = self.textStyle().size;
         var widest: f32 = 0;
         for (self.options) |opt| {
-            const w = if (measure) |m| m.width(opt, self.font_size) else @as(f32, @floatFromInt(opt.len)) * self.font_size * 0.6;
+            const w = if (measure) |m| m.width(opt, size) else @as(f32, @floatFromInt(opt.len)) * size * 0.6;
             widest = @max(widest, w);
         }
         const arrow = if (measure) |m| m.width("v", 12) else 7;
@@ -255,6 +271,12 @@ pub const Dropdown = struct {
 
         b.close(); // root
 
+        if (self.bound and self.bound_sel != self.selectedSig()) {
+            self.scope.deinit();
+            self.scope = signals.Scope.init(self.allocator);
+            self.bound = false;
+        }
+        self.bound_sel = self.selectedSig();
         try component.bindVisuals(self, &self.scope, &self.bound, updateVisuals);
     }
 
@@ -307,7 +329,9 @@ const TriggerLabel = struct {
         const sel0 = self.dd.effective(self.dd.selectedSig().peek());
         const cur = if (self.dd.options.len > 0) self.dd.options[sel0] else "Select...";
         self.dd.label_id = try b.addText(cur);
-        try b.fontSize(self.dd.label_id, self.dd.font_size);
+        const st = self.dd.textStyle();
+        try b.fontSize(self.dd.label_id, st.size);
+        if (st.line_height) |lh| try b.store.setStyle(self.dd.label_id, .line_height, .{ .number = lh });
         try b.textColor(self.dd.label_id, t.text.r, t.text.g, t.text.b);
         self.dd.arrow_id = try b.addText("v");
         try b.fontSize(self.dd.arrow_id, 12);
@@ -332,7 +356,7 @@ const Options = struct {
                 .@"align" = .center,
                 .on_click = ctx.handler(dd, Dropdown.onOptionClick),
             }, .{
-                Text{ .content = opt, .color = component.rgb(t.text.r, t.text.g, t.text.b), .size = dd.font_size },
+                Text{ .content = opt, .color = component.rgb(t.text.r, t.text.g, t.text.b), .style = dd.textStyle() },
             });
             try dd.item_ids.append(item);
         }
@@ -654,4 +678,53 @@ test "Dropdown width = null fits the WIDEST option, so menu rows fit and the tri
     e.solve(m.root, 800, 600);
     try testing.expectApproxEqAbs(w0, e.geom(m.dd.trigger_id).width, 0.5);
     try testing.expectApproxEqAbs(w0, e.geom(m.dd.menu_id).width, 0.5);
+}
+
+test "Dropdown text follows the theme's body_medium unless font_size is set" {
+    var e = ts.Harness.init(testing.allocator);
+    defer e.deinit();
+    e.wire();
+    const m = try mountInRow(&e, .{ .options = &OPTS });
+    const want = dark.typography.body_medium;
+    try testing.expectApproxEqAbs(want.size, e.store.getStyle(m.dd.label_id, .font_size).?.dimension.value, 0.001);
+    const row_text = e.registry.getNode(m.dd.item_ids.items[0]).?.first_child;
+    try testing.expectApproxEqAbs(want.size, e.store.getStyle(row_text, .font_size).?.dimension.value, 0.001);
+    if (want.line_height) |lh| try testing.expectApproxEqAbs(lh, e.store.getStyle(row_text, .line_height).?.number, 0.001);
+
+    var e2 = ts.Harness.init(testing.allocator);
+    defer e2.deinit();
+    e2.wire();
+    const m2 = try mountInRow(&e2, .{ .options = &OPTS, .font_size = 11 });
+    try testing.expectApproxEqAbs(@as(f32, 11), e2.store.getStyle(m2.dd.label_id, .font_size).?.dimension.value, 0.001);
+}
+
+test "BUG: a rebuild that swaps the `selected` signal kept following the old one" {
+    // Review finding: `bindVisuals` re-applies untracked on rebuild, so the
+    // effect stayed subscribed to the first signal.
+    const a = testing.allocator;
+    var e = ts.Harness.init(a);
+    defer e.deinit();
+    e.wire();
+    var first = signals.Signal(usize).init(a, 0);
+    defer first.deinit();
+    var second = signals.Signal(usize).init(a, 1);
+    defer second.deinit();
+
+    const dd = try mountDropdown(&e.registry, &e.store, &e.router, &e.mounts, .{ .options = &OPTS, .selected = &first });
+    try testing.expectEqualStrings("One", e.store.getTextContent(dd.label_id).?);
+
+    // Simulate the host's re-mount with new props: same instance, new pointer.
+    dd.selected = &second;
+    var b = component.UIBuilder.init(&e.registry, &e.store);
+    b.theme = dark;
+    var ctx = BuildContext{ .builder = &b, .router = &e.router, .mounts = &e.mounts };
+    _ = try b.openNodeKeyed(.box, null);
+    try dd.build(&ctx);
+    b.close();
+    try testing.expectEqualStrings("Two", e.store.getTextContent(dd.label_id).?);
+
+    second.set(2);
+    try testing.expectEqualStrings("Three", e.store.getTextContent(dd.label_id).?);
+    first.set(0); // the old signal no longer drives it
+    try testing.expectEqualStrings("Three", e.store.getTextContent(dd.label_id).?);
 }

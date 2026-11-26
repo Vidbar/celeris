@@ -49,8 +49,8 @@ fn rowHeight(it: MenuItem) f32 {
 }
 
 /// Mark-column glyph: a bullet for radio items, a check for check items.
-fn markGlyph(it: MenuItem) []const u8 {
-    if (!it.isChecked()) return "    ";
+fn markGlyph(it: MenuItem, checked: bool) []const u8 {
+    if (!checked) return "    ";
     return if (it.radio != null) "\u{2022}  " else "\u{2713}  ";
 }
 const PANEL_W: f32 = 200;
@@ -108,10 +108,24 @@ pub const MenuItem = struct {
     /// Radio binding (see `MenuRadio`). Overrides `checked`/`checked_signal`.
     radio: ?MenuRadio = null,
 
+    /// Build-time read: `peek()`, so `Menu.build` running inside the host's
+    /// build effect does not subscribe the host's tree to the group/signal
+    /// (every pick would rebuild it). `updateVisuals` uses the tracked
+    /// `isChecked` instead.
+    fn isCheckedUntracked(self: MenuItem) bool {
+        if (self.radio) |r| return r.group.peek() == r.value;
+        if (self.checked_signal) |s| return s.peek();
+        return self.checked;
+    }
+
     fn isChecked(self: MenuItem) bool {
         if (self.radio) |r| return r.group.get() == r.value;
         if (self.checked_signal) |s| return s.get();
         return self.checked;
+    }
+    fn isEnabledUntracked(self: MenuItem) bool {
+        if (self.enabled_signal) |s| return s.peek();
+        return self.enabled;
     }
     fn isEnabled(self: MenuItem) bool {
         if (self.enabled_signal) |s| return s.get();
@@ -483,17 +497,19 @@ pub const Menu = struct {
     fn fireSelect(self: *Menu, idx: usize, origin: events.FocusOrigin) void {
         const r = self.rootMenu();
         const h = r.on_select;
-        // A radio item commits its value first, so `on_select` (and anything
-        // observing the group) already sees the new selection.
-        if (self.items.items[idx].radio) |rad| {
-            if (rad.group.peek() != rad.value) rad.group.set(rad.value);
-        }
+        const radio = self.items.items[idx].radio;
         const ev: events.Event = .{
             .name = "select",
             .id = self.items.items[idx].action_id,
             .node_id = if (idx < self.row_ids.items.len) self.row_ids.items[idx] else 0,
         };
         r.close();
+        // A radio item commits its value after the chain is closed (effects on
+        // the group run synchronously and may reopen or reload the menu) and
+        // before `on_select`, so the handler already sees the new selection.
+        if (radio) |rad| {
+            if (rad.group.peek() != rad.value) rad.group.set(rad.value);
+        }
         if (h) |handler| handler.call(handler.ptr, ev);
         if (origin == .pointer and r.isOpen()) r.suppress_dismiss = true;
     }
@@ -717,7 +733,7 @@ pub const Menu = struct {
             // (`hitTest` in uia.zig walks by geometry/z-index, never by this
             // modifier, so an unclickable row being "clickable-registered"
             // doesn't change what a click or a11y point-navigation hits).
-            const build_enabled = it.isEnabled();
+            const build_enabled = it.isEnabledUntracked();
             if (it.submenu != null or (it.action_id.len == 0 and it.radio != null)) {
                 // Radio rows may carry no action id (the host reads the group).
                 try clickableAuto(b, row);
@@ -749,12 +765,12 @@ pub const Menu = struct {
             // every time it's toggled, which a screen reader doesn't expect.
             // Live updates for `checked_signal` items mirror this in
             // `updateVisuals` below.
-            try b.setChecked(row, it.isChecked());
+            try b.setChecked(row, it.isCheckedUntracked());
 
             // Checkmark column (kept even when unchecked so labels align — purely
             // visual now that `checked` is exposed as state above). Content is
             // re-set live by `updateVisuals` when `checked_signal` changes.
-            const check = try b.addText(markGlyph(it));
+            const check = try b.addText(markGlyph(it, it.isCheckedUntracked()));
             try self.check_ids.append(check);
             try b.fontSize(check, 14);
             try b.textColor(check, self.theme.text.r, self.theme.text.g, self.theme.text.b);
@@ -767,7 +783,7 @@ pub const Menu = struct {
             try b.flexGrow(label, 1);
             // Disabled items are dimmed; color re-set live by `updateVisuals`
             // when `enabled_signal` changes.
-            if (it.isEnabled()) {
+            if (build_enabled) {
                 try b.textColor(label, self.theme.text.r, self.theme.text.g, self.theme.text.b);
             } else {
                 const disabled_color = themeOr(self.theme.text_disabled, .{ .r = 128, .g = 128, .b = 128 });
@@ -896,6 +912,7 @@ pub const Menu = struct {
         // no rebuild involved.
         for (self.items.items, 0..) |it, i| {
             if (it.kind != .item) continue;
+            if (i >= self.row_ids.items.len or i >= self.check_ids.items.len or i >= self.label_ids.items.len) break; // items reloaded (clearItems), rows not rebuilt yet
             const row_id = self.row_ids.items[i];
             const on = (open and hi == @as(i32, @intCast(i)));
             const a: f32 = if (on) 110.0 / 255.0 else 0.0;
@@ -910,7 +927,7 @@ pub const Menu = struct {
                 const checked = it.isChecked(); // tracked `.get()` on the signal/group
                 const check_id = self.check_ids.items[i];
                 if (check_id != reg.NULL_NODE) {
-                    if (store.stringAllocator().dupe(u8, markGlyph(it))) |s| {
+                    if (store.stringAllocator().dupe(u8, markGlyph(it, checked))) |s| {
                         store.setTextContent(check_id, s);
                     } else |_| {}
                 }
@@ -2425,4 +2442,96 @@ test "Menu.popupBelow docks the panel under the anchor's resolved geometry" {
     const p = env.geom(m.panel_id);
     try testing.expectApproxEqAbs(a.x, p.x, 0.5);
     try testing.expectApproxEqAbs(a.y + a.height + 2, p.y, 0.5);
+}
+
+test "BUG: reloading items (clearItems + addRadio) then writing the group indexed stale rows out of bounds" {
+    // Review finding: `updateVisuals` walked `items` but indexed `row_ids`,
+    // which keep the OLD (shorter) list until the next rebuild — any tracked
+    // write in between (a radio group, `highlighted`) ran it mismatched.
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var sel = signals.Signal(usize).init(testing.allocator, 0);
+    defer sel.deinit();
+    const m = try buildSelectorMenu(&env, &sel);
+    defer m.deinit();
+
+    m.clearItems();
+    try m.addHeader("More");
+    for (0..8) |i| try m.addRadio("x", "", &sel, i);
+    sel.set(5); // re-runs updateVisuals before any rebuild: must not panic
+    try testing.expectEqual(@as(usize, 5), sel.peek());
+}
+
+test "Menu.build inside a host build effect does not subscribe the host to radio/check/enabled signals" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var sel = signals.Signal(usize).init(testing.allocator, 0);
+    defer sel.deinit();
+    var chk = signals.Signal(bool).init(testing.allocator, false);
+    defer chk.deinit();
+    var en = signals.Signal(bool).init(testing.allocator, true);
+    defer en.deinit();
+
+    const m = try Menu.init(testing.allocator, "tracked");
+    defer m.deinit();
+    try m.addRadio("A", "", &sel, 0);
+    try m.addRadio("B", "", &sel, 1);
+    try m.addItemEx(.{ .label = "C", .action_id = "c", .checked_signal = &chk, .enabled_signal = &en });
+
+    const BuildHost = struct {
+        env: *ts.Harness,
+        menu: *Menu,
+        runs: u32 = 0,
+        fn build(self: *@This()) void {
+            self.runs += 1;
+            var bld = component.UIBuilder.init(&self.env.registry, &self.env.store);
+            bld.theme = testTheme();
+            var ctx = component.BuildContext.initWithRouter(&bld, &self.env.router);
+            _ = bld.openBox() catch unreachable;
+            self.menu.build(&ctx) catch unreachable;
+            bld.close();
+        }
+    };
+    var host = BuildHost{ .env = &env, .menu = m };
+    var scope = signals.Scope.init(testing.allocator);
+    defer scope.deinit();
+    _ = try scope.createEffect(&host, BuildHost.build);
+    try testing.expectEqual(@as(u32, 1), host.runs);
+
+    sel.set(1);
+    chk.set(true);
+    en.set(false);
+    try testing.expectEqual(@as(u32, 1), host.runs);
+    // ...while the menu's own effect still repaints live.
+    try testing.expectEqualStrings("\u{2022}  ", env.store.getTextContent(m.check_ids.items[1]).?);
+}
+
+test "Menu radio: the chain is closed before the group is written (group effects see a closed menu)" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var sel = signals.Signal(usize).init(testing.allocator, 0);
+    defer sel.deinit();
+    const m = try buildSelectorMenu(&env, &sel);
+    defer m.deinit();
+
+    const Watch = struct {
+        menu: *Menu,
+        sel: *signals.Signal(usize),
+        open_when_changed: ?bool = null,
+        fn run(self: *@This()) void {
+            if (self.sel.get() == 0) return;
+            self.open_when_changed = self.menu.isOpen();
+        }
+    };
+    var w = Watch{ .menu = m, .sel = &sel };
+    var scope = signals.Scope.init(testing.allocator);
+    defer scope.deinit();
+    _ = try scope.createEffect(&w, Watch.run);
+
+    m.popup(0, 0, .pointer);
+    clickRow(&env, m, 2); // "Tests"
+    try testing.expectEqual(@as(?bool, false), w.open_when_changed);
 }

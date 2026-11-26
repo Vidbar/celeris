@@ -20,7 +20,7 @@ No C-ABI change.
   `.initial_selected`. The shown index is clamped to the options. New `.width`
   (default 150; `null` = fit the widest option, so the menu rows fit and the
   trigger keeps one width), `.height` (default 32, also sizes the
-  option rows, min 24) and `.font_size` (default 14); the menu docks under the
+  option rows, min 24) and `.font_size` (default: the theme's `body_medium`); the menu docks under the
   trigger at any height.
 - **BREAKING: `Dropdown.on_change` event.** It now fires only when a user pick
   changes the selection (re-picking the current option no longer fires), with
