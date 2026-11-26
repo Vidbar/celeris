@@ -37,10 +37,37 @@ fn themeOr(token: theme_mod.Color, fallback: theme_mod.Color) theme_mod.Color {
 
 const ROW_H: f32 = 28;
 const SEP_H: f32 = 9; // 1px line + 4px margin top/bottom
+const HEADER_H: f32 = 24;
+const CHECK_COL: f32 = 24;
+
+fn rowHeight(it: MenuItem) f32 {
+    return switch (it.kind) {
+        .separator => SEP_H,
+        .header => HEADER_H,
+        .item => ROW_H,
+    };
+}
+
+/// Mark-column glyph: a bullet for radio items, a check for check items.
+fn markGlyph(it: MenuItem) []const u8 {
+    if (!it.isChecked()) return "    ";
+    return if (it.radio != null) "\u{2022}  " else "\u{2713}  ";
+}
 const PANEL_W: f32 = 200;
 const PAD_Y: f32 = 4;
 
-pub const MenuItemKind = enum { item, separator };
+/// `header`: a dimmed, non-interactive group title (keyboard nav skips it, like
+/// a separator). Add with `addHeader`.
+pub const MenuItemKind = enum { item, separator, header };
+
+/// Binds an item to one value of a caller-owned exclusive group — the menu
+/// equivalent of a radio button (WinUI `RadioMenuFlyoutItem`, Qt exclusive
+/// `QActionGroup`). The row shows a bullet while `group == value`, live (no
+/// rebuild); choosing it writes `value` into `group` before `on_select` fires.
+pub const MenuRadio = struct {
+    group: *signals.Signal(usize),
+    value: usize,
+};
 
 pub const MenuItem = struct {
     /// Borrowed — must outlive the menu (normally a string literal or
@@ -78,8 +105,11 @@ pub const MenuItem = struct {
     /// accelerator; wire that separately via `router.setAccelerators`
     /// (`events.Accelerators`). Empty string (default) paints nothing.
     shortcut: []const u8 = "",
+    /// Radio binding (see `MenuRadio`). Overrides `checked`/`checked_signal`.
+    radio: ?MenuRadio = null,
 
     fn isChecked(self: MenuItem) bool {
+        if (self.radio) |r| return r.group.get() == r.value;
         if (self.checked_signal) |s| return s.get();
         return self.checked;
     }
@@ -204,6 +234,15 @@ pub const Menu = struct {
     pub fn addSeparator(self: *Menu) !void {
         try self.items.append(.{ .kind = .separator, .enabled = false });
     }
+    /// Adds a dimmed, non-selectable group title (e.g. "Recent").
+    pub fn addHeader(self: *Menu, label: []const u8) !void {
+        try self.items.append(.{ .kind = .header, .label = label, .enabled = false });
+    }
+    /// Adds an item of an exclusive group (see `MenuRadio`). `action_id` may be
+    /// empty when the host only reads `group`.
+    pub fn addRadio(self: *Menu, label: []const u8, action_id: []const u8, group: *signals.Signal(usize), value: usize) !void {
+        try self.items.append(.{ .label = label, .action_id = action_id, .radio = .{ .group = group, .value = value } });
+    }
 
     /// Empties `items` (e.g. to reload a "Recent files" submenu). Frees nothing —
     /// `label`/`action_id` stay host-owned, exactly as when adding items — and
@@ -280,6 +319,25 @@ pub const Menu = struct {
         self.popup(lx, ly, origin);
     }
 
+    /// Opens the menu docked under `anchor` (left edges aligned, `gap` px below
+    /// its bottom edge), from the anchor's resolved geometry — what a
+    /// menu button / split button / toolbar selector does. Call it from the
+    /// anchor's click handler (layout has run by then); pass `.keyboard` when
+    /// Enter/Space opened it and highlight `firstEnabled()` yourself if wanted.
+    /// Before the anchor has been laid out it opens at the containing block's
+    /// origin.
+    pub fn popupBelow(self: *Menu, anchor: reg.NodeId, gap: f32, origin: events.FocusOrigin) void {
+        if (self.store) |st| {
+            if (st.registry) |rg| {
+                if (rg.getNode(anchor)) |n| {
+                    self.popupWindow(n.geometry.x, n.geometry.y + n.geometry.height + gap, origin);
+                    return;
+                }
+            }
+        }
+        self.popup(0, 0, origin);
+    }
+
     /// Closes this menu and, recursively, any open submenu beneath it. Pops the
     /// focus scope pushed by `popup` (restoring the focus held before opening).
     pub fn close(self: *Menu) void {
@@ -323,7 +381,7 @@ pub const Menu = struct {
         var y: f32 = PAD_Y;
         for (self.items.items, 0..) |it, i| {
             if (i == idx) break;
-            y += if (it.kind == .separator) SEP_H else ROW_H;
+            y += rowHeight(it);
         }
         return y;
     }
@@ -425,6 +483,11 @@ pub const Menu = struct {
     fn fireSelect(self: *Menu, idx: usize, origin: events.FocusOrigin) void {
         const r = self.rootMenu();
         const h = r.on_select;
+        // A radio item commits its value first, so `on_select` (and anything
+        // observing the group) already sees the new selection.
+        if (self.items.items[idx].radio) |rad| {
+            if (rad.group.peek() != rad.value) rad.group.set(rad.value);
+        }
         const ev: events.Event = .{
             .name = "select",
             .id = self.items.items[idx].action_id,
@@ -611,6 +674,26 @@ pub const Menu = struct {
                 b.close();
                 continue;
             }
+            if (it.kind == .header) {
+                // Group title: no hit modifiers, no handler, skipped by keyboard
+                // nav (`kind != .item`). Indented to the label column.
+                const hdr = try b.openNodeKeyed(.box, null);
+                try self.row_ids.append(hdr);
+                try self.check_ids.append(reg.NULL_NODE);
+                try self.label_ids.append(reg.NULL_NODE);
+                try b.height(hdr, HEADER_H, .px);
+                try b.padding(hdr, 0, 12, 0, 12 + CHECK_COL);
+                try b.flexRow(hdr);
+                try b.alignItems(hdr, .center);
+                try b.role(hdr, "heading");
+                try b.ariaLabel(hdr, it.label);
+                const ht = try b.addText(it.label);
+                try b.fontSize(ht, 12);
+                const hc = themeOr(self.theme.text_secondary, .{ .r = 140, .g = 140, .b = 140 });
+                try b.textColor(ht, hc.r, hc.g, hc.b);
+                b.close();
+                continue;
+            }
 
             const row = try b.openNodeKeyed(.box, null);
             try self.row_ids.append(row);
@@ -635,14 +718,15 @@ pub const Menu = struct {
             // modifier, so an unclickable row being "clickable-registered"
             // doesn't change what a click or a11y point-navigation hits).
             const build_enabled = it.isEnabled();
-            if (it.submenu != null) {
+            if (it.submenu != null or (it.action_id.len == 0 and it.radio != null)) {
+                // Radio rows may carry no action id (the host reads the group).
                 try clickableAuto(b, row);
                 try hoverableAuto(b, row);
             } else if (it.action_id.len > 0) {
                 try b.clickable(row, it.action_id);
                 try b.hoverable(row, it.action_id);
             }
-            if (it.kind == .item and (it.submenu != null or it.action_id.len > 0)) {
+            if (it.kind == .item and (it.submenu != null or it.action_id.len > 0 or it.radio != null)) {
                 if (ctx.router) |r| {
                     const h = ctx.handler(self, onRowEvent);
                     try r.onNode(row, .click, h);
@@ -670,7 +754,7 @@ pub const Menu = struct {
             // Checkmark column (kept even when unchecked so labels align — purely
             // visual now that `checked` is exposed as state above). Content is
             // re-set live by `updateVisuals` when `checked_signal` changes.
-            const check = try b.addText(if (it.isChecked()) "\u{2713}  " else "    ");
+            const check = try b.addText(markGlyph(it));
             try self.check_ids.append(check);
             try b.fontSize(check, 14);
             try b.textColor(check, self.theme.text.r, self.theme.text.g, self.theme.text.b);
@@ -730,7 +814,7 @@ pub const Menu = struct {
     fn contentHeight(self: *Menu) f32 {
         var h: f32 = PAD_Y * 2;
         for (self.items.items) |it| {
-            h += if (it.kind == .separator) SEP_H else ROW_H;
+            h += rowHeight(it);
         }
         return h;
     }
@@ -741,12 +825,17 @@ pub const Menu = struct {
     /// per-character estimate (good enough for a lower-bound sanity check, not
     /// pixel-accurate).
     fn contentWidth(self: *Menu, measure: ?builder_mod.TextMeasure) f32 {
-        const check_col: f32 = 24; // reserved for the "✓  " glyph column
+        const check_col: f32 = CHECK_COL; // reserved for the "✓  " glyph column
         const h_padding: f32 = 24; // row's 12px left + 12px right padding
         const arrow_w: f32 = 20; // "  ▸" submenu indicator
         const shortcut_gap: f32 = 16; // space between label and shortcut chord
         var w: f32 = PANEL_W;
         for (self.items.items) |it| {
+            if (it.kind == .header) {
+                const hw = if (measure) |m| m.width(it.label, 12) else @as(f32, @floatFromInt(it.label.len)) * 7.0;
+                w = @max(w, check_col + hw + h_padding);
+                continue;
+            }
             if (it.kind != .item) continue;
             const label_w = if (measure) |m|
                 m.width(it.label, 14)
@@ -817,11 +906,11 @@ pub const Menu = struct {
                 .a = a,
             } }) catch {};
 
-            if (it.checked_signal) |sig| {
-                const checked = sig.get();
+            if (it.checked_signal != null or it.radio != null) {
+                const checked = it.isChecked(); // tracked `.get()` on the signal/group
                 const check_id = self.check_ids.items[i];
                 if (check_id != reg.NULL_NODE) {
-                    if (store.stringAllocator().dupe(u8, if (checked) "\u{2713}  " else "    ")) |s| {
+                    if (store.stringAllocator().dupe(u8, markGlyph(it))) |s| {
                         store.setTextContent(check_id, s);
                     } else |_| {}
                 }
@@ -2211,4 +2300,129 @@ test "Menu.popupWindow maps window coords into the menu's containing block" {
     try testing.expectApproxEqAbs(@as(f32, 50), env.store.getLayout(m.panel_id, .top).?.dimension.value, 0.001);
     try testing.expectApproxEqAbs(@as(f32, 120), env.geom(m.panel_id).x, 0.5);
     try testing.expectApproxEqAbs(@as(f32, 90), env.geom(m.panel_id).y, 0.5);
+}
+
+// ── Radio items, headers, anchored popup (the "selector with actions" parts) ──
+
+/// Run-configuration picker: header, three radio items bound to `sel`, a
+/// separator and one command row — the composition docs/FRAMEWORK_API.md
+/// documents as "Selector with actions".
+fn buildSelectorMenu(env: *ts.Harness, sel: *signals.Signal(usize)) !*Menu {
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+    const m = try Menu.init(testing.allocator, "runcfg");
+    try m.addHeader("Configurations");
+    try m.addRadio("App", "", sel, 0);
+    try m.addRadio("Tests", "", sel, 1);
+    try m.addRadio("Bench", "", sel, 2);
+    try m.addSeparator();
+    try m.addItem("Edit Configurations...", "edit_configs");
+    const app_root = try bld.openBox();
+    try m.build(&ctx);
+    bld.close();
+    _ = app_root;
+    return m;
+}
+
+test "Menu radio: bullet follows the group live; choosing writes the group, then on_select" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var sel = signals.Signal(usize).init(testing.allocator, 2);
+    defer sel.deinit();
+    const m = try buildSelectorMenu(&env, &sel);
+    defer m.deinit();
+    Probe.calls = 0;
+    m.on_select = Probe.handler;
+
+    try testing.expectEqualStrings("    ", env.store.getTextContent(m.check_ids.items[1]).?);
+    try testing.expectEqualStrings("\u{2022}  ", env.store.getTextContent(m.check_ids.items[3]).?);
+
+    // A programmatic write moves the bullet with no rebuild.
+    sel.set(0);
+    try testing.expectEqualStrings("\u{2022}  ", env.store.getTextContent(m.check_ids.items[1]).?);
+    try testing.expectEqualStrings("    ", env.store.getTextContent(m.check_ids.items[3]).?);
+    try testing.expectEqual(true, env.store.getModifier(m.row_ids.items[1], .checked).?.boolean);
+
+    m.popup(0, 0, .pointer);
+    clickRow(&env, m, 2); // "Tests" (row 0 is the header)
+    try testing.expectEqual(@as(usize, 1), sel.peek());
+    try testing.expectEqual(@as(u32, 1), Probe.calls);
+    try testing.expect(!m.isOpen());
+}
+
+test "Menu action row next to radios: fires its own id, closes, leaves the selection alone" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var sel = signals.Signal(usize).init(testing.allocator, 2);
+    defer sel.deinit();
+    const m = try buildSelectorMenu(&env, &sel);
+    defer m.deinit();
+    Probe.calls = 0;
+    m.on_select = Probe.handler;
+
+    m.popup(0, 0, .pointer);
+    clickRow(&env, m, 5);
+    try testing.expectEqual(@as(u32, 1), Probe.calls);
+    try testing.expectEqualStrings("edit_configs", Probe.last[0..Probe.last_len]);
+    try testing.expect(!m.isOpen());
+    try testing.expectEqual(@as(usize, 2), sel.peek());
+}
+
+test "Menu header: not clickable, skipped by keyboard nav, counted in panel height" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var sel = signals.Signal(usize).init(testing.allocator, 0);
+    defer sel.deinit();
+    const m = try buildSelectorMenu(&env, &sel);
+    defer m.deinit();
+    Probe.calls = 0;
+    m.on_select = Probe.handler;
+
+    m.popup(0, 0, .pointer);
+    clickRow(&env, m, 0);
+    try testing.expectEqual(@as(u32, 0), Probe.calls);
+    try testing.expect(m.isOpen());
+
+    try testing.expectEqual(@as(i32, 1), m.firstEnabled());
+    m.highlighted.set(1);
+    m.moveHighlight(-1); // wraps past the header to the last item
+    try testing.expectEqual(@as(i32, 5), m.highlighted.peek());
+
+    const want = PAD_Y * 2 + HEADER_H + 4 * ROW_H + SEP_H;
+    try testing.expectApproxEqAbs(want, env.store.getLayout(m.panel_id, .height).?.dimension.value, 0.001);
+}
+
+test "Menu.popupBelow docks the panel under the anchor's resolved geometry" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+    const m = try Menu.init(testing.allocator, "anchored");
+    defer m.deinit();
+    try m.addItem("One", "one");
+
+    const root = try bld.openBox();
+    try bld.width(root, 800, .px);
+    try bld.height(root, 600, .px);
+    try bld.padding(root, 40, 0, 0, 60);
+    const anchor = try bld.openBox();
+    try bld.width(anchor, 120, .px);
+    try bld.height(anchor, 26, .px);
+    bld.close();
+    try m.build(&ctx);
+    bld.close();
+    env.solve(root, 800, 600);
+
+    m.popupBelow(anchor, 2, .pointer);
+    env.solve(root, 800, 600);
+    const a = env.geom(anchor);
+    const p = env.geom(m.panel_id);
+    try testing.expectApproxEqAbs(a.x, p.x, 0.5);
+    try testing.expectApproxEqAbs(a.y + a.height + 2, p.y, 0.5);
 }

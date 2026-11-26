@@ -9,6 +9,33 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No C-ABI change.
+
+- **`Dropdown`: lifted selection, index in `on_change`, configurable size.**
+  `.selected: ?*Signal(usize)` follows the lifted-state convention (`Tabs.active`):
+  the app can write it at any time and the trigger follows without a rebuild; a
+  user pick writes it back. Without it, the internal state is seeded from
+  `.initial_selected`. The shown index is clamped to the options. New `.width`
+  (default 150, `null` = hug the label), `.height` (default 32, also sizes the
+  option rows, min 24) and `.font_size` (default 14); the menu docks under the
+  trigger at any height.
+- **BREAKING: `Dropdown.on_change` event.** It now fires only when a user pick
+  changes the selection (re-picking the current option no longer fires), with
+  `ev.name = "change"`, `ev.item_id` = the new index and `ev.node_id` = the
+  trigger. Before, it forwarded the raw click/key event with no index. The
+  internal `selected` field is now `selected_state`; read the selection through
+  your own `.selected` signal.
+- **`Menu`: radio items, headers, anchored popup.** `addRadio(label, id, &group,
+  value)` binds a row to a caller-owned `Signal(usize)` (bullet shown live,
+  choosing writes the group, then `on_select`). `addHeader(label)` adds a
+  non-selectable group title (`MenuItemKind.header`). `popupBelow(node, gap,
+  origin)` opens the menu under a node's resolved geometry.
+- **Docs:** recipe "Selector with actions" (Button + Menu with radio items, a
+  separator and command rows) in `docs/FRAMEWORK_API.md`, for pickers that also
+  run commands such as "Edit Configurations…".
+
 ## 0.11.1 — 2026-11-24
 
 No C-ABI change.

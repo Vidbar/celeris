@@ -386,6 +386,8 @@ This is the same mechanism across the widget suite:
 | Widget | Lifted prop | Type | Use |
 |--------|-------------|------|-----|
 | `Tabs` | `.active` | `*Signal(usize)` | switch tabs from app code / know the active tab |
+| `Dropdown` | `.selected` | `*Signal(usize)` | set the shown option at any time (e.g. after reloading `.options`); a user pick writes it back. Shown index is clamped to `options.len - 1`. `.on_change` reports a user pick with `ev.item_id` = the index. Size with `.width` (`null` = hug), `.height`, `.font_size` |
+| `Menu` radio items | `MenuItem.radio.group` | `*Signal(usize)` | exclusive choice inside a menu (`addRadio`); the bullet follows the group live |
 | `TreeView` | `.selected`, `.hovered` | `*Signal(?usize)` | react to / drive selection & hover by node id |
 | `SplitPane` | `.ratio` | `*Signal(f32)` | set or animate the split |
 | `SplitPane` | `.left.collapsed`, `.right.collapsed` | `*Signal(bool)` | collapse / reopen a pane from a command (see *SplitPane sizing*) |
@@ -765,6 +767,69 @@ A selection is a one-shot command, not state, so there is no lifted
 `?*Signal` for it: choosing the same item twice must run the command twice.
 State that a menu *shows* (checkmarks, enabled items) is lifted as usual, through
 `checked_signal` / `enabled_signal`.
+
+**Radio items, headers, anchoring.**
+
+- `addRadio(label, action_id, &group, value)` adds a row of an exclusive group
+  (a caller-owned `Signal(usize)`), like WinUI's `RadioMenuFlyoutItem` or a Qt
+  exclusive `QActionGroup`. It shows a bullet while `group == value`, live.
+  Choosing it writes `value` into `group`, then fires `on_select` as any item does
+  (`action_id` may be empty if you only read the group).
+- `addHeader(label)` adds a dimmed group title. It is not clickable and keyboard
+  navigation skips it, like a separator.
+- `popupBelow(anchor_node, gap, origin)` opens the menu docked under a node's
+  resolved geometry (left edges aligned). Use it from a button's click handler
+  for a menu button, split button or toolbar selector.
+
+### Recipe: selector with actions ("Edit Configurations…")
+
+`Dropdown` is a value picker: every row is a value. When a picker also runs
+commands, or groups its values under headers, compose a `Button` with a `Menu`
+instead. This is the same split WinUI (`ComboBox` vs `DropDownButton` +
+`MenuFlyout`), Qt (`QComboBox` vs `QToolButton` + `QMenu`) and Flutter
+(`DropdownButton` vs `MenuAnchor`) make.
+
+```zig
+// App state (setup, once):
+//   self.config = fw.signals.Signal(usize).init(gpa, 0);
+//   self.menu = try fw.menu.Menu.init(gpa, "run_configs");
+//   try self.menu.addHeader("Configurations");
+//   for (self.config_names, 0..) |name, i| try self.menu.addRadio(name, "", &self.config, i);
+//   try self.menu.addSeparator();
+//   try self.menu.addItem("Edit Configurations...", "edit_configs");
+//   self.menu.on_select = fw.events.makeHandler(self, onMenuSelect);
+
+pub fn build(self: *App, ctx: *fw.component.BuildContext) !void {
+    // ... in a 26 px toolbar:
+    self.picker_btn = try ctx.boxNode(.{
+        .height = 26,
+        .padding = fw.component.EdgeInsets.symmetric(8, 0),
+        .direction = .row,
+        .@"align" = .center,
+        .gap = 6,
+        .focusable = true,
+        .on_click = ctx.handler(self, onPicker),
+    }, .{
+        // dynText keeps the label in sync with self.config, no rebuild.
+        ConfigLabel{ .app = self },
+        fw.component.Text{ .content = "\u{25BE}", .size = 10 },
+    });
+    // ... and the Menu itself as the last child of the window root:
+    try ctx.mount(self.menu);
+}
+fn onPicker(self: *App, _: fw.events.Event) void {
+    self.menu.popupBelow(self.picker_btn, 2, .pointer);
+}
+fn onMenuSelect(self: *App, ev: fw.events.Event) void {
+    // Radio rows already wrote self.config; react to it with an effect.
+    if (std.mem.eql(u8, ev.id, "edit_configs")) self.openConfigDialog();
+}
+```
+
+A radio row updates `self.config` and the button label follows. "Edit
+Configurations..." fires its own `action_id`, closes the menu and leaves the
+selection unchanged. When the option list reloads, `clearItems()`, add them
+again and rebuild (see `clearItems`).
 
 ## Event Handlers
 

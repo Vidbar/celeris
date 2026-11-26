@@ -10,6 +10,18 @@
 //! Per-option clicks use ONE typed handler that resolves the index by matching the
 //! event's `node_id` against the captured row ids (no per-index string ids). A
 //! full-window backdrop (absolute, 0-sized when closed) dismisses on click.
+//!
+//! Selection follows the lifted-state convention (`Tabs.active`): pass
+//! `.selected = &my_signal` (a caller-owned `Signal(usize)`) to drive it from the
+//! app — write it at any time (e.g. after reloading `options`) and the trigger
+//! follows without a rebuild; a user pick writes it back. Omit it to use the
+//! internal state seeded from `initial_selected`. `on_change` fires on a user
+//! pick (click or ↑/↓) with `ev.name = "change"` and `ev.item_id` = the index.
+//!
+//! Dropdown is a *value picker* only. A picker that also runs commands
+//! ("Edit Configurations…") or groups options under headers is a `Button` +
+//! `fw.menu.Menu` with radio items — see "Selector with actions" in
+//! docs/FRAMEWORK_API.md.
 
 const std = @import("std");
 const component = @import("component.zig");
@@ -23,12 +35,32 @@ const BuildContext = component.BuildContext;
 const Text = component.Text;
 const EdgeInsets = component.EdgeInsets;
 
-const ROW_H: f32 = 32;
+/// Gap between the trigger's bottom edge and the open menu.
+const MENU_GAP: f32 = 4;
+/// Option rows never get shorter than this, however small the trigger.
+const MIN_ROW_H: f32 = 24;
 
 pub const Dropdown = struct {
     // Props (set from mountOwned's init_props; re-applied on rebuild).
     options: []const []const u8 = &.{},
+    /// Optional caller-owned selected index (two-way, lifted-state convention).
+    /// The shown option is always `min(selected, options.len - 1)`: after
+    /// `options` shrinks, write a valid index yourself if you need the stored
+    /// value to match (the widget never writes the signal on its own).
+    selected: ?*signals.Signal(usize) = null,
+    /// Seed of the internal state when no `selected` signal is passed.
+    initial_selected: usize = 0,
+    /// Fires on a user pick (click or ↑/↓) that changes the selection — never
+    /// for a programmatic write. `ev.name = "change"`, `ev.item_id` = the new
+    /// index, `ev.node_id` = the trigger.
     on_change: ?events.Handler = null,
+    /// Trigger width in px; `null` = hug the current label (only inside a flex
+    /// row — a hugged dropdown in a stretching column still takes its width).
+    width: ?f32 = 150,
+    /// Trigger height in px; option rows use it too (min 24).
+    height: f32 = 32,
+    /// Font size of the trigger label and the option rows.
+    font_size: f32 = 14,
     disabled: bool = false,
     /// Accessible name (aria-label). Without it the trigger's UIA Name is
     /// empty: its role, "dropdown", is not in `accessibility.nameFromContents`
@@ -42,7 +74,8 @@ pub const Dropdown = struct {
 
     // State (auto-created in onMount; preserved across rebuilds).
     is_open: signals.Signal(bool) = undefined,
-    selected: signals.Signal(usize) = undefined,
+    /// Fallback when the caller passes no `selected` signal.
+    selected_state: signals.Signal(usize) = undefined,
     hovered: signals.Signal(bool) = undefined,
     scope: signals.Scope = undefined,
     /// Row node ids for the current build (index ↔ option); repopulated each build.
@@ -61,16 +94,39 @@ pub const Dropdown = struct {
 
     pub fn onMount(self: *Dropdown, allocator: std.mem.Allocator) void {
         self.is_open = signals.Signal(bool).init(allocator, false);
-        self.selected = signals.Signal(usize).init(allocator, 0);
+        self.selected_state = signals.Signal(usize).init(allocator, self.initial_selected);
         self.hovered = signals.Signal(bool).init(allocator, false);
         self.scope = signals.Scope.init(allocator);
         self.item_ids = std.array_list.Managed(reg.NodeId).init(allocator);
     }
 
+    /// The selection signal: caller-owned if provided, else the internal one.
+    pub fn selectedSig(self: *Dropdown) *signals.Signal(usize) {
+        return self.selected orelse &self.selected_state;
+    }
+
+    /// The index actually shown: the signal's value clamped to `options`.
+    fn effective(self: *const Dropdown, raw: usize) usize {
+        if (self.options.len == 0) return 0;
+        return @min(raw, self.options.len - 1);
+    }
+
+    fn rowH(self: *const Dropdown) f32 {
+        return @max(self.height, MIN_ROW_H);
+    }
+
+    /// Writes a user pick and notifies `on_change` (only if it changed).
+    fn pick(self: *Dropdown, i: usize) void {
+        const sig = self.selectedSig();
+        if (sig.peek() == i) return;
+        sig.set(i);
+        if (self.on_change) |h| h.call(h.ptr, .{ .name = "change", .id = "", .item_id = i, .node_id = self.trigger_id });
+    }
+
     pub fn deinit(self: *Dropdown) void {
         self.scope.deinit();
         self.is_open.deinit();
-        self.selected.deinit();
+        self.selected_state.deinit();
         self.hovered.deinit();
         self.item_ids.deinit();
     }
@@ -100,15 +156,12 @@ pub const Dropdown = struct {
                 }
                 const n = self.options.len;
                 if (n == 0) return;
-                const cur = self.selected.peek();
+                const cur = self.effective(self.selectedSig().peek());
                 const next = if (events.Key.fromCode(ev.key_code) == .up)
                     (if (cur == 0) 0 else cur - 1)
                 else
                     @min(cur + 1, n - 1);
-                if (next != cur) {
-                    self.selected.set(next);
-                    if (self.on_change) |h| h.call(h.ptr, ev);
-                }
+                self.pick(next);
             },
             else => {},
         }
@@ -119,9 +172,8 @@ pub const Dropdown = struct {
     fn onOptionClick(self: *Dropdown, ev: events.Event) void {
         for (self.item_ids.items, 0..) |it, i| {
             if (it == ev.node_id) {
-                self.selected.set(i);
                 self.is_open.set(false);
-                if (self.on_change) |h| h.call(h.ptr, ev);
+                self.pick(i);
                 return;
             }
         }
@@ -135,7 +187,7 @@ pub const Dropdown = struct {
         self.item_ids.clearRetainingCapacity();
 
         self.root_id = try b.openNodeKeyed(.box, null);
-        try b.width(self.root_id, 150, .px);
+        if (self.width) |w| try b.width(self.root_id, w, .px);
 
         // Backdrop: full-window catcher below the menu; sized to 0 when closed.
         self.backdrop_id = try ctx.boxNode(.{
@@ -147,9 +199,9 @@ pub const Dropdown = struct {
 
         // Trigger.
         self.trigger_id = try ctx.boxNode(.{
-            .width = component.pct(100),
-            .height = 32,
+            .height = self.height,
             .padding = EdgeInsets.symmetric(10, 0),
+            .gap = 8,
             .direction = .row,
             .@"align" = .center,
             .justify = .space_between,
@@ -162,6 +214,9 @@ pub const Dropdown = struct {
         }, .{
             TriggerLabel{ .dd = self },
         });
+        // Fixed width: the trigger fills the root. Hug (`width = null`): it keeps
+        // its intrinsic (label + arrow) width and the root hugs it.
+        if (self.width != null) try b.store.setLayout(self.trigger_id, .width, .{ .dimension = .{ .value = 100, .unit = .percent } });
         try b.borderColorAlpha(self.trigger_id, 80, 80, 80, 255);
         // The combobox role + expand/collapse state live on the trigger, which is
         // the node that actually carries the click handler — so UIA's
@@ -180,7 +235,7 @@ pub const Dropdown = struct {
         }, .{
             Options{ .dd = self },
         });
-        try b.positionAbsolute(self.menu_id, 0, 36);
+        try b.positionAbsolute(self.menu_id, 0, self.height + MENU_GAP);
         try b.borderColorAlpha(self.menu_id, 80, 80, 80, 255);
         try b.overflowHidden(self.menu_id);
         try b.zIndex(self.menu_id, 100); // above the backdrop so options win the hit-test
@@ -196,7 +251,7 @@ pub const Dropdown = struct {
         const t = self.theme;
         const open = self.is_open.get();
         const hovered = self.hovered.get();
-        const sel = self.selected.get();
+        const sel = self.effective(self.selectedSig().get());
 
         // Surface the open state for accessibility (UIA ExpandCollapsePattern reads
         // `.expanded` on the combobox node — the trigger, which also holds the role).
@@ -209,13 +264,13 @@ pub const Dropdown = struct {
             store.setTextContent(self.arrow_id, arrow_str);
         } else |_| {}
         if (self.options.len > 0) {
-            const cur = self.options[@min(sel, self.options.len - 1)];
+            const cur = self.options[sel];
             if (store.stringAllocator().dupe(u8, cur)) |label_str| {
                 store.setTextContent(self.label_id, label_str);
             } else |_| {}
         }
 
-        const h: f32 = if (open) @as(f32, @floatFromInt(self.options.len)) * ROW_H else 0;
+        const h: f32 = if (open) @as(f32, @floatFromInt(self.options.len)) * self.rowH() else 0;
         store.setLayout(self.menu_id, .height, .{ .dimension = .{ .value = h, .unit = .px } }) catch {};
 
         const bd: f32 = if (open) 20000 else 0;
@@ -236,10 +291,10 @@ const TriggerLabel = struct {
     pub fn build(self: *TriggerLabel, ctx: *BuildContext) !void {
         const b = ctx.builder;
         const t = self.dd.theme;
-        const sel0 = self.dd.selected.peek();
-        const cur = if (self.dd.options.len > 0) self.dd.options[@min(sel0, self.dd.options.len - 1)] else "Select...";
+        const sel0 = self.dd.effective(self.dd.selectedSig().peek());
+        const cur = if (self.dd.options.len > 0) self.dd.options[sel0] else "Select...";
         self.dd.label_id = try b.addText(cur);
-        try b.fontSize(self.dd.label_id, 14);
+        try b.fontSize(self.dd.label_id, self.dd.font_size);
         try b.textColor(self.dd.label_id, t.text.r, t.text.g, t.text.b);
         self.dd.arrow_id = try b.addText("v");
         try b.fontSize(self.dd.arrow_id, 12);
@@ -258,13 +313,13 @@ const Options = struct {
         for (dd.options) |opt| {
             const item = try ctx.boxNode(.{
                 .width = component.pct(100),
-                .height = ROW_H,
+                .height = dd.rowH(),
                 .padding = EdgeInsets.symmetric(10, 0),
                 .direction = .row,
                 .@"align" = .center,
                 .on_click = ctx.handler(dd, Dropdown.onOptionClick),
             }, .{
-                Text{ .content = opt, .color = component.rgb(t.text.r, t.text.g, t.text.b), .style = t.typography.body_medium },
+                Text{ .content = opt, .color = component.rgb(t.text.r, t.text.g, t.text.b), .size = dd.font_size },
             });
             try dd.item_ids.append(item);
         }
@@ -347,7 +402,7 @@ test "Dropdown selecting an option updates label, closes menu, highlights row" {
     _ = router.route(.{ .name = "click", .id = "", .node_id = dd.trigger_id }); // open
     _ = router.route(.{ .name = "click", .id = "", .node_id = dd.item_ids.items[2] }); // pick "Three"
 
-    try testing.expectEqual(@as(usize, 2), dd.selected.peek());
+    try testing.expectEqual(@as(usize, 2), dd.selectedSig().peek());
     try testing.expect(!dd.is_open.peek());
     try testing.expectEqualStrings("Three", store.getTextContent(dd.label_id).?);
     try testing.expectApproxEqAbs(@as(f32, 100.0 / 255.0), store.getStyle(dd.item_ids.items[2], .background).?.color.a, 0.001);
@@ -373,19 +428,19 @@ test "Dropdown arrows open then move the selection; Escape closes" {
     // ↓ on the closed trigger opens without moving the selection.
     _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.down.code() });
     try testing.expect(dd.is_open.peek());
-    try testing.expectEqual(@as(usize, 0), dd.selected.peek());
+    try testing.expectEqual(@as(usize, 0), dd.selectedSig().peek());
 
     // ↓↓ move down (clamped at the end); ↑ moves back up.
     _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.down.code() });
     _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.down.code() });
-    try testing.expectEqual(@as(usize, 2), dd.selected.peek());
+    try testing.expectEqual(@as(usize, 2), dd.selectedSig().peek());
     _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.up.code() });
-    try testing.expectEqual(@as(usize, 1), dd.selected.peek());
+    try testing.expectEqual(@as(usize, 1), dd.selectedSig().peek());
 
     // Escape closes, keeping the selection.
     _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.escape.code() });
     try testing.expect(!dd.is_open.peek());
-    try testing.expectEqual(@as(usize, 1), dd.selected.peek());
+    try testing.expectEqual(@as(usize, 1), dd.selectedSig().peek());
 }
 
 test "Dropdown closes on backdrop click without changing the selection" {
@@ -409,7 +464,7 @@ test "Dropdown closes on backdrop click without changing the selection" {
 
     _ = router.route(.{ .name = "click", .id = "", .node_id = dd.backdrop_id });
     try testing.expect(!dd.is_open.peek());
-    try testing.expectEqual(@as(usize, 0), dd.selected.peek());
+    try testing.expectEqual(@as(usize, 0), dd.selectedSig().peek());
     try testing.expectApproxEqAbs(@as(f32, 0.0), store.getLayout(dd.backdrop_id, .width).?.dimension.value, 0.001);
 }
 
@@ -454,4 +509,125 @@ test "BUG: Dropdown's UIA Name was empty — role \"dropdown\" isn't in nameFrom
         .aria_label = "Render mode",
     });
     try testing.expectEqualStrings("Render mode", a11y.accessibleName(&registry2, &store2, labeled.trigger_id));
+}
+
+test "Dropdown lifted `selected`: app writes drive the label live; a pick writes back and reports its index" {
+    const a = testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    var router = events.EventRouter.init(a);
+    defer router.deinit();
+    var mounts = component.MountTable.init(a);
+    defer mounts.deinit();
+    registry.addNodeRemovedListener(&mounts, component.MountTable.nodeRemovedListener);
+
+    const Sink = struct {
+        var calls: u32 = 0;
+        var last: ?usize = null;
+        fn onChange(_: ?*anyopaque, ev: events.Event) void {
+            calls += 1;
+            last = ev.item_id;
+        }
+    };
+    Sink.calls = 0;
+    Sink.last = null;
+
+    var sel = signals.Signal(usize).init(a, 2);
+    defer sel.deinit();
+    const dd = try mountDropdown(&registry, &store, &router, &mounts, .{
+        .options = &OPTS,
+        .selected = &sel,
+        .on_change = events.Handler{ .ptr = null, .call = Sink.onChange },
+    });
+    try testing.expectEqualStrings("Three", store.getTextContent(dd.label_id).?);
+
+    // A programmatic write repaints with no rebuild — and is not a user change.
+    sel.set(0);
+    try testing.expectEqualStrings("One", store.getTextContent(dd.label_id).?);
+    try testing.expectEqual(@as(u32, 0), Sink.calls);
+
+    _ = router.route(.{ .name = "click", .id = "", .node_id = dd.trigger_id });
+    _ = router.route(.{ .name = "click", .id = "", .node_id = dd.item_ids.items[1] });
+    try testing.expectEqual(@as(usize, 1), sel.peek());
+    try testing.expectEqual(@as(u32, 1), Sink.calls);
+    try testing.expectEqual(@as(?usize, 1), Sink.last);
+    try testing.expectEqualStrings("Two", store.getTextContent(dd.label_id).?);
+
+    // Re-picking the current option is not a change.
+    _ = router.route(.{ .name = "click", .id = "", .node_id = dd.trigger_id });
+    _ = router.route(.{ .name = "click", .id = "", .node_id = dd.item_ids.items[1] });
+    try testing.expectEqual(@as(u32, 1), Sink.calls);
+
+    // ↓ reports through the same channel with the new index.
+    _ = router.route(.{ .name = "click", .id = "", .node_id = dd.trigger_id });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.down.code() });
+    try testing.expectEqual(@as(?usize, 2), Sink.last);
+}
+
+test "Dropdown shows the last option when `selected` is past the end (options reloaded shorter)" {
+    const a = testing.allocator;
+    var registry = reg.UIRegistry.init(a);
+    defer registry.deinit();
+    var store = props.PropertyStore.init(a);
+    defer store.deinit();
+    store.setRegistry(&registry);
+    var router = events.EventRouter.init(a);
+    defer router.deinit();
+    var mounts = component.MountTable.init(a);
+    defer mounts.deinit();
+    registry.addNodeRemovedListener(&mounts, component.MountTable.nodeRemovedListener);
+
+    var sel = signals.Signal(usize).init(a, 7);
+    defer sel.deinit();
+    const dd = try mountDropdown(&registry, &store, &router, &mounts, .{ .options = &OPTS, .selected = &sel });
+    try testing.expectEqualStrings("Three", store.getTextContent(dd.label_id).?);
+    // ↑ from the clamped position moves to "Two", not to index 6.
+    _ = router.route(.{ .name = "click", .id = "", .node_id = dd.trigger_id });
+    _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.up.code() });
+    try testing.expectEqual(@as(usize, 1), sel.peek());
+}
+
+const ts = @import("test_support.zig");
+
+fn mountInRow(e: *ts.Harness, init_props: anytype) !struct { root: reg.NodeId, dd: *Dropdown } {
+    var b = component.UIBuilder.init(&e.registry, &e.store);
+    b.theme = dark;
+    var ctx = BuildContext{ .builder = &b, .router = &e.router, .mounts = &e.mounts };
+    const root = try b.openNodeKeyed(.box, null);
+    try b.flexRow(root);
+    try b.alignItems(root, .flex_start);
+    try ctx.mountOwned(Dropdown, init_props);
+    b.close();
+    const anchor = e.registry.getNode(root).?.first_child;
+    return .{ .root = root, .dd = @ptrCast(@alignCast(e.mounts.get(anchor).?.component_ptr)) };
+}
+
+test "Dropdown height/width are real geometry: 26 px toolbar trigger, menu docked under it" {
+    var e = ts.Harness.init(testing.allocator);
+    defer e.deinit();
+    e.wire();
+    const m = try mountInRow(&e, .{ .options = &OPTS, .height = 26, .width = 120, .font_size = 12 });
+    e.solve(m.root, 800, 600);
+    try testing.expectApproxEqAbs(@as(f32, 26), e.geom(m.dd.trigger_id).height, 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 120), e.geom(m.dd.trigger_id).width, 0.5);
+
+    _ = e.router.route(.{ .name = "click", .id = "", .node_id = m.dd.trigger_id });
+    e.solve(m.root, 800, 600);
+    const menu = e.geom(m.dd.menu_id);
+    try testing.expectApproxEqAbs(e.geom(m.dd.trigger_id).y + 26 + MENU_GAP, menu.y, 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 3 * 26), menu.height, 0.5);
+}
+
+test "Dropdown width = null hugs its label instead of the fixed 150 px" {
+    var e = ts.Harness.init(testing.allocator);
+    defer e.deinit();
+    e.wire();
+    const m = try mountInRow(&e, .{ .options = &.{"Go"}, .width = null });
+    e.solve(m.root, 800, 600);
+    const w = e.geom(m.dd.trigger_id).width;
+    try testing.expect(w > 20);
+    try testing.expect(w < 150);
 }
