@@ -200,6 +200,10 @@ pub const Menu = struct {
     /// the chain back down in the same gesture. Cleared the moment `onDismiss`
     /// consumes it (one-shot — a *later* click still dismisses normally).
     suppress_dismiss: bool = false,
+    /// Set by every items mutation (`add*`, `clearItems`), cleared by `build`:
+    /// while set, `row_ids`/`check_ids`/`label_ids` describe the previous
+    /// items and `updateVisuals` must not paint through them.
+    rows_stale: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, id: []const u8) !*Menu {
         const self = try allocator.create(Menu);
@@ -238,25 +242,31 @@ pub const Menu = struct {
     /// Adds an item that opens `sub` (host-owned) instead of emitting an action.
     pub fn addSubmenu(self: *Menu, label: []const u8, sub: *Menu) !void {
         try self.items.append(.{ .label = label, .submenu = sub });
+        self.rows_stale = true;
     }
 
     pub fn addItem(self: *Menu, label: []const u8, action_id: []const u8) !void {
         try self.items.append(.{ .label = label, .action_id = action_id });
+        self.rows_stale = true;
     }
     pub fn addItemEx(self: *Menu, item: MenuItem) !void {
         try self.items.append(item);
+        self.rows_stale = true;
     }
     pub fn addSeparator(self: *Menu) !void {
         try self.items.append(.{ .kind = .separator, .enabled = false });
+        self.rows_stale = true;
     }
     /// Adds a dimmed, non-selectable group title (e.g. "Recent").
     pub fn addHeader(self: *Menu, label: []const u8) !void {
         try self.items.append(.{ .kind = .header, .label = label, .enabled = false });
+        self.rows_stale = true;
     }
     /// Adds an item of an exclusive group (see `MenuRadio`). `action_id` may be
     /// empty when the host only reads `group`.
     pub fn addRadio(self: *Menu, label: []const u8, action_id: []const u8, group: *signals.Signal(usize), value: usize) !void {
         try self.items.append(.{ .label = label, .action_id = action_id, .radio = .{ .group = group, .value = value } });
+        self.rows_stale = true;
     }
 
     /// Empties `items` (e.g. to reload a "Recent files" submenu). Frees nothing —
@@ -283,6 +293,7 @@ pub const Menu = struct {
             }
         }
         self.items.clearRetainingCapacity();
+        self.rows_stale = true;
         self.highlighted.set(-1);
     }
 
@@ -612,6 +623,7 @@ pub const Menu = struct {
         self.theme = b.theme;
         self.store = b.store;
         self.row_ids.clearRetainingCapacity();
+        self.rows_stale = false;
         self.check_ids.clearRetainingCapacity();
         self.label_ids.clearRetainingCapacity();
 
@@ -915,7 +927,16 @@ pub const Menu = struct {
         // no rebuild involved.
         for (self.items.items, 0..) |it, i| {
             if (it.kind != .item) continue;
-            if (i >= self.row_ids.items.len or i >= self.check_ids.items.len or i >= self.label_ids.items.len) break; // items reloaded (clearItems), rows not rebuilt yet
+            if (self.rows_stale) {
+                // Items changed (clearItems/add*) and the rows are not rebuilt
+                // yet: `row_ids` still describe the OLD list (other length,
+                // other kinds), so paint nothing. Still read the signals,
+                // tracked, so this effect follows the NEW items' signals — the
+                // rebuild re-applies it untracked.
+                _ = it.isChecked();
+                if (it.enabled_signal) |s| _ = s.get();
+                continue;
+            }
             const row_id = self.row_ids.items[i];
             const on = (open and hi == @as(i32, @intCast(i)));
             const a: f32 = if (on) 110.0 / 255.0 else 0.0;
@@ -2537,4 +2558,37 @@ test "Menu radio: the chain is closed before the group is written (group effects
     m.popup(0, 0, .pointer);
     clickRow(&env, m, 2); // "Tests"
     try testing.expectEqual(@as(?bool, false), w.open_when_changed);
+}
+
+test "Menu reloaded to the same length with other kinds: stale rows are not repainted; new signals are followed after the rebuild" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var sel = signals.Signal(usize).init(testing.allocator, 0);
+    defer sel.deinit();
+    const m = try buildSelectorMenu(&env, &sel); // [header, r0, r1, r2, sep, item]
+    defer m.deinit();
+    const old_sep = m.row_ids.items[4];
+    const sep_bg = env.store.getStyle(old_sep, .background).?.color.a;
+
+    // Same count (6), different kinds: radios where the separator was.
+    var other = signals.Signal(usize).init(testing.allocator, 0);
+    defer other.deinit();
+    m.clearItems();
+    for (0..6) |i| try m.addRadio("x", "", &other, i);
+    sel.set(2);
+    other.set(4);
+    try testing.expectApproxEqAbs(sep_bg, env.store.getStyle(old_sep, .background).?.color.a, 0.001);
+
+    // Rebuild: rows match again, and the NEW group drives the bullets live.
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+    _ = try bld.openBox();
+    try m.build(&ctx);
+    bld.close();
+    try testing.expectEqualStrings("\u{2022}  ", env.store.getTextContent(m.check_ids.items[4]).?);
+    other.set(1);
+    try testing.expectEqualStrings("\u{2022}  ", env.store.getTextContent(m.check_ids.items[1]).?);
+    try testing.expectEqualStrings("    ", env.store.getTextContent(m.check_ids.items[4]).?);
 }

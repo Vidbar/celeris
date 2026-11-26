@@ -414,6 +414,12 @@ pub const TreeView = struct {
         return style;
     }
 
+    /// Width of the caret column: 16 px, or the font size + 2 when larger.
+    fn caretColumnWidth(self: *const TreeView) f32 {
+        const size = if (self.textStyle()) |st| st.size else 0;
+        return @max(16, size + 2);
+    }
+
     fn applyTextStyle(self: *const TreeView, b: *builder_mod.UIBuilder, id: reg.NodeId) !void {
         const style = self.textStyle() orelse return;
         try b.fontSize(id, style.size);
@@ -1015,7 +1021,10 @@ pub const TreeView = struct {
         else
             "";
         const chevron = try b.addText(chevron_str);
-        try b.width(chevron, 16, .px);
+        // 16 px, or wider for a big font: the default caret is a Codicon
+        // chevron, ~1em wide, so a fixed 16 px column overflowed into the
+        // icon at font sizes above it.
+        try b.width(chevron, self.caretColumnWidth(), .px);
         try b.flexShrink(chevron, 0);
         try b.noWrap(chevron);
         try self.applyTextStyle(b, chevron);
@@ -3077,4 +3086,20 @@ test "rowLabel truncation never splits a UTF-8 codepoint" {
     const s = rowLabel(&buf, &node, 2);
     try testing.expectEqualStrings("ab, \u{00f1}", s);
     try testing.expect(std.unicode.utf8ValidateSlice(s));
+}
+
+test "TreeView caret column grows with a big font so the 1em chevron does not overlap the icon" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    try t.roots.append(branchNode(testing.allocator, 1, "big", false));
+    const tv = try t.mount(.{ .font_size = 20 });
+    try testing.expectApproxEqAbs(@as(f32, 22), t.env.store.getLayout(rowFor(tv, 1).caret, .width).?.dimension.value, 0.001);
+
+    var t2: TreeEnv = undefined;
+    t2.init(testing.allocator);
+    defer t2.deinit();
+    try t2.roots.append(branchNode(testing.allocator, 1, "small", false));
+    const tv2 = try t2.mount(.{ .font_size = 13 });
+    try testing.expectApproxEqAbs(@as(f32, 16), t2.env.store.getLayout(rowFor(tv2, 1).caret, .width).?.dimension.value, 0.001);
 }

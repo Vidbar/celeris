@@ -102,6 +102,9 @@ const ExplorerApp = struct {
         try ctx.mountOwned(fw.button.Button, .{
             .key = "section",
             .label = fw.icons.chevron_down ++ " EXPLORER",
+            // The chevron is decorative: without this the accessible name
+            // would start with its private-use codepoint.
+            .aria_label = "Explorer",
             .justify = .start,
             .radius = 0,
             .padding = fw.component.EdgeInsets{ .l = 4, .t = 2, .b = 2 },
