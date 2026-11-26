@@ -458,6 +458,9 @@ pub const Menu = struct {
     /// modifier because that string is what C hosts receive on the structured
     /// callback).
     fn onRowEvent(self: *Menu, ev: events.Event) void {
+        // Items changed and the rows are not rebuilt yet: a row node maps to
+        // the OLD list, so its index may be out of range or name another item.
+        if (self.rows_stale) return;
         const idx = blk: {
             for (self.row_ids.items, 0..) |rid, i| {
                 if (rid == ev.node_id) break :blk i;
@@ -623,6 +626,10 @@ pub const Menu = struct {
         self.theme = b.theme;
         self.store = b.store;
         self.row_ids.clearRetainingCapacity();
+        // Rows rebuilt from `items` below. If the items changed since the last
+        // build, the visuals effect is still subscribed to the OLD items' signals
+        // (`bindVisuals` re-applies untracked), so it is recreated at the end.
+        const rows_were_stale = self.rows_stale;
         self.rows_stale = false;
         self.check_ids.clearRetainingCapacity();
         self.label_ids.clearRetainingCapacity();
@@ -839,6 +846,11 @@ pub const Menu = struct {
         // call here subscribed whatever build-effect mounted the Menu (the app
         // root) to is_open/pos/highlighted, so every popup()/hover rebuilt the
         // host's whole tree in the same gesture.
+        if (rows_were_stale and self.bound) {
+            self.scope.deinit();
+            self.scope = signals.Scope.init(self.allocator);
+            self.bound = false;
+        }
         try component.bindVisuals(self, &self.scope, &self.bound, updateVisuals);
     }
 
@@ -2576,7 +2588,6 @@ test "Menu reloaded to the same length with other kinds: stale rows are not repa
     defer other.deinit();
     m.clearItems();
     for (0..6) |i| try m.addRadio("x", "", &other, i);
-    sel.set(2);
     other.set(4);
     try testing.expectApproxEqAbs(sep_bg, env.store.getStyle(old_sep, .background).?.color.a, 0.001);
 
@@ -2591,4 +2602,27 @@ test "Menu reloaded to the same length with other kinds: stale rows are not repa
     other.set(1);
     try testing.expectEqualStrings("\u{2022}  ", env.store.getTextContent(m.check_ids.items[1]).?);
     try testing.expectEqualStrings("    ", env.store.getTextContent(m.check_ids.items[4]).?);
+}
+
+test "Menu ignores row clicks/hovers while its rows are stale (items changed, not rebuilt)" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.store.setRegistry(&env.registry);
+    var sel = signals.Signal(usize).init(testing.allocator, 0);
+    defer sel.deinit();
+    const m = try buildSelectorMenu(&env, &sel); // 6 rows
+    defer m.deinit();
+    Probe.calls = 0;
+    m.on_select = Probe.handler;
+    m.popup(0, 0, .pointer);
+
+    const old_row5 = m.row_ids.items[5];
+    m.clearItems();
+    try m.addItem("Only", "only");
+    // Old row 5 has no item 5 any more: must neither panic nor select.
+    _ = env.router.route(.{ .name = "mouse_enter", .id = "", .node_id = old_row5 });
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = old_row5 });
+    // Old row 1 would map to the NEW item 0's neighbour: must not fire either.
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = m.row_ids.items[0] });
+    try testing.expectEqual(@as(u32, 0), Probe.calls);
 }

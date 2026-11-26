@@ -19,8 +19,8 @@
 //! pick (click or ↑/↓) with `ev.name = "change"` and `ev.item_id` = the index.
 //!
 //! Dropdown is a *value picker* only. A picker that also runs commands
-//! ("Edit Configurations…") or groups options under headers is a `Button` +
-//! `fw.menu.Menu` with radio items — see "Selector with actions" in
+//! ("Edit Configurations…") or groups options under headers is a
+//! button-role trigger + `fw.menu.Menu` with radio items — see "Selector with actions" in
 //! docs/FRAMEWORK_API.md.
 
 const std = @import("std");
@@ -43,6 +43,8 @@ const MENU_GAP: f32 = 4;
 const MIN_ROW_H: f32 = 24;
 /// Size of the chevron (a Codicon) at the trigger's right edge.
 const ARROW_SIZE: f32 = 12;
+/// Trigger text when there are no options.
+const PLACEHOLDER = "Select...";
 
 pub const Dropdown = struct {
     // Props (set from mountOwned's init_props; re-applied on rebuild).
@@ -137,7 +139,9 @@ pub const Dropdown = struct {
     fn fitWidth(self: *const Dropdown, measure: ?builder_mod.TextMeasure) f32 {
         const size = self.textStyle().size;
         var widest: f32 = 0;
-        for (self.options) |opt| {
+        // No options: the trigger shows the placeholder, so fit that.
+        const texts: []const []const u8 = if (self.options.len > 0) self.options else &.{PLACEHOLDER};
+        for (texts) |opt| {
             const w = if (measure) |m| m.width(opt, size) else @as(f32, @floatFromInt(opt.len)) * size * 0.6;
             widest = @max(widest, w);
         }
@@ -154,7 +158,10 @@ pub const Dropdown = struct {
     /// Writes a user pick and notifies `on_change` (only if it changed).
     fn pick(self: *Dropdown, i: usize) void {
         const sig = self.selectedSig();
-        if (sig.peek() == i) return;
+        // Compare with what is SHOWN: with `selected` past the end (options
+        // reloaded shorter) the last option is displayed, and re-picking it
+        // changes nothing the user can see.
+        if (self.effective(sig.peek()) == i) return;
         sig.set(i);
         if (self.on_change) |h| h.call(h.ptr, .{ .name = "change", .id = "", .item_id = i, .node_id = self.trigger_id });
     }
@@ -206,6 +213,7 @@ pub const Dropdown = struct {
     /// One handler for every option row: resolves the picked index by matching the
     /// event's node against the captured row ids, then selects + closes + notifies.
     fn onOptionClick(self: *Dropdown, ev: events.Event) void {
+        if (self.disabled) return;
         for (self.item_ids.items, 0..) |it, i| {
             if (it == ev.node_id) {
                 self.is_open.set(false);
@@ -221,6 +229,9 @@ pub const Dropdown = struct {
         self.theme = t;
         self.store = b.store;
         self.item_ids.clearRetainingCapacity();
+        // Disabled while open (e.g. a form going busy): close it. `is_open` is
+        // never read by this build, so the write cannot re-enter it.
+        if (self.disabled and self.is_open.peek()) self.is_open.set(false);
 
         self.root_id = try b.openNodeKeyed(.box, null);
         try b.width(self.root_id, self.width orelse self.fitWidth(b.measure), .px);
@@ -289,8 +300,9 @@ pub const Dropdown = struct {
         const store = self.store orelse return;
         if (self.trigger_id == reg.NULL_NODE) return;
         const t = self.theme;
-        const open = self.is_open.get();
-        const hovered = self.hovered.get();
+        const open = self.is_open.get() and !self.disabled;
+        // `on_hover` is null while disabled, so `hovered` can be stuck `true`.
+        const hovered = self.hovered.get() and !self.disabled;
         const sel = self.effective(self.selectedSig().get());
 
         // Surface the open state for accessibility (UIA ExpandCollapsePattern reads
@@ -332,15 +344,20 @@ const TriggerLabel = struct {
         const b = ctx.builder;
         const t = self.dd.theme;
         const sel0 = self.dd.effective(self.dd.selectedSig().peek());
-        const cur = if (self.dd.options.len > 0) self.dd.options[sel0] else "Select...";
+        const cur = if (self.dd.options.len > 0) self.dd.options[sel0] else PLACEHOLDER;
+        // Disabled: dimmed text, like a disabled Menu item.
+        const fg = if (self.dd.disabled)
+            (if (t.text_disabled.a == 0) theme_mod.Color{ .r = 128, .g = 128, .b = 128 } else t.text_disabled)
+        else
+            t.text;
         self.dd.label_id = try b.addText(cur);
         const st = self.dd.textStyle();
         try b.fontSize(self.dd.label_id, st.size);
         if (st.line_height) |lh| try b.store.setStyle(self.dd.label_id, .line_height, .{ .number = lh });
-        try b.textColor(self.dd.label_id, t.text.r, t.text.g, t.text.b);
+        try b.textColor(self.dd.label_id, fg.r, fg.g, fg.b);
         self.dd.arrow_id = try b.addText(icons.chevron_down);
         try b.fontSize(self.dd.arrow_id, ARROW_SIZE);
-        try b.textColor(self.dd.arrow_id, t.text.r, t.text.g, t.text.b);
+        try b.textColor(self.dd.arrow_id, fg.r, fg.g, fg.b);
     }
     pub fn deinit(_: *TriggerLabel) void {}
 };
@@ -607,6 +624,7 @@ test "Dropdown lifted `selected`: app writes drive the label live; a pick writes
     _ = router.route(.{ .name = "click", .id = "", .node_id = dd.trigger_id });
     _ = router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.down.code() });
     try testing.expectEqual(@as(?usize, 2), Sink.last);
+    try testing.expectEqual(@as(u32, 2), Sink.calls); // exactly one more call, not a double fire
 }
 
 test "Dropdown shows the last option when `selected` is past the end (options reloaded shorter)" {
@@ -732,4 +750,64 @@ test "BUG: a rebuild that swaps the `selected` signal kept following the old one
     try testing.expectEqualStrings("Three", e.store.getTextContent(dd.label_id).?);
     first.set(0); // the old signal no longer drives it
     try testing.expectEqualStrings("Three", e.store.getTextContent(dd.label_id).?);
+}
+
+test "Dropdown: re-picking the clamped (shown) option is not a change" {
+    const a = testing.allocator;
+    var e = ts.Harness.init(a);
+    defer e.deinit();
+    e.wire();
+    const Sink = struct {
+        var calls: u32 = 0;
+        fn onChange(_: ?*anyopaque, _: events.Event) void {
+            calls += 1;
+        }
+    };
+    Sink.calls = 0;
+    var sel = signals.Signal(usize).init(a, 7); // shows "Three"
+    defer sel.deinit();
+    const dd = try mountDropdown(&e.registry, &e.store, &e.router, &e.mounts, .{
+        .options = &OPTS,
+        .selected = &sel,
+        .on_change = events.Handler{ .ptr = null, .call = Sink.onChange },
+    });
+    _ = e.router.route(.{ .name = "click", .id = "", .node_id = dd.trigger_id });
+    _ = e.router.route(.{ .name = "click", .id = "", .node_id = dd.item_ids.items[2] });
+    _ = e.router.route(.{ .name = "click", .id = "", .node_id = dd.trigger_id });
+    _ = e.router.route(.{ .name = "key_down", .id = "", .node_id = dd.trigger_id, .key_code = events.Key.down.code() });
+    try testing.expectEqual(@as(u32, 0), Sink.calls);
+}
+
+test "Dropdown disabled while open: menu renders closed, closes on rebuild, rows ignore clicks" {
+    const a = testing.allocator;
+    var e = ts.Harness.init(a);
+    defer e.deinit();
+    e.wire();
+    const dd = try mountDropdown(&e.registry, &e.store, &e.router, &e.mounts, .{ .options = &OPTS });
+    _ = e.router.route(.{ .name = "click", .id = "", .node_id = dd.trigger_id });
+    try testing.expect(dd.is_open.peek());
+
+    // Host flips `disabled` and rebuilds (props re-applied, same instance).
+    dd.disabled = true;
+    var b = component.UIBuilder.init(&e.registry, &e.store);
+    b.theme = dark;
+    var ctx = BuildContext{ .builder = &b, .router = &e.router, .mounts = &e.mounts };
+    _ = try b.openNodeKeyed(.box, null);
+    try dd.build(&ctx);
+    b.close();
+    try testing.expect(!dd.is_open.peek());
+    try testing.expectApproxEqAbs(@as(f32, 0), e.store.getLayout(dd.menu_id, .height).?.dimension.value, 0.001);
+
+    _ = e.router.route(.{ .name = "click", .id = "", .node_id = dd.item_ids.items[2] });
+    try testing.expectEqual(@as(usize, 0), dd.selectedSig().peek());
+}
+
+test "Dropdown width = null with no options fits the placeholder" {
+    var e = ts.Harness.init(testing.allocator);
+    defer e.deinit();
+    e.wire();
+    const m = try mountInRow(&e, .{ .options = &.{}, .width = null });
+    e.solve(m.root, 800, 600);
+    const est_placeholder = @as(f32, @floatFromInt(PLACEHOLDER.len)) * m.dd.textStyle().size * 0.6;
+    try testing.expect(e.geom(m.dd.trigger_id).width >= est_placeholder + 20);
 }

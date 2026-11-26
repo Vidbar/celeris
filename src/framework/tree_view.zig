@@ -414,8 +414,9 @@ pub const TreeView = struct {
         return style;
     }
 
-    /// Width of the caret column: 16 px, or the font size + 2 when larger.
-    fn caretColumnWidth(self: *const TreeView) f32 {
+    /// Width of the caret and icon columns: 16 px, or the font size + 2 when
+    /// larger (Codicon glyphs are ~1em wide).
+    fn glyphColumnWidth(self: *const TreeView) f32 {
         const size = if (self.textStyle()) |st| st.size else 0;
         return @max(16, size + 2);
     }
@@ -1024,7 +1025,7 @@ pub const TreeView = struct {
         // 16 px, or wider for a big font: the default caret is a Codicon
         // chevron, ~1em wide, so a fixed 16 px column overflowed into the
         // icon at font sizes above it.
-        try b.width(chevron, self.caretColumnWidth(), .px);
+        try b.width(chevron, self.glyphColumnWidth(), .px);
         try b.flexShrink(chevron, 0);
         try b.noWrap(chevron);
         try self.applyTextStyle(b, chevron);
@@ -1041,7 +1042,7 @@ pub const TreeView = struct {
         // Icon.
         const icon_str = if (node.icon) |i| i else "";
         const icon = try b.addText(icon_str);
-        try b.width(icon, 16, .px);
+        try b.width(icon, self.glyphColumnWidth(), .px); // same rule as the caret column
         try b.flexShrink(icon, 0);
         try b.noWrap(icon);
         try self.applyTextStyle(b, icon);
@@ -3102,4 +3103,15 @@ test "TreeView caret column grows with a big font so the 1em chevron does not ov
     try t2.roots.append(branchNode(testing.allocator, 1, "small", false));
     const tv2 = try t2.mount(.{ .font_size = 13 });
     try testing.expectApproxEqAbs(@as(f32, 16), t2.env.store.getLayout(rowFor(tv2, 1).caret, .width).?.dimension.value, 0.001);
+}
+
+test "TreeView icon column grows with a big font like the caret column" {
+    var t: TreeEnv = undefined;
+    t.init(testing.allocator);
+    defer t.deinit();
+    try t.roots.append(branchNode(testing.allocator, 1, "big", false));
+    const tv = try t.mount(.{ .font_size = 20 });
+    const caret = rowFor(tv, 1).caret;
+    const icon = t.env.registry.getNode(caret).?.next_sibling;
+    try testing.expectApproxEqAbs(@as(f32, 22), t.env.store.getLayout(icon, .width).?.dimension.value, 0.001);
 }

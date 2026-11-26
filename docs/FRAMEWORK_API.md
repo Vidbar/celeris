@@ -784,8 +784,8 @@ State that a menu *shows* (checkmarks, enabled items) is lifted as usual, throug
 ### Recipe: selector with actions ("Edit Configurations…")
 
 `Dropdown` is a value picker: every row is a value. When a picker also runs
-commands, or groups its values under headers, compose a `Button` with a `Menu`
-instead. This is the same split WinUI (`ComboBox` vs `DropDownButton` +
+commands, or groups its values under headers, compose a trigger (a focusable
+box with the button role, so its label can update live) with a `Menu` instead. This is the same split WinUI (`ComboBox` vs `DropDownButton` +
 `MenuFlyout`), Qt (`QComboBox` vs `QToolButton` + `QMenu`) and Flutter
 (`DropdownButton` vs `MenuAnchor`) make.
 The full, runnable version is `examples/selector_actions.zig` (`zig build
@@ -818,8 +818,12 @@ pub fn build(self: *App, ctx: *fw.component.BuildContext) !void {
         // Codicon chevron (icons render through the text pipeline).
         fw.component.Text{ .content = fw.icons.chevron_down, .size = 12 },
     });
+    // A focusable box is not announced as anything by default: give it the
+    // button role and a name (the label is a value, like a combobox's).
+    try ctx.builder.role(self.picker_btn, "button");
+    try ctx.builder.ariaLabel(self.picker_btn, "Run configuration");
     // ... and the Menu itself as the last child of the window root:
-    try ctx.mount(self.menu);
+    try self.menu.build(ctx);
 }
 fn onPicker(self: *App, _: fw.events.Event) void {
     self.menu.popupBelow(self.picker_btn, 2, .pointer);

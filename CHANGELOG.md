@@ -38,8 +38,8 @@ No C-ABI change.
 - **`TreeView` caret defaults to Codicons.** `caret_collapsed` / `caret_expanded`
   default to `icons.chevron_right` / `icons.chevron_down` instead of `▸` / `▾`;
   pass the triangles explicitly to keep the old look.
-- **Docs and example:** recipe "Selector with actions" (Button + Menu with radio
-  items, a separator and command rows) in `docs/FRAMEWORK_API.md`, for pickers
+- **Docs and example:** recipe "Selector with actions" (a button-role trigger +
+  Menu with radio items, a separator and command rows) in `docs/FRAMEWORK_API.md`, for pickers
   that also run commands such as "Edit Configurations…". Runnable as
   `zig build selector_actions` (`examples/selector_actions.zig`).
 
