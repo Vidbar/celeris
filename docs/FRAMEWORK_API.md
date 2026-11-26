@@ -386,7 +386,7 @@ This is the same mechanism across the widget suite:
 | Widget | Lifted prop | Type | Use |
 |--------|-------------|------|-----|
 | `Tabs` | `.active` | `*Signal(usize)` | switch tabs from app code / know the active tab |
-| `Dropdown` | `.selected` | `*Signal(usize)` | set the shown option at any time (e.g. after reloading `.options`); a user pick writes it back. Shown index is clamped to `options.len - 1`. `.on_change` reports a user pick with `ev.item_id` = the index. Size with `.width` (`null` = hug), `.height`, `.font_size` |
+| `Dropdown` | `.selected` | `*Signal(usize)` | set the shown option at any time (e.g. after reloading `.options`); a user pick writes it back. Shown index is clamped to `options.len - 1`. `.on_change` reports a user pick with `ev.item_id` = the index. Size with `.width` (`null` = fit the widest option), `.height`, `.font_size` |
 | `Menu` radio items | `MenuItem.radio.group` | `*Signal(usize)` | exclusive choice inside a menu (`addRadio`); the bullet follows the group live |
 | `TreeView` | `.selected`, `.hovered` | `*Signal(?usize)` | react to / drive selection & hover by node id |
 | `SplitPane` | `.ratio` | `*Signal(f32)` | set or animate the split |
@@ -788,6 +788,8 @@ commands, or groups its values under headers, compose a `Button` with a `Menu`
 instead. This is the same split WinUI (`ComboBox` vs `DropDownButton` +
 `MenuFlyout`), Qt (`QComboBox` vs `QToolButton` + `QMenu`) and Flutter
 (`DropdownButton` vs `MenuAnchor`) make.
+The full, runnable version is `examples/selector_actions.zig` (`zig build
+selector_actions`), next to a toolbar-sized `Dropdown`.
 
 ```zig
 // App state (setup, once):

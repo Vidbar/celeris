@@ -30,6 +30,7 @@ const events = @import("events.zig");
 const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
 const theme_mod = @import("theme.zig");
+const builder_mod = @import("builder.zig");
 
 const BuildContext = component.BuildContext;
 const Text = component.Text;
@@ -54,8 +55,9 @@ pub const Dropdown = struct {
     /// for a programmatic write. `ev.name = "change"`, `ev.item_id` = the new
     /// index, `ev.node_id` = the trigger.
     on_change: ?events.Handler = null,
-    /// Trigger width in px; `null` = hug the current label (only inside a flex
-    /// row — a hugged dropdown in a stretching column still takes its width).
+    /// Trigger width in px; `null` = fit the widest option (plus padding and
+    /// arrow), so every menu row fits and the trigger keeps one width whatever
+    /// is selected — what WinUI's `ComboBox` does.
     width: ?f32 = 150,
     /// Trigger height in px; option rows use it too (min 24).
     height: f32 = 32,
@@ -109,6 +111,19 @@ pub const Dropdown = struct {
     fn effective(self: *const Dropdown, raw: usize) usize {
         if (self.options.len == 0) return 0;
         return @min(raw, self.options.len - 1);
+    }
+
+    /// `width = null`: widest option + the trigger's chrome (10 px padding each
+    /// side, 8 px gap, arrow, 1 px borders). `measure` is `b.measure`; headless
+    /// builds fall back to a per-character estimate.
+    fn fitWidth(self: *const Dropdown, measure: ?builder_mod.TextMeasure) f32 {
+        var widest: f32 = 0;
+        for (self.options) |opt| {
+            const w = if (measure) |m| m.width(opt, self.font_size) else @as(f32, @floatFromInt(opt.len)) * self.font_size * 0.6;
+            widest = @max(widest, w);
+        }
+        const arrow = if (measure) |m| m.width("v", 12) else 7;
+        return @ceil(widest + arrow + 10 * 2 + 8 + 2);
     }
 
     fn rowH(self: *const Dropdown) f32 {
@@ -187,7 +202,7 @@ pub const Dropdown = struct {
         self.item_ids.clearRetainingCapacity();
 
         self.root_id = try b.openNodeKeyed(.box, null);
-        if (self.width) |w| try b.width(self.root_id, w, .px);
+        try b.width(self.root_id, self.width orelse self.fitWidth(b.measure), .px);
 
         // Backdrop: full-window catcher below the menu; sized to 0 when closed.
         self.backdrop_id = try ctx.boxNode(.{
@@ -214,9 +229,7 @@ pub const Dropdown = struct {
         }, .{
             TriggerLabel{ .dd = self },
         });
-        // Fixed width: the trigger fills the root. Hug (`width = null`): it keeps
-        // its intrinsic (label + arrow) width and the root hugs it.
-        if (self.width != null) try b.store.setLayout(self.trigger_id, .width, .{ .dimension = .{ .value = 100, .unit = .percent } });
+        try b.store.setLayout(self.trigger_id, .width, .{ .dimension = .{ .value = 100, .unit = .percent } });
         try b.borderColorAlpha(self.trigger_id, 80, 80, 80, 255);
         // The combobox role + expand/collapse state live on the trigger, which is
         // the node that actually carries the click handler — so UIA's
@@ -621,13 +634,24 @@ test "Dropdown height/width are real geometry: 26 px toolbar trigger, menu docke
     try testing.expectApproxEqAbs(@as(f32, 3 * 26), menu.height, 0.5);
 }
 
-test "Dropdown width = null hugs its label instead of the fixed 150 px" {
+test "Dropdown width = null fits the WIDEST option, so menu rows fit and the trigger never jumps" {
+    // Found in the selector_actions example: hugging the *current* label made
+    // the menu (100% of the trigger) narrower than "ReleaseSafe" while
+    // "Debug" was selected.
     var e = ts.Harness.init(testing.allocator);
     defer e.deinit();
     e.wire();
-    const m = try mountInRow(&e, .{ .options = &.{"Go"}, .width = null });
+    const opts = [_][]const u8{ "Go", "A much longer option" };
+    var sel = signals.Signal(usize).init(testing.allocator, 0);
+    defer sel.deinit();
+    const m = try mountInRow(&e, .{ .options = &opts, .selected = &sel, .width = null });
     e.solve(m.root, 800, 600);
-    const w = e.geom(m.dd.trigger_id).width;
-    try testing.expect(w > 20);
-    try testing.expect(w < 150);
+    const w0 = e.geom(m.dd.trigger_id).width;
+    try testing.expectApproxEqAbs(m.dd.fitWidth(null), w0, 0.5);
+
+    sel.set(1);
+    _ = e.router.route(.{ .name = "click", .id = "", .node_id = m.dd.trigger_id });
+    e.solve(m.root, 800, 600);
+    try testing.expectApproxEqAbs(w0, e.geom(m.dd.trigger_id).width, 0.5);
+    try testing.expectApproxEqAbs(w0, e.geom(m.dd.menu_id).width, 0.5);
 }

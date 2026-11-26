@@ -18,7 +18,8 @@ No C-ABI change.
   the app can write it at any time and the trigger follows without a rebuild; a
   user pick writes it back. Without it, the internal state is seeded from
   `.initial_selected`. The shown index is clamped to the options. New `.width`
-  (default 150, `null` = hug the label), `.height` (default 32, also sizes the
+  (default 150; `null` = fit the widest option, so the menu rows fit and the
+  trigger keeps one width), `.height` (default 32, also sizes the
   option rows, min 24) and `.font_size` (default 14); the menu docks under the
   trigger at any height.
 - **BREAKING: `Dropdown.on_change` event.** It now fires only when a user pick
@@ -32,9 +33,10 @@ No C-ABI change.
   choosing writes the group, then `on_select`). `addHeader(label)` adds a
   non-selectable group title (`MenuItemKind.header`). `popupBelow(node, gap,
   origin)` opens the menu under a node's resolved geometry.
-- **Docs:** recipe "Selector with actions" (Button + Menu with radio items, a
-  separator and command rows) in `docs/FRAMEWORK_API.md`, for pickers that also
-  run commands such as "Edit Configurations…".
+- **Docs and example:** recipe "Selector with actions" (Button + Menu with radio
+  items, a separator and command rows) in `docs/FRAMEWORK_API.md`, for pickers
+  that also run commands such as "Edit Configurations…". Runnable as
+  `zig build selector_actions` (`examples/selector_actions.zig`).
 
 ## 0.11.1 — 2026-11-24
 
