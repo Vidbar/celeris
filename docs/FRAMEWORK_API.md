@@ -506,7 +506,7 @@ Navigation drives the `.selected` signal, so it composes with the lifted-state r
 
 **TreeView click gestures.** A branch row has two hit-targets:
 
-- The **caret** (the ▸/▾ disclosure triangle) always toggles expand/collapse and never touches the selection. The glyphs are overridable via `.caret_collapsed` / `.caret_expanded`, for a different look or a font that lacks them.
+- The **caret** (the disclosure chevron, Codicons `chevron_right` / `chevron_down` by default) always toggles expand/collapse and never touches the selection. The glyphs are overridable via `.caret_collapsed` / `.caret_expanded`, e.g. `"▸"` / `"▾"` for the classic triangles.
 - The **row body** always selects. By default it *also* toggles a branch (the classic file-tree gesture). Pass `.toggle_on_row_click = false` for the DevTools/IDE pattern where clicking a container only selects it — expanding stays available via the caret, ←/→, and Enter. This is the right setting for inspectors, where the most-inspected nodes are branches and collapsing on select is disruptive.
 
 **TreeView expansion and activation events.** Three optional `events.Handler` props (build them with `ctx.handler`). Each receives a synthesized event whose `ev.name` is `"expand"`, `"collapse"` or `"activate"` and whose `ev.item_id` is the `TreeNode.id`:

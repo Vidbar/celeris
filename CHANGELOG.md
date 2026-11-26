@@ -35,6 +35,9 @@ No C-ABI change.
   non-selectable group title (`MenuItemKind.header`). `popupBelow(node, gap,
   origin)` opens the menu under a node's resolved geometry. Submenu rows show the
   Codicon `chevron_right` instead of the `▸` text glyph.
+- **`TreeView` caret defaults to Codicons.** `caret_collapsed` / `caret_expanded`
+  default to `icons.chevron_right` / `icons.chevron_down` instead of `▸` / `▾`;
+  pass the triangles explicitly to keep the old look.
 - **Docs and example:** recipe "Selector with actions" (Button + Menu with radio
   items, a separator and command rows) in `docs/FRAMEWORK_API.md`, for pickers
   that also run commands such as "Edit Configurations…". Runnable as

@@ -51,6 +51,7 @@ const events = @import("events.zig");
 const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
 const theme_mod = @import("theme.zig");
+const icons = @import("icons.zig");
 const text_render = @import("../render/text.zig");
 const column_header = @import("column_header.zig");
 
@@ -170,12 +171,12 @@ pub const TreeView = struct {
     /// is always clickable and toggles without touching the selection), keyboard
     /// ←/→, or Enter.
     toggle_on_row_click: bool = true,
-    /// Disclosure glyph for an expanded branch. Defaults to a real down-pointing
-    /// triangle (▾, U+25BE); override for a different look or if the loaded font
-    /// lacks the triangle glyphs.
-    caret_expanded: []const u8 = "▾",
-    /// Disclosure glyph for a collapsed branch (▸, U+25B8 by default).
-    caret_collapsed: []const u8 = "▸",
+    /// Disclosure glyph for an expanded branch. Defaults to the bundled Codicon
+    /// `chevron_down` (embedded with the engine, so no font can lack it);
+    /// override for a different look, e.g. `"▾"`.
+    caret_expanded: []const u8 = icons.chevron_down,
+    /// Disclosure glyph for a collapsed branch (Codicon `chevron_right` by default).
+    caret_collapsed: []const u8 = icons.chevron_right,
     /// Fired (event name "expand", branch id in `ev.item_id`) whenever a gesture
     /// asks to expand a branch: caret click, row click when `toggle_on_row_click`,
     /// →, Enter. Fires in both modes; uncontrolled, after the rows are rebuilt.
