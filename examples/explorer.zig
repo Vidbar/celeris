@@ -101,7 +101,7 @@ const ExplorerApp = struct {
 
         try ctx.mountOwned(fw.button.Button, .{
             .key = "section",
-            .label = "\u{02C5} EXPLORER",
+            .label = fw.icons.chevron_down ++ " EXPLORER",
             .justify = .start,
             .radius = 0,
             .padding = fw.component.EdgeInsets{ .l = 4, .t = 2, .b = 2 },
