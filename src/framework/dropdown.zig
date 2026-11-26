@@ -31,6 +31,7 @@ const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
 const theme_mod = @import("theme.zig");
 const builder_mod = @import("builder.zig");
+const icons = @import("icons.zig");
 
 const BuildContext = component.BuildContext;
 const Text = component.Text;
@@ -40,6 +41,8 @@ const EdgeInsets = component.EdgeInsets;
 const MENU_GAP: f32 = 4;
 /// Option rows never get shorter than this, however small the trigger.
 const MIN_ROW_H: f32 = 24;
+/// Size of the chevron (a Codicon) at the trigger's right edge.
+const ARROW_SIZE: f32 = 12;
 
 pub const Dropdown = struct {
     // Props (set from mountOwned's init_props; re-applied on rebuild).
@@ -138,7 +141,9 @@ pub const Dropdown = struct {
             const w = if (measure) |m| m.width(opt, size) else @as(f32, @floatFromInt(opt.len)) * size * 0.6;
             widest = @max(widest, w);
         }
-        const arrow = if (measure) |m| m.width("v", 12) else 7;
+        // Codicon glyphs are ~1em wide; a measure that misses the icon fallback
+        // font must not shrink the reserve below that.
+        const arrow = if (measure) |m| @max(m.width(icons.chevron_down, ARROW_SIZE), ARROW_SIZE) else ARROW_SIZE;
         return @ceil(widest + arrow + 10 * 2 + 8 + 2);
     }
 
@@ -295,7 +300,7 @@ pub const Dropdown = struct {
         const trig_bg = if (hovered) t.bg_input else t.bg_surface;
         store.setStyle(self.trigger_id, .background, props.PropValue.rgbA(trig_bg.r, trig_bg.g, trig_bg.b, 1.0)) catch {};
 
-        if (store.stringAllocator().dupe(u8, if (open) "^" else "v")) |arrow_str| {
+        if (store.stringAllocator().dupe(u8, if (open) icons.chevron_up else icons.chevron_down)) |arrow_str| {
             store.setTextContent(self.arrow_id, arrow_str);
         } else |_| {}
         if (self.options.len > 0) {
@@ -333,8 +338,8 @@ const TriggerLabel = struct {
         try b.fontSize(self.dd.label_id, st.size);
         if (st.line_height) |lh| try b.store.setStyle(self.dd.label_id, .line_height, .{ .number = lh });
         try b.textColor(self.dd.label_id, t.text.r, t.text.g, t.text.b);
-        self.dd.arrow_id = try b.addText("v");
-        try b.fontSize(self.dd.arrow_id, 12);
+        self.dd.arrow_id = try b.addText(icons.chevron_down);
+        try b.fontSize(self.dd.arrow_id, ARROW_SIZE);
         try b.textColor(self.dd.arrow_id, t.text.r, t.text.g, t.text.b);
     }
     pub fn deinit(_: *TriggerLabel) void {}

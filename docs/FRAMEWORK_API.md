@@ -812,9 +812,11 @@ pub fn build(self: *App, ctx: *fw.component.BuildContext) !void {
         .focusable = true,
         .on_click = ctx.handler(self, onPicker),
     }, .{
-        // dynText keeps the label in sync with self.config, no rebuild.
-        ConfigLabel{ .app = self },
-        fw.component.Text{ .content = "\u{25BE}", .size = 10 },
+        // The label text node; an effect (bindVisuals) sets it from
+        // configs[config] whenever config changes, no rebuild.
+        PickerLabel{ .app = self },
+        // Codicon chevron (icons render through the text pipeline).
+        fw.component.Text{ .content = fw.icons.chevron_down, .size = 12 },
     });
     // ... and the Menu itself as the last child of the window root:
     try ctx.mount(self.menu);

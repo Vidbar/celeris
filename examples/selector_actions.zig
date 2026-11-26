@@ -139,7 +139,7 @@ const App = struct {
             .on_click = ctx.handler(self, onPicker),
         }, .{
             PickerLabel{ .app = self },
-            fw.component.Text{ .content = "v", .size = 10, .color = fw.component.rgb(t.text.r, t.text.g, t.text.b) },
+            fw.component.Text{ .content = fw.icons.chevron_down, .size = 12, .color = fw.component.rgb(t.text.r, t.text.g, t.text.b) },
         });
         try b.role(self.picker_btn, "button");
         try b.ariaLabel(self.picker_btn, "Run configuration");

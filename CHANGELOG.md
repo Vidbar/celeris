@@ -21,7 +21,8 @@ No C-ABI change.
   (default 150; `null` = fit the widest option, so the menu rows fit and the
   trigger keeps one width), `.height` (default 32, also sizes the
   option rows, min 24) and `.font_size` (default: the theme's `body_medium`); the menu docks under the
-  trigger at any height.
+  trigger at any height. The trigger arrow is now the Codicon chevron
+  (`icons.chevron_down` / `chevron_up`) instead of the ASCII `v` / `^`.
 - **BREAKING: `Dropdown.on_change` event.** It now fires only when a user pick
   changes the selection (re-picking the current option no longer fires), with
   `ev.name = "change"`, `ev.item_id` = the new index and `ev.node_id` = the
