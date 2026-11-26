@@ -26,6 +26,7 @@ const props = @import("../core/properties.zig");
 const reg = @import("../core/registry.zig");
 const layout = @import("../layout/flexbox.zig");
 const theme_mod = @import("theme.zig");
+const icons = @import("icons.zig");
 
 /// `Theme` tokens default to fully transparent (`theme.zig`'s `Color.transparent()`
 /// default), so an untheme'd host (or `testTheme()` below) would render an
@@ -799,9 +800,11 @@ pub const Menu = struct {
                 try b.textColor(shortcut, shortcut_color.r, shortcut_color.g, shortcut_color.b);
             }
 
-            // Submenu arrow indicator.
+            // Submenu arrow indicator (Codicon chevron; the margin replaces the
+            // two leading spaces the old "  ▸" text used as a gap).
             if (it.submenu != null) {
-                const arrow = try b.addText("  \u{25B8}");
+                const arrow = try b.addText(icons.chevron_right);
+                try b.marginLeft(arrow, 8);
                 try b.fontSize(arrow, 12);
                 try b.textColor(arrow, self.theme.text.r, self.theme.text.g, self.theme.text.b);
             }
@@ -843,7 +846,7 @@ pub const Menu = struct {
     fn contentWidth(self: *Menu, measure: ?builder_mod.TextMeasure) f32 {
         const check_col: f32 = CHECK_COL; // reserved for the "✓  " glyph column
         const h_padding: f32 = 24; // row's 12px left + 12px right padding
-        const arrow_w: f32 = 20; // "  ▸" submenu indicator
+        const arrow_w: f32 = 20; // 8 px gap + 12 px chevron_right icon
         const shortcut_gap: f32 = 16; // space between label and shortcut chord
         var w: f32 = PANEL_W;
         for (self.items.items) |it| {

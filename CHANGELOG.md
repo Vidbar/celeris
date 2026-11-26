@@ -33,7 +33,8 @@ No C-ABI change.
   value)` binds a row to a caller-owned `Signal(usize)` (bullet shown live,
   choosing writes the group, then `on_select`). `addHeader(label)` adds a
   non-selectable group title (`MenuItemKind.header`). `popupBelow(node, gap,
-  origin)` opens the menu under a node's resolved geometry.
+  origin)` opens the menu under a node's resolved geometry. Submenu rows show the
+  Codicon `chevron_right` instead of the `▸` text glyph.
 - **Docs and example:** recipe "Selector with actions" (Button + Menu with radio
   items, a separator and command rows) in `docs/FRAMEWORK_API.md`, for pickers
   that also run commands such as "Edit Configurations…". Runnable as
