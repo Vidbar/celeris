@@ -9,7 +9,9 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
-## Unreleased
+## 0.14.0 — 2026-11-27
+
+No C-ABI change.
 
 - **File-type icons.** `icons` gains `file_code`, `file_media`, `file_pdf`, `file_zip`,
   `file_binary`, `file_text`, `json`, `markdown`, `gear`, `lock`, `package`,
