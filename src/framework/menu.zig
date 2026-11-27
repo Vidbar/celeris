@@ -204,6 +204,11 @@ pub const Menu = struct {
     /// while set, `row_ids`/`check_ids`/`label_ids` describe the previous
     /// items and `updateVisuals` must not paint through them.
     rows_stale: bool = false,
+    /// Set when this panel was placed on the left of its requested point (a
+    /// context menu flipped at the right window edge, a submenu cascading
+    /// left). Its submenus then try the left side first, so a cascade keeps
+    /// one direction instead of zigzagging.
+    open_left: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, id: []const u8) !*Menu {
         const self = try allocator.create(Menu);
@@ -307,7 +312,28 @@ pub const Menu = struct {
     /// `.pointer` since every current caller (a `MenuBar` button's click
     /// handler, `on_select`-less test helpers) is mouse-driven; pass
     /// `.keyboard` explicitly for an accelerator-driven open once one exists.
+    ///
+    /// The panel is kept inside the window (the top of its ancestor chain): past the
+    /// right edge it opens to the left of `x`, past the bottom edge above `y`
+    /// (where that fits), and it is finally clamped so it never starts left
+    /// of / above the window. Before the first layout it opens at (x, y)
+    /// as given.
     pub fn popup(self: *Menu, x: f32, y: f32, origin: events.FocusOrigin) void {
+        const size = self.panelSize();
+        if (self.visibleBounds()) |bnd| {
+            const px = fitAxis(x, x - size.w, size.w, bnd.x, bnd.w);
+            const py = fitAxis(y, y - size.h, size.h, bnd.y, bnd.h);
+            self.open_left = px < x;
+            self.openAt(px, py, origin);
+        } else {
+            self.open_left = false;
+            self.openAt(x, y, origin);
+        }
+    }
+
+    /// Opens at (x, y) exactly — the shared tail of every `popup*` entry point,
+    /// after placement has been decided.
+    fn openAt(self: *Menu, x: f32, y: f32, origin: events.FocusOrigin) void {
         self.pos_x.set(x);
         self.pos_y.set(y);
         self.highlighted.set(-1);
@@ -352,16 +378,91 @@ pub const Menu = struct {
     /// Enter/Space opened it and highlight `firstEnabled()` yourself if wanted.
     /// Before the anchor has been laid out it opens at the containing block's
     /// origin.
+    ///
+    /// Kept inside the window (the top of its ancestor chain): a panel that would
+    /// cross the right edge aligns its right edge with the anchor's instead,
+    /// one that would cross the bottom edge opens above the anchor; if neither
+    /// side fits it takes the roomier one, then clamps so it never starts left
+    /// of / above the window.
     pub fn popupBelow(self: *Menu, anchor: reg.NodeId, gap: f32, origin: events.FocusOrigin) void {
+        const st = self.store orelse return self.popup(0, 0, origin);
+        const rg = st.registry orelse return self.popup(0, 0, origin);
+        const n = rg.getNode(anchor) orelse return self.popup(0, 0, origin);
+        // Anchor rect in the backdrop's containing block (see `popupWindow`).
+        var ax = n.geometry.x;
+        var ay = n.geometry.y;
+        if (rg.getNode(self.backdrop_id)) |bd| {
+            ax -= bd.geometry.x;
+            ay -= bd.geometry.y;
+        }
+        const aw = n.geometry.width;
+        const ah = n.geometry.height;
+        const below = ay + ah + gap;
+        const bnd = self.visibleBounds() orelse {
+            self.open_left = false;
+            return self.openAt(ax, below, origin);
+        };
+        const size = self.panelSize();
+        const px = fitAxis(ax, ax + aw - size.w, size.w, bnd.x, bnd.w);
+        const py = fitAxis(below, ay - gap - size.h, size.h, bnd.y, bnd.h);
+        self.open_left = px < ax;
+        self.openAt(px, py, origin);
+    }
+
+    const Rect = struct { x: f32, y: f32, w: f32, h: f32 };
+    const Size = struct { w: f32, h: f32 };
+
+    /// The window — the top of the backdrop's ancestor chain — in the panel's
+    /// own coordinate space (the one `pos_x/pos_y` live in). It is the window,
+    /// not the containing block: a `MenuBar` mounts its menus inside a 44 px
+    /// caption, and bounding by that would pin a taller panel over the bar.
+    /// Subtracting the backdrop's origin folds in any `scroll_offset_x/y` pan.
+    /// Null before the first layout (nothing to clamp against).
+    fn visibleBounds(self: *Menu) ?Rect {
+        const st = self.store orelse return null;
+        const rg = st.registry orelse return null;
+        const bd = rg.getNode(self.backdrop_id) orelse return null;
+        var p = rg.getNode(bd.parent) orelse return null;
+        while (rg.getNode(p.parent)) |up| p = up;
+        if (p.geometry.width <= 0 or p.geometry.height <= 0) return null;
+        return .{
+            .x = p.geometry.x - bd.geometry.x,
+            .y = p.geometry.y - bd.geometry.y,
+            .w = p.geometry.width,
+            .h = p.geometry.height,
+        };
+    }
+
+    /// The panel's size once open. Width is the resolved geometry — explicit,
+    /// so valid even while closed — falling back to the unmeasured estimate
+    /// before the first layout; height is the content height (0 while closed
+    /// in the layout, so it can't come from geometry).
+    fn panelSize(self: *Menu) Size {
+        var w: f32 = 0;
         if (self.store) |st| {
             if (st.registry) |rg| {
-                if (rg.getNode(anchor)) |n| {
-                    self.popupWindow(n.geometry.x, n.geometry.y + n.geometry.height + gap, origin);
-                    return;
-                }
+                if (rg.getNode(self.panel_id)) |node| w = node.geometry.width;
             }
         }
-        self.popup(0, 0, origin);
+        if (w <= 0) w = self.contentWidth(null);
+        return .{ .w = w, .h = self.contentHeight() };
+    }
+
+    /// One axis of the placement: a `size`-long span inside `[lo, lo + len]`.
+    /// `pref` if it fits, else `alt` if that fits, else whichever of the two
+    /// has more room; then clamped so it never starts before `lo` (a span
+    /// larger than the area pins to `lo`).
+    fn fitAxis(pref: f32, alt: f32, size: f32, lo: f32, len: f32) f32 {
+        const hi = lo + len;
+        var v = pref;
+        if (pref < lo or pref + size > hi) {
+            if (alt >= lo and alt + size <= hi) {
+                v = alt;
+            } else if (alt + size - lo > hi - pref) {
+                v = alt;
+            }
+        }
+        return @max(lo, @min(v, hi - size));
     }
 
     /// Closes this menu and, recursively, any open submenu beneath it. Pops the
@@ -431,9 +532,26 @@ pub const Menu = struct {
                 }
             }
         }
-        const x = self.pos_x.peek() + panel_w - 4;
-        const y = self.pos_y.peek() + self.rowOffsetY(idx);
-        sub.popup(x, y, origin);
+        // Right of the parent (overlapping it by 4 px), or mirrored to its
+        // left; a cascade that already went left tries left first. Vertically
+        // top-aligned with the row, or bottom-aligned with it when that runs
+        // past the bottom edge.
+        const px = self.pos_x.peek();
+        const right = px + panel_w - 4;
+        const size = sub.panelSize();
+        const left = px - size.w + 4;
+        const row_y = self.pos_y.peek() + self.rowOffsetY(idx);
+        const row_h = rowHeight(self.items.items[idx]);
+        const bnd = sub.visibleBounds() orelse {
+            sub.open_left = false;
+            return sub.openAt(right, row_y, origin);
+        };
+        const x = if (self.open_left)
+            fitAxis(left, right, size.w, bnd.x, bnd.w)
+        else
+            fitAxis(right, left, size.w, bnd.x, bnd.w);
+        sub.open_left = x < px;
+        sub.openAt(x, fitAxis(row_y, row_y + row_h - size.h, size.h, bnd.y, bnd.h), origin);
     }
 
     fn onDismiss(self: *Menu, ev: events.Event) void {
@@ -1108,17 +1226,15 @@ pub const MenuBar = struct {
                 // click arrives. `popupWindow` maps it into the menu's own
                 // containing block, so a MenuBar nested inside an offset
                 // container (e.g. a custom window caption) isn't shifted by it.
-                var x: f32 = 0;
-                var y: f32 = self.height;
-                if (self.registry) |rg| {
-                    if (rg.getNode(e.btn_id)) |node| {
-                        x = node.geometry.x;
-                        y = node.geometry.y + node.geometry.height;
-                    }
-                }
+                // `popupBelow` also keeps it inside the window (right-aligned
+                // with the button near the right edge).
                 // Only entry point today is the button's `.click` handler
                 // (registered below) — always mouse-driven, so `.pointer`.
-                e.menu.popupWindow(x, y, .pointer);
+                if (self.registry != null and self.registry.?.getNode(e.btn_id) != null) {
+                    e.menu.popupBelow(e.btn_id, 0, .pointer);
+                } else {
+                    e.menu.popupWindow(0, self.height, .pointer);
+                }
             }
             return;
         }
@@ -2243,6 +2359,61 @@ test "MenuBar: a menu added after the first build still gets its open highlight"
     try testing.expect(!debug.isOpen());
     try testing.expectApproxEqAbs(@as(f32, 0), btnAlpha(&env, bar, 1), 0.001);
 }
+
+test "MenuBar: in a 44 px caption, the last button's wide menu opens below it, right-aligned, inside the window" {
+    // The titlebar_proto shape: a hugged MenuBar at the right end of a 44 px
+    // caption row, so its menus are mounted INSIDE the caption. Bounds must be
+    // the window: bounded by the caption, a taller panel fits neither below
+    // nor above and would be pinned over the bar.
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+
+    const file = try Menu.init(testing.allocator, "file");
+    defer file.deinit();
+    try file.addItem("New", "new");
+    const view = try Menu.init(testing.allocator, "view");
+    defer view.deinit();
+    view.max_width = 400;
+    try view.addItem("A label long enough to need the whole four hundred pixel panel width", "x");
+    try view.addItem("Zoom", "zoom");
+    const bar = try MenuBar.init(testing.allocator, "mbar");
+    defer bar.deinit();
+    bar.height = 44;
+    bar.hug = true;
+    try bar.addMenu("File", file);
+    try bar.addMenu("View", view);
+
+    const root = try bld.openBox();
+    try bld.width(root, 800, .px);
+    try bld.height(root, 600, .px);
+    try bld.flexColumn(root);
+    const caption = try bld.openBox();
+    try bld.flexRow(caption);
+    try bld.height(caption, 44, .px);
+    const spacer = try bld.openBox();
+    try bld.flexGrow(spacer, 1);
+    bld.close();
+    try bar.build(&ctx);
+    bld.close(); // caption
+    bld.close(); // root
+    env.solve(root, 800, 600);
+
+    const btn = bar.entries.items[1].btn_id;
+    const b = env.geom(btn);
+    try testing.expect(b.x + b.width > 800 - 100); // really at the right edge
+
+    _ = env.router.route(.{ .name = "click", .id = "", .node_id = btn });
+    env.solve(root, 800, 600);
+    try testing.expect(view.isOpen());
+    const p = env.geom(view.panel_id);
+    try expectInside(p, 800, 600);
+    try testing.expectApproxEqAbs(@as(f32, 44), p.y, 0.5);
+    try testing.expectApproxEqAbs(b.x + b.width, p.x + p.width, 0.5);
+}
 test "Accelerators: chord lookup respects every modifier" {
     var acc = Accelerators.init(testing.allocator);
     defer acc.deinit();
@@ -2478,6 +2649,175 @@ test "Menu.popupBelow docks the panel under the anchor's resolved geometry" {
     const p = env.geom(m.panel_id);
     try testing.expectApproxEqAbs(a.x, p.x, 0.5);
     try testing.expectApproxEqAbs(a.y + a.height + 2, p.y, 0.5);
+}
+
+// ── Keeping popups inside the window ──
+
+/// 800x600 root with an absolutely placed 80x26 anchor at (ax, ay) and `m`
+/// mounted next to it; solved once.
+fn buildEdgeScene(env: *ts.Harness, m: *Menu, ax: f32, ay: f32) !struct { root: reg.NodeId, anchor: reg.NodeId } {
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+    const root = try bld.openBox();
+    try bld.width(root, 800, .px);
+    try bld.height(root, 600, .px);
+    const anchor = try bld.openBox();
+    try env.store.setLayout(anchor, .position, .{ .keyword = .absolute });
+    try env.store.setLayout(anchor, .left, .{ .dimension = .{ .value = ax, .unit = .px } });
+    try env.store.setLayout(anchor, .top, .{ .dimension = .{ .value = ay, .unit = .px } });
+    try bld.width(anchor, 80, .px);
+    try bld.height(anchor, 26, .px);
+    bld.close();
+    try m.build(&ctx);
+    bld.close();
+    env.solve(root, 800, 600);
+    return .{ .root = root, .anchor = anchor };
+}
+
+fn expectInside(p: anytype, w: f32, h: f32) !void {
+    try testing.expect(p.x >= -0.5 and p.y >= -0.5);
+    try testing.expect(p.x + p.width <= w + 0.5);
+    try testing.expect(p.y + p.height <= h + 0.5);
+}
+
+test "Menu.popupBelow: a 400 px menu 100 px from the right edge opens fully inside, right-aligned with the anchor" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    const m = try Menu.init(testing.allocator, "wide");
+    defer m.deinit();
+    m.max_width = 400;
+    try m.addItem("A label long enough to need the whole four hundred pixel panel width", "x");
+    // Anchor's right edge sits 100 px from the window's right edge.
+    const s = try buildEdgeScene(&env, m, 620, 40);
+
+    m.popupBelow(s.anchor, 2, .pointer);
+    env.solve(s.root, 800, 600);
+    const a = env.geom(s.anchor);
+    const p = env.geom(m.panel_id);
+    try testing.expectApproxEqAbs(@as(f32, 400), p.width, 0.5);
+    try expectInside(p, 800, 600);
+    try testing.expectApproxEqAbs(a.x + a.width, p.x + p.width, 0.5);
+    try testing.expectApproxEqAbs(a.y + a.height + 2, p.y, 0.5);
+}
+
+test "Menu.popupBelow: near the bottom edge it opens above the anchor" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    const m = try Menu.init(testing.allocator, "low");
+    defer m.deinit();
+    try m.addItem("One", "one");
+    try m.addItem("Two", "two");
+    try m.addItem("Three", "three");
+    const s = try buildEdgeScene(&env, m, 100, 560);
+
+    m.popupBelow(s.anchor, 2, .pointer);
+    env.solve(s.root, 800, 600);
+    const a = env.geom(s.anchor);
+    const p = env.geom(m.panel_id);
+    try expectInside(p, 800, 600);
+    try testing.expectApproxEqAbs(a.y - 2, p.y + p.height, 0.5);
+    try testing.expectApproxEqAbs(a.x, p.x, 0.5);
+}
+
+test "Menu.popupWindow: a context menu at the bottom-right corner flips left/up, never negative" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    const m = try Menu.init(testing.allocator, "corner");
+    defer m.deinit();
+    try m.addItem("Cut", "cut");
+    try m.addItem("Copy", "copy");
+    const s = try buildEdgeScene(&env, m, 0, 0);
+
+    m.popupWindow(790, 590, .pointer);
+    env.solve(s.root, 800, 600);
+    const p = env.geom(m.panel_id);
+    try expectInside(p, 800, 600);
+    try testing.expectApproxEqAbs(@as(f32, 790), p.x + p.width, 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 590), p.y + p.height, 0.5);
+
+    // Wider than the window: pinned to x = 0, not negative.
+    m.close();
+    try env.store.setLayout(m.panel_id, .width, .{ .dimension = .{ .value = 1000, .unit = .px } });
+    env.solve(s.root, 800, 600);
+    m.popupWindow(400, 10, .pointer);
+    env.solve(s.root, 800, 600);
+    try testing.expectApproxEqAbs(@as(f32, 0), env.geom(m.panel_id).x, 0.5);
+}
+
+test "Menu submenu: against the right edge it cascades left, and its submenu keeps going left" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    const root_m = try Menu.init(testing.allocator, "r");
+    defer root_m.deinit();
+    const sub = try Menu.init(testing.allocator, "s");
+    defer sub.deinit();
+    const sub2 = try Menu.init(testing.allocator, "s2");
+    defer sub2.deinit();
+    try sub2.addItem("Leaf", "leaf");
+    try sub.addSubmenu("Deeper", sub2);
+    try root_m.addSubmenu("More", sub);
+
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+    const root = try bld.openBox();
+    try bld.width(root, 800, .px);
+    try bld.height(root, 600, .px);
+    try root_m.build(&ctx);
+    try sub.build(&ctx);
+    try sub2.build(&ctx);
+    bld.close();
+    env.solve(root, 800, 600);
+
+    // Root fits (its right edge 10 px from the window's), its submenu can't.
+    const rw = env.geom(root_m.panel_id).width;
+    root_m.popup(790 - rw, 20, .pointer);
+    env.solve(root, 800, 600);
+    root_m.openSubAt(sub, 0, .keyboard);
+    env.solve(root, 800, 600);
+    const rp = env.geom(root_m.panel_id);
+    const sp = env.geom(sub.panel_id);
+    try expectInside(sp, 800, 600);
+    try testing.expectApproxEqAbs(rp.x + 4, sp.x + sp.width, 0.5);
+
+    sub.openSubAt(sub2, 0, .keyboard);
+    env.solve(root, 800, 600);
+    const s2 = env.geom(sub2.panel_id);
+    try expectInside(s2, 800, 600);
+    try testing.expectApproxEqAbs(sp.x + 4, s2.x + s2.width, 0.5);
+}
+
+test "Menu.popupWindow: in a scrolled container the menu stays inside the visible area" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    const m = try Menu.init(testing.allocator, "scrolled");
+    defer m.deinit();
+    try m.addItem("One", "one");
+
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+    const root = try bld.openBox();
+    try bld.width(root, 800, .px);
+    try bld.height(root, 600, .px);
+    try env.store.setLayout(root, .scroll_offset_y, .{ .dimension = .{ .value = 300, .unit = .px } });
+    try m.build(&ctx);
+    bld.close();
+    env.solve(root, 800, 600);
+
+    m.popupWindow(100, 590, .pointer);
+    env.solve(root, 800, 600);
+    const p = env.geom(m.panel_id);
+    try expectInside(p, 800, 600);
+    // Flipped above the pointer in the *visible* area; bounds that ignored the
+    // 300 px pan would clamp it far higher (window y ~260).
+    try testing.expectApproxEqAbs(@as(f32, 590), p.y + p.height, 0.5);
 }
 
 test "BUG: reloading items (clearItems + addRadio) then writing the group indexed stale rows out of bounds" {

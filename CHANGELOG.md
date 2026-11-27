@@ -9,6 +9,20 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No C-ABI change.
+
+- **`Menu`: popups stay inside the window.** `popup`, `popupWindow`, `popupBelow`
+  and submenus used to open at the requested point without checking the
+  container size, so a wide menu near the right edge ran past it. Now a context
+  menu opens to the left of / above the pointer at the right or bottom edge.
+  `popupBelow` right-aligns with the anchor or opens above it. Submenus cascade
+  left and keep that direction. The panel is always clamped so it never starts at
+  a negative x/y. The bounds are the window (the root of the node tree), wherever
+  the Menu is mounted, including a `MenuBar` inside a custom caption. `MenuBar` now opens its menus
+  through `popupBelow`, so they get the same right-edge alignment.
+
 ## 0.12.0 — 2026-11-25
 
 No C-ABI change.

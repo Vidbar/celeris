@@ -728,6 +728,16 @@ not inside a clipped (`overflowHidden`) or panned canvas: a clip also cuts the
 panel (z-index does not escape an ancestor's clip), and a pan translates it.
 Opening it from a press that also triggers a rebuild is fine.
 
+**Staying inside the window.** Every `popup*` keeps the panel inside the window
+(the root of the node tree), wherever the Menu is mounted. This includes a
+`MenuBar` inside a 44 px custom caption. A context menu that would cross the right or bottom edge opens to the
+left of / above the pointer. `popupBelow` right-aligns with the anchor or opens
+above it. A submenu cascades to the left of its parent, and its own submenus keep
+going left. If neither side fits, the roomier side is used, and the panel is then
+clamped so it never starts at a negative x or y. A panel larger than the
+window is pinned to its top-left corner and cut. The menu does not scroll, and
+it is not re-placed if the window is resized while it is open.
+
 ```zig
 // setup (once):  self.ctx_menu = try fw.menu.Menu.init(gpa, "node_ctx");
 //                try self.ctx_menu.addItem("Delete", "delete");
@@ -778,7 +788,8 @@ State that a menu *shows* (checkmarks, enabled items) is lifted as usual, throug
 - `addHeader(label)` adds a dimmed group title. It is not clickable and keyboard
   navigation skips it, like a separator.
 - `popupBelow(anchor_node, gap, origin)` opens the menu docked under a node's
-  resolved geometry (left edges aligned). Use it from a button's click handler
+  resolved geometry (left edges aligned; right edges aligned near the right
+  window edge, above the anchor near the bottom). Use it from a button's click handler
   for a menu button, split button or toolbar selector.
 
 ### Recipe: selector with actions ("Edit Configurations…")
