@@ -22,6 +22,8 @@ No C-ABI change.
   a negative x/y. The bounds are the window (the root of the node tree), wherever
   the Menu is mounted, including a `MenuBar` inside a custom caption. `MenuBar` now opens its menus
   through `popupBelow`, so they get the same right-edge alignment.
+- **`Menu`: a window resize closes the open menu**, as in WinUI. Before, the
+  panel kept its old position and could end up past the new edge.
 
 ## 0.12.0 — 2026-11-25
 

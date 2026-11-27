@@ -209,6 +209,9 @@ pub const Menu = struct {
     /// left). Its submenus then try the left side first, so a cascade keeps
     /// one direction instead of zigzagging.
     open_left: bool = false,
+    /// The window's size when this menu was opened (null before the first
+    /// layout). A root menu closes when the window stops matching it.
+    opened_window: ?Rect = null,
 
     pub fn init(allocator: std.mem.Allocator, id: []const u8) !*Menu {
         const self = try allocator.create(Menu);
@@ -331,9 +334,25 @@ pub const Menu = struct {
         }
     }
 
+    fn onBackdropResize(self: *Menu, _: events.Event) void {
+        self.closeIfWindowResized();
+    }
+
+    /// Closes a root menu whose window no longer has the size it was opened
+    /// at. Called from the backdrop's resize report and the tick; opening
+    /// itself resizes the backdrop (0 → its container), which is why this
+    /// compares the window size, not the report.
+    fn closeIfWindowResized(self: *Menu) void {
+        if (self.is_submenu or !self.is_open.peek()) return;
+        const was = self.opened_window orelse return;
+        const now = self.visibleBounds() orelse return;
+        if (@abs(now.w - was.w) > 0.5 or @abs(now.h - was.h) > 0.5) self.close();
+    }
+
     /// Opens at (x, y) exactly — the shared tail of every `popup*` entry point,
     /// after placement has been decided.
     fn openAt(self: *Menu, x: f32, y: f32, origin: events.FocusOrigin) void {
+        self.opened_window = self.visibleBounds();
         self.pos_x.set(x);
         self.pos_y.set(y);
         self.highlighted.set(-1);
@@ -772,6 +791,13 @@ pub const Menu = struct {
             // unnamed Button spanning the whole panel to screen readers/UIA.
             try b.ariaLabel(backdrop, "Close menu");
             if (ctx.router) |r| try r.onNode(backdrop, .click, ctx.handler(self, onDismiss));
+            // Close on a window resize (WinUI does the same): a placement
+            // decided for the old size can now run past an edge. The backdrop
+            // spans its container while open, so it resizes with the window in
+            // the same frame; the tick covers a fixed-size container (a 44 px
+            // caption when only the window height changes).
+            try ctx.onResize(backdrop, ctx.handler(self, onBackdropResize));
+            if (ctx.router) |r| try r.onTick(backdrop, self, closeIfWindowResized);
         }
 
         // Panel: positioned at (x,y); column of rows; clipped (height 0 when closed).
@@ -2414,6 +2440,65 @@ test "MenuBar: in a 44 px caption, the last button's wide menu opens below it, r
     try testing.expectApproxEqAbs(@as(f32, 44), p.y, 0.5);
     try testing.expectApproxEqAbs(b.x + b.width, p.x + p.width, 0.5);
 }
+test "Menu: a window resize closes the open menu; opening it does not" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+    const m = try Menu.init(testing.allocator, "rs");
+    defer m.deinit();
+    try m.addItem("One", "one");
+    const root = try bld.openBox();
+    try bld.width(root, 100, .percent);
+    try bld.height(root, 100, .percent);
+    try m.build(&ctx);
+    bld.close();
+    env.solve(root, 800, 600);
+
+    // Opening grows the backdrop 0 → full; that report must not close it.
+    m.popupWindow(100, 100, .pointer);
+    _ = try env.frame(root, 800, 600);
+    try testing.expect(m.isOpen());
+    _ = env.router.route(.{ .name = "tick", .id = "" });
+    try testing.expect(m.isOpen());
+
+    // Same frame as the resize: the backdrop report closes it.
+    _ = try env.frame(root, 700, 600);
+    try testing.expect(!m.isOpen());
+}
+
+test "Menu: a height-only resize closes a menu in a fixed-height caption by the next tick" {
+    var env = ts.Harness.init(testing.allocator);
+    defer env.deinit();
+    env.wire();
+    var bld = component.UIBuilder.init(&env.registry, &env.store);
+    bld.theme = testTheme();
+    var ctx = component.BuildContext.initWithRouter(&bld, &env.router);
+    const m = try Menu.init(testing.allocator, "cap");
+    defer m.deinit();
+    try m.addItem("One", "one");
+    const root = try bld.openBox();
+    try bld.width(root, 100, .percent);
+    try bld.height(root, 100, .percent);
+    try bld.flexColumn(root);
+    const caption = try bld.openBox();
+    try bld.height(caption, 44, .px);
+    try m.build(&ctx);
+    bld.close();
+    bld.close();
+    env.solve(root, 800, 600);
+
+    m.popupWindow(100, 44, .pointer);
+    _ = try env.frame(root, 800, 600);
+    // The caption (the backdrop's container) keeps 800x44: no resize report.
+    try testing.expectEqual(@as(usize, 0), try env.frame(root, 800, 500));
+    try testing.expect(m.isOpen());
+    _ = env.router.route(.{ .name = "tick", .id = "" });
+    try testing.expect(!m.isOpen());
+}
+
 test "Accelerators: chord lookup respects every modifier" {
     var acc = Accelerators.init(testing.allocator);
     defer acc.deinit();

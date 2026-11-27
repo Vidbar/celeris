@@ -735,8 +735,11 @@ left of / above the pointer. `popupBelow` right-aligns with the anchor or opens
 above it. A submenu cascades to the left of its parent, and its own submenus keep
 going left. If neither side fits, the roomier side is used, and the panel is then
 clamped so it never starts at a negative x or y. A panel larger than the
-window is pinned to its top-left corner and cut. The menu does not scroll, and
-it is not re-placed if the window is resized while it is open.
+window is pinned to its top-left corner and cut. The menu does not scroll. A
+window resize closes an open menu, as WinUI does, because a placement chosen for
+the old size can run past the new edges. It closes in the same frame when the
+Menu's container resizes with the window, and by the next ~500 ms tick when the
+container has a fixed size (a caption, with only the window height changing).
 
 ```zig
 // setup (once):  self.ctx_menu = try fw.menu.Menu.init(gpa, "node_ctx");
