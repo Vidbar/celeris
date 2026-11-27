@@ -93,6 +93,22 @@ pub const debug_step_into = cp(0xEAD4);
 pub const debug_step_out = cp(0xEAD5);
 pub const debug_restart = cp(0xEAD2);
 
+// ── File types ────────────────────────────────────────────────────────────────
+pub const file_code = cp(0xEAE9);
+pub const file_media = cp(0xEAEA);
+pub const file_pdf = cp(0xEAEB);
+pub const file_zip = cp(0xEAEF);
+pub const file_binary = cp(0xEAE8);
+pub const file_text = cp(0xEC5E);
+pub const json = cp(0xEA8B);
+pub const markdown = cp(0xEB1D);
+pub const gear = cp(0xEAF8);
+pub const lock = cp(0xEA75);
+pub const package = cp(0xEB29);
+pub const terminal_bash = cp(0xEBCA);
+pub const book = cp(0xEAA4);
+pub const code = cp(0xEAC4);
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 const std = @import("std");
@@ -137,6 +153,23 @@ test "run/debug icons have their codicon.csv codepoints" {
     try testing.expectEqual(@as(u21, 0xEAD4), try decode(debug_step_into));
     try testing.expectEqual(@as(u21, 0xEAD5), try decode(debug_step_out));
     try testing.expectEqual(@as(u21, 0xEAD2), try decode(debug_restart));
+}
+
+test "file-type icons have their codicon.csv codepoints" {
+    try testing.expectEqual(@as(u21, 0xEAE9), try decode(file_code));
+    try testing.expectEqual(@as(u21, 0xEAEA), try decode(file_media));
+    try testing.expectEqual(@as(u21, 0xEAEB), try decode(file_pdf));
+    try testing.expectEqual(@as(u21, 0xEAEF), try decode(file_zip));
+    try testing.expectEqual(@as(u21, 0xEAE8), try decode(file_binary));
+    try testing.expectEqual(@as(u21, 0xEC5E), try decode(file_text));
+    try testing.expectEqual(@as(u21, 0xEA8B), try decode(json));
+    try testing.expectEqual(@as(u21, 0xEB1D), try decode(markdown));
+    try testing.expectEqual(@as(u21, 0xEAF8), try decode(gear));
+    try testing.expectEqual(@as(u21, 0xEA75), try decode(lock));
+    try testing.expectEqual(@as(u21, 0xEB29), try decode(package));
+    try testing.expectEqual(@as(u21, 0xEBCA), try decode(terminal_bash));
+    try testing.expectEqual(@as(u21, 0xEAA4), try decode(book));
+    try testing.expectEqual(@as(u21, 0xEAC4), try decode(code));
 }
 
 test "embedded codicon.ttf is a valid TrueType blob" {
