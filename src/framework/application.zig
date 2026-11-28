@@ -375,6 +375,9 @@ pub const WindowHost = struct {
             // DWM also clips the corners and strokes their curve, so the root stays
             // square: a radius of ours would never match DWM's clip exactly, and
             // the sliver between the two curves shows the swapchain clear color.
+            // Maximized, DWM drops both its edge and its rounding: the window is
+            // square with no visible edge, so neither line nor radius (see
+            // `outlineFrame`). The maximize-change hook rebuilds on each switch.
             const frame = outlineFrame(
                 c_api.celeris_window_native_side_edges(self.engine_id) != 0,
                 c_api.celeris_window_is_maximized(self.engine_id) != 0,
@@ -502,16 +505,9 @@ pub fn triggerRebuild() void {
 /// C-ABI maximize-change hook (set in runApp): rebuilds so the AppBar's
 /// maximize/restore glyph tracks OS-driven state changes (e.g. drag-to-restore).
 fn onMaximizeChange(engine_id: i32) callconv(.c) void {
-    if (hostForEngine(engine_id)) |h| h.rebuild();
-}
-
-/// The live host driving `engine_id`, or null for an id outside the slot table
-/// or a slot nobody owns. Lets an OS-driven change rebuild the window it
-/// happened to — not always the primary.
-fn hostForEngine(engine_id: i32) ?*WindowHost {
-    if (engine_id <= 0 or engine_id > g_hosts.len) return null;
-    const h = g_hosts[@intCast(engine_id - 1)] orelse return null;
-    return if (h.engine_id == engine_id) h else null;
+    // The window that changed, not always the primary: an overlay's glyph and
+    // outline must follow its own state.
+    if (hostFor(engine_id)) |h| h.rebuild();
 }
 
 /// What the root's outline needs on its frame: a border width and a radius.
@@ -1273,12 +1269,9 @@ test "A maximize change resolves to the host of the window it happened to" {
     const saved = g_hosts[1];
     defer g_hosts[1] = saved;
     g_hosts[1] = &h2;
-    try std.testing.expectEqual(@as(?*WindowHost, &h2), hostForEngine(2));
-    try std.testing.expectEqual(@as(?*WindowHost, null), hostForEngine(0));
-    try std.testing.expectEqual(@as(?*WindowHost, null), hostForEngine(g_hosts.len + 1));
-    // A recycled slot whose host now drives another engine doesn't match.
-    h2.engine_id = 7;
-    try std.testing.expectEqual(@as(?*WindowHost, null), hostForEngine(2));
+    try std.testing.expectEqual(@as(?*WindowHost, &h2), hostFor(2));
+    try std.testing.expectEqual(@as(?*WindowHost, null), hostFor(0));
+    try std.testing.expectEqual(@as(?*WindowHost, null), hostFor(MAX_WINDOWS + 1));
 }
 
 test "Each window slot gets its own build and event trampoline, routing to its own host" {
