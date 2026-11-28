@@ -9,6 +9,17 @@ The C-ABI has its own counter, `CELERIS_ABI_VERSION` in `include/celeris.h`
 exported surface changes; until 1.0 that can include breaking changes, which are
 listed here as well.
 
+## Unreleased
+
+No C-ABI change.
+
+- **Fix: square outline on a maximized window (Win32).** With `window_corners = .round`
+  and a `window_outline`, a maximized window drew its hairline with the rounded radius,
+  leaving clear-color dots in the four corners. A maximized window now gets neither
+  outline nor radius (it has no visible edge), and both come back on restore.
+- **Fix: secondary windows rebuild on an OS-driven maximize/restore.** The change hook
+  rebuilt only the primary window, so an overlay's maximize glyph and outline went stale.
+
 ## 0.14.0 — 2026-11-27
 
 No C-ABI change.
